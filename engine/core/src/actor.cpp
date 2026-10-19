@@ -1,5 +1,6 @@
 #include "bb/actor.h"
 #include "bb/bze.h"
+#include "bb/tb_actor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -162,6 +163,7 @@ Tod parseTod(std::span<const uint8_t> d, size_t off) {
 }
 
 void applyTodFrame(AnimState& st, const Tod& tod, size_t frame) {
+    if (tod.packed) return applyTbFrame(st, tod, frame);
     std::vector<TodPart>& parts = st.parts;
     // Packets address the k-th part of the list as it was at frame start; an empty list is searched by id.
     std::vector<uint32_t> snap;
@@ -304,6 +306,7 @@ void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t,
             if (am.object != uint32_t(st.parts[i].object)) continue;
             Mesh& m = out.emplace_back();
             m.texture = am.mesh.texture;
+            m.textureAnim = am.mesh.textureAnim;
             m.blend = am.mesh.blend;
             m.twoSided = am.mesh.twoSided;
             m.vertices = am.mesh.vertices;

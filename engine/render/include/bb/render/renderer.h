@@ -30,13 +30,23 @@ struct WindowConfig {
 
 struct Settings {
     Fidelity fidelity = Fidelity::Enhanced;
-    float vfovDeg = 60.0f;   // vertical FOV at 4:3 (Hor+ for wider). Original value: Research Required
+    float vfovDeg = 60.0f;   // Enhanced: user vertical FOV at 4:3 (Hor+ for wider aspects)
     bool pillarbox = true;   // Original mode only: draw 3D in a centered 4:3 viewport
     bool msaa = true;        // Enhanced mode only
     bool fog = true;
     float fogStart = 30.0f, fogEnd = 120.0f; // linear fog, view-space distance; fogEnd <= fogStart disables
     float fogColor[3] = {0.45f, 0.6f, 0.85f};
     float zNear = 0.1f, zFar = 2000.0f;
+    // Projection FOV for both backends. Original Fidelity is fixed to the exes' 51.28° (camera.h); its 4:3 pillarbox
+    // gives the original framing, and without the pillarbox wider windows get Hor+ (the exe would stretch instead).
+    // Enhanced keeps the user setting (default 60°, wider than the original by choice) with Hor+.
+    float vfovRad() const { return fidelity == Fidelity::Original ? kOriginalVFovRad : glm::radians(vfovDeg); }
+    // Vertex rgb multiplier and texel gamma for both backends. Original Fidelity = the PC exes' GL path: colour bytes
+    // /255 (no doubling) and Scene::pcTexGamma on texels, measured against the originals (RUNTIME_REFERENCE.md §7).
+    // Enhanced: the scene's PS1 modulation (Scene::colorScale, texel·colour/128, the brighter console look) and
+    // linear texels, by choice.
+    float colorScale(float sceneScale) const { return fidelity == Fidelity::Original ? 1.0f : sceneScale; }
+    float texGamma(float sceneGamma) const { return fidelity == Fidelity::Original ? sceneGamma : 1.0f; }
 };
 
 // CPU helpers shared with other backends.
@@ -116,8 +126,8 @@ private:
 
     uint32_t prog3D_ = 0, prog2D_ = 0;
     int uViewProj_ = -1, uView_ = -1, uAlphaRef_ = -1, uFog_ = -1, uFogColor_ = -1, uAdditive_ = -1, uScreen_ = -1,
-        uColorScale_ = -1;
-    float colorScale_ = 1.0f;
+        uColorScale_ = -1, uTexGamma_ = -1;
+    float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
     uint32_t sampNearest_ = 0, sampTrilinear_ = 0, sampUiNearest_ = 0, sampUiLinear_ = 0;
     uint32_t white_ = 0, font_ = 0;
 

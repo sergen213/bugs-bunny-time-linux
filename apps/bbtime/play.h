@@ -3,6 +3,7 @@
 // and camera interpolated between the last two ticks, simulation unchanged).
 #pragma once
 #include "bb/game/lit_world.h"
+#include "bb/game/tb_world.h"
 #include "bb/render/camera.h"
 
 #include <SDL3/SDL.h>
@@ -24,6 +25,10 @@ struct KeyMap {
 };
 KeyMap makeKeyMap(const std::map<std::string, std::string>& bindings, std::vector<std::string>* warnings);
 bb::game::PadInput readPad(const KeyMap& map, SDL_Gamepad* pad);
+// Time Busters keyboard tables: bblit2.exe config.pc defaults 0x415fd0 (GAMEPLAY.md §2.3). P1: arrows, A L1 (call
+// friend), D/F L2/R2, S R1 (switch), W △, Q ○, E ✕, R □, Tab select (Esc stays the app's back key) + Space ✕ /
+// LCtrl □ aliases; P2: keypad 8/5/6/4, L L1, ; ' L2/R2, K R1, O △, I ○, P ✕, [ □, RCtrl select, RShift start.
+KeyMap tbKeyMap(int player);
 
 // --autoplay "KEYS*TICKS,...": KEYS from U D L R (d-pad), X ✕, S □, C ○, T △, 1 L1, 2 L2, 3 R1, 4 R2, - none.
 // e.g. "-*10,U*60,X*8". nullopt on a syntax error.
@@ -45,6 +50,26 @@ struct Play {
 
 private:
     Snap snap() const { return {world.cam.eye, world.cam.target, world.p.pos, world.p.yaw, world.p.lean}; }
+};
+
+// TB play mode: view of the bb_game TbWorld (both characters, camera), interpolated like Play.
+struct TbPlay {
+    struct Snap { bb::game::V3 eye, look; std::array<bb::game::V3, 2> pos; std::array<int16_t, 2> yaw{}, roll{}; };
+    bb::game::TbWorld world;
+    Snap prev, cur;
+    bool freeFly = false;
+
+    explicit TbPlay(bb::game::TbWorld w) : world(std::move(w)) { prev = cur = snap(); }
+    void tick(const bb::game::PadInput& p1, const bb::game::PadInput& p2) { prev = cur; world.tick(p1, p2); cur = snap(); }
+    Snap view(float a, bool interpolate) const;
+    bb::render::Camera camera(float a, bool interpolate) const;
+
+private:
+    Snap snap() const {
+        const auto& b = world.actors[0];
+        const auto& t = world.actors[1];
+        return {world.cam.eye, world.cam.look, {b.pos, t.pos}, {b.yaw, t.yaw}, {b.roll, t.roll}};
+    }
 };
 
 } // namespace bbtime

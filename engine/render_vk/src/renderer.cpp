@@ -49,8 +49,9 @@ struct Push3D {
     glm::vec2 fog;
     float alphaRef;
     uint32_t flags, tex, samp;
+    float texGamma;  // Settings::texGamma (1 = off)
 };
-static_assert(sizeof(Push3D) == 120 && offsetof(Push3D, alphaRef) == 104);
+static_assert(sizeof(Push3D) == 124 && offsetof(Push3D, alphaRef) == 104);
 
 void check(VkResult r, const char* what) {
     if (r != VK_SUCCESS) throw std::runtime_error(std::format("{} failed (VkResult {})", what, int(r)));
@@ -823,6 +824,7 @@ void Renderer::uploadScene(const Scene& scene) {
     check(vkDeviceWaitIdle(device_), "vkDeviceWaitIdle");
     freeScene();
     colorScale_ = scene.colorScale;
+    texGamma_ = scene.pcTexGamma;
 
     std::vector<std::vector<uint8_t>> bled;
     std::vector<TexSrc> srcs;
@@ -999,9 +1001,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     clipFix[3][2] = 0.5f;
     const glm::mat4 view = cam.view();
     Push3D pc{};
-    pc.viewProj = clipFix * render::projection(glm::radians(s.vfovDeg), float(vp.w) / float(vp.h), s.zNear, s.zFar) * view;
+    pc.viewProj = clipFix * render::projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, s.zFar) * view;
     pc.viewZ = glm::vec4(view[0][2], view[1][2], view[2][2], view[3][2]);
-    pc.fogColorScale = glm::vec4(s.fogColor[0], s.fogColor[1], s.fogColor[2], colorScale_);
+    pc.fogColorScale = glm::vec4(s.fogColor[0], s.fogColor[1], s.fogColor[2], s.colorScale(colorScale_));
+    pc.texGamma = s.texGamma(texGamma_);
     pc.fog = s.fog ? glm::vec2(s.fogStart, s.fogEnd) : glm::vec2(0.0f);
     pc.samp = original ? kSampNearest : kSampTrilinear;
     vkCmdPushConstants(cb, layout_, kPushStages, 0, sizeof pc, &pc);

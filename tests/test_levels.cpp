@@ -38,7 +38,7 @@ int main() {
     const fs::path root = env;
 
     // LiT: 167 files; 79 have world geometry (MODELS.md §9).
-    uint64_t tris = 0, faces = 0, missingFaces = 0;
+    uint64_t tris = 0, faces = 0, missingFaces = 0, worldMissing = 0, linked = 0;
     size_t files = 0, withWorld = 0, textures = 0, texErrors = 0, props = 0, spawns = 0, meshes = 0;
     for (const fs::path& p : bzes(root / "lit/Datas/bze")) {
         ++files;
@@ -47,6 +47,23 @@ int main() {
             CHECK(!s.placeholder, "{}", p.string());
             withWorld += s.stats.worldModels > 0;
             tris += s.stats.triangles, faces += s.stats.faces, missingFaces += s.stats.missingTextureFaces;
+            worldMissing += s.stats.worldMissingTextureFaces, linked += s.stats.linkedFaces;
+            for (const bb::TextureAnim& a : s.textureAnims) {
+                CHECK(!a.frames.empty() && a.startFrame < a.frames.size() && a.holdTicks > 0, "{} link {}", p.string(), a.linkId);
+                for (int32_t f : a.frames) CHECK(f >= 0 && size_t(f) < s.textures.size(), "{} link {}", p.string(), a.linkId);
+            }
+            if (p.stem() == "L04C3") CHECK(s.stats.linkedFaces >= 176, "L04C3 conveyor links: {}", s.stats.linkedFaces);
+            // Link timing observed in the original (WineRef alias-table traces, GAMEPLAY_STATUS.md): L04C3 type-20
+            // conveyors 9 / 11 advance every 3 / 2 ticks; L02A1 type-2 shimmer 16 = flipbook list 5 x 2 ticks + 30.
+            auto link = [&](uint32_t id) {
+                const auto a = std::ranges::find_if(s.textureAnims, [&](const bb::TextureAnim& x) { return x.linkId == id; });
+                return a == s.textureAnims.end() ? nullptr : &*a;
+            };
+            if (p.stem() == "L04C3") CHECK(link(9) && link(9)->holdTicks == 3 && link(11) && link(11)->holdTicks == 2, "L04C3 holds");
+            if (p.stem() == "L02A1")
+                CHECK(link(16) && link(16)->frames.size() == 40 && link(16)->holdTicks == 1 && !link(16)->timingInferred &&
+                          link(16)->frames[9] != link(16)->frames[10] && link(16)->frames[10] == link(16)->frames[39],
+                      "L02A1 link 16 flipbook");
             textures += s.textures.size(), texErrors += s.stats.textureErrors, props += s.stats.props;
             spawns += bool(s.spawn);
             meshes += s.meshes.size();
@@ -54,6 +71,7 @@ int main() {
             for (const bb::Mesh& m : s.meshes) {
                 idx += m.indices.size();
                 CHECK(m.texture < int32_t(s.textures.size()), "{} {}", p.string(), m.name);
+                CHECK(m.textureAnim < int32_t(s.textureAnims.size()), "{} {}", p.string(), m.name);
                 for (uint32_t i : m.indices) CHECK(i < m.vertices.size(), "{} {}", p.string(), m.name);
                 for (const bb::Vertex& v : m.vertices)
                     CHECK(std::isfinite(v.pos[0]) && std::isfinite(v.pos[1]) && std::isfinite(v.pos[2]), "{}", m.name);
@@ -68,11 +86,12 @@ int main() {
         }
     }
     std::println("LiT: {} files, {} with world geometry, {} faces, {} triangles, {} meshes, {} textures "
-                 "({} undecodable), {} missing-texture faces, {} props, {} player starts",
-                 files, withWorld, faces, tris, meshes, textures, texErrors, missingFaces, props, spawns);
+                 "({} undecodable), {} undrawn alias-0 faces ({} world), {} linked faces, {} props, {} player starts",
+                 files, withWorld, faces, tris, meshes, textures, texErrors, missingFaces, worldMissing, linked, props, spawns);
     CHECK(files == 167 && withWorld == 79, "files {} world {}", files, withWorld);
     CHECK(texErrors == 2, "only the 24-bit TIM 217 in L03B and L03b_8 is undecodable: {}", texErrors);
     CHECK(faces >= 168963, "world faces from MODELS.md §9 (168963) plus props: {}", faces);
+    CHECK(worldMissing == 0, "every world face id is a TIM or a texture link (TEXTURE_GAP.md §3): {}", worldMissing);
 
     // Corrupt input must throw, never crash (run under ASan/UBSan): flip bytes in L01a's section data.
     const std::vector<uint8_t> good = bb::readFile(root / "lit/Datas/bze/L01a.bze");

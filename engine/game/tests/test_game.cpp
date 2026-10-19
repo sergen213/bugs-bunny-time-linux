@@ -3,6 +3,7 @@
 #include "bb/game/lit_world.h"
 #include "bb/level.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -135,6 +136,66 @@ void testFall() {
     }
 }
 
+// Logic VM opcodes (LOGIC.md §4/§5) and the type-14 / director item dialects on synthetic data.
+void testLogic() {
+    LitWorld w = synthetic(block({}, {0}), {2600, 0, 2600}, 0);
+    auto C = [&](uint8_t c, uint8_t a, uint8_t b) { return w.cond({c, a, b, 0, 0, 0}, nullptr); };
+    auto A = [&](uint8_t act, uint16_t x, uint16_t y) { w.act({0, 0, 0, act, x, y}, nullptr); };
+    w.S[9] = 0xfe;
+    assert(C(1, 0xfe, 9) && !C(1, 0xfd, 9) && C(70, 0xfd, 9) && !C(3, 0xff, 9) && C(5, 0xfe, 9));  // signed/unsigned
+    w.G[7] = 255;
+    A(4, 0, 7);  // incg on index 7 carries into G[0xfc] (16-bit golden-carrot total)
+    assert(w.goldenCarrots() == 256 && w.G[7] == 0 && w.G[0xfc] == 1);
+    A(19, 255, 7);  // movgi does not special-case index 7
+    assert(w.G[7] == 255 && w.G[0xfc] == 1);
+    A(23, 5, 120);  // incgg
+    assert(w.G[5] == 1 && w.G[120] == 1);
+    w.G[1] = 4;
+    A(48, 0, 3);  // gvcrt: health first
+    A(48, 0, 3);
+    A(48, 0, 3);
+    assert(w.G[1] == 6 && w.G[3] == 1);
+    w.G[0x0e] = 5;
+    A(42, 0, 0);
+    assert(w.nextLevel == 5);
+    w.nextLevel = -1;
+    w.G[30] = 0b101;
+    A(60, 3, 30);  // one golden carrot per clear bit among the first 3
+    assert(w.goldenCarrots() == 0x1ff + 1);
+    w.p.timer = 61;
+    assert(C(22, 60, 0) && C(25, 1, 0) && !C(26, 2, 0));
+    w.S[40] = 3;
+    A(29, 0, 40);  // countdown: > 1 s elapsed -> S[Y]--, timer reset
+    assert(w.S[40] == 2 && w.p.timer == 0);
+    w.p.flags14 = 0x10;
+    w.p.flags18 = 4;
+    assert(C(82, 4, 0) && C(82, 0, 0x10) && C(83, 1, 1) && !C(83, 4, 0));
+    w.pad.raw = PadCross | PadLeft;
+    assert(C(57, 0x84, 0) && !C(57, 0x01, 0) && C(80, 0x01, 0));
+
+    // Type-14 pickup idiom: touched (flags14 0x8000) -> A12 sets the collected bit, item flag 0x2000000 kills it.
+    ActorDef pick;
+    pick.chunk = 7, pick.type = 14, pick.entityId = 900, pick.pos = {2600, 0, 3000};
+    pick.states = {{1, {1, -16, -16, -16, -16}}};
+    pick.steps = {{1, 0, 1, 5, 0x1, 0, {}}};
+    pick.items = {{5, 0, 0x8000, 0, {0, 0, 0, 12, 1, 20}, 0x2000000, 0, 0}};
+    // Director: C2 G[10] == 1 -> level change to P1.
+    ActorDef dir;
+    dir.chunk = 0x0a, dir.type = 16, dir.entityId = 901;
+    dir.items = {{0, 0, 0, 0, {2, 1, 10, 0, 0, 0}, 0x80000, 7, 0}};
+    w.defs = {pick, dir};
+    w.start({2600, 0, 2600}, 0);
+    w.tick({});
+    assert(w.actors.size() == 2 && !w.actors[0].dead && w.G[20] == 0 && w.nextLevel == -1);
+    w.actors[0].flags14 |= 0x8000;
+    w.tick({});
+    assert(w.actors[0].dead && (w.G[20] & 1));
+    w.G[10] = 1;
+    w.tick({});
+    assert(w.nextLevel == 7);
+    std::printf("logic VM + item dialects ok\n");
+}
+
 void testTables(const std::filesystem::path& data) {
     const auto exe = data / "lit/Datas/bin/bugs.exe";
     if (!std::filesystem::exists(exe)) return;
@@ -149,15 +210,25 @@ void testTables(const std::filesystem::path& data) {
     std::printf("sin/cos tables match bugs.exe\n");
 }
 
-// Scripted replay on L01a: idle 10 ticks, run forward 60, jump; positions stay on the heightfield.
-std::vector<V3> replayL01a(const BzeFile& bze, const ActorModel* model) {
-    LitWorld w = LitWorld::load(bze, model);
+// Scripted replay on L01a: the level-start walk-in (director -> template 246 carries Bugs in state 130 to actor 49,
+// then state 1; original: state 130 from counter 5 to 71 = ticks ~2..35, WineRef trace), then run forward 60 ticks
+// and jump; positions stay on the heightfield. Camera (RUNTIME_REFERENCE.md §3): the load update snaps it to Bugs,
+// then the type-36 director's eye point (23610, -1000, 11550) is approached >> 2 (original rests at 23613 -1000
+// 11550, target y = Bugs - 400) with flags 0x440.
+std::vector<V3> replayL01a(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.loadUpdate();
+    assert(w.p.initialised && w.cam.target == (V3{w.p.pos.x, w.p.pos.y - 400, w.p.pos.z}));  // never the origin
     std::vector<V3> trace;
-    for (int t = 0; t < 120; ++t) {
+    int t130 = -1, t1 = -1;
+    for (int t = 0; t < 160; ++t) {
         PadInput in;
-        if (t >= 10 && t < 70) in.buttons = PadUp;
-        if (t >= 70 && t < 90) in.buttons = PadCross;
+        if (t >= 50 && t < 110) in.buttons = PadUp;
+        if (t >= 110 && t < 130) in.buttons = PadCross;
         w.tick(in);
+        if (t == 30) assert(w.cam.eye == (V3{23613, -1000, 11550}) && w.cam.flags == 0x440 && w.cam.target.y == w.p.pos.y - 400);
+        if (w.p.state == 130 && t130 < 0) t130 = t;
+        if (w.p.state == 1 && t130 >= 0 && t1 < 0) t1 = t;
         trace.push_back(w.p.pos);
         if ((w.p.flags14 & 2) && !(w.p.flags14 & 1)) assert(w.p.pos.y - w.groundY() >= -1 && w.p.pos.y - w.groundY() <= 100);
         V3 q = w.p.pos;
@@ -165,34 +236,77 @@ std::vector<V3> replayL01a(const BzeFile& bze, const ActorModel* model) {
         g.zone = w.p.zone;
         w.hf.groundAt(q, g);
         assert(!(g.kind & KindBlocked));  // never inside a wall
-        if (t == 9) std::printf("L01a spawn settle: pos %d %d %d state %u ground %d\n", w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.state, w.groundY());
     }
+    std::printf("L01a walk-in: state 130 from tick %d, state 1 from tick %d, pos after %d %d %d\n", t130, t1, trace[45].x,
+                trace[45].y, trace[45].z);
     std::printf("L01a after replay: pos %d %d %d state %u carrots %d health %d\n", w.p.pos.x, w.p.pos.y, w.p.pos.z,
                 w.p.state, w.carrots(), w.health());
-    const V3 a = trace[9], b = trace[69];
-    assert(std::abs(b.x - a.x) + std::abs(b.z - a.z) > 1500);  // ran ~50 u/tick for 60 ticks (minus accel/walls)
+    assert(t130 >= 0 && t130 <= 5 && t1 >= 25 && t1 <= 45);
+    const V3 a = trace[49], b = trace[109];
+    assert(std::abs(b.x - a.x) + std::abs(b.z - a.z) > 800);  // runs (accel, camera-relative steering, actor boxes in the way)
     return trace;
 }
 
-// Walk through the first L01a carrot from 300 units in front of it: it is taken, carrots counted (health 6/6).
-void testCarrot(const BzeFile& bze) {
-    LitWorld w = LitWorld::load(bze);
-    const auto it = std::ranges::find_if(w.pickups, [](const Pickup& k) { return k.kind == PickupKind::Carrot; });
-    assert(it != w.pickups.end());
-    std::printf("L01a pickups: %zu (first carrot at %d %d %d)\n", w.pickups.size(), it->pos.x, it->pos.y, it->pos.z);
-    w.start({it->pos.x, it->pos.y, it->pos.z - 300}, 0, w.p.zone);
-    for (int t = 0; t < 30; ++t) {
-        w.tick({.buttons = uint16_t(t > 2 ? PadUp : 0)});
-        if (std::getenv("BBTIME_GAME_DEBUG")) std::printf("  t%d pos %d %d %d state %u\n", t, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.state);
+// Walk through the first L01a carrot (type 14, touched -> spawn fx template whose clip end runs A48 gvcrt): it
+// is collected and counted (health 6/6 -> carrots +1).
+void testCarrot(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    auto isCarrot = [&](const LitActor& a) {
+        return a.type == 14 && std::ranges::any_of(w.defs[size_t(a.def)].items, [&](const ActorItem& it) {
+            if (it.item.act != 12 || !(it.flags & 0x40100)) return false;
+            return std::ranges::any_of(w.defs, [&](const ActorDef& t) {
+                return t.chunk == 8 && t.entityId == uint16_t(it.p2) &&
+                       std::ranges::any_of(t.items, [](const ActorItem& j) { return j.item.act == 48; });
+            });
+        });
+    };
+    const auto it = std::ranges::find_if(w.actors, isCarrot);
+    assert(it != w.actors.end());
+    const size_t idx = size_t(it - w.actors.begin());
+    const V3 at = it->pos;
+    std::printf("L01a: %zu actors, first carrot #%zu at %d %d %d\n", w.actors.size(), idx, at.x, at.y, at.z);
+    w.G[18] |= 0x80;  // as when coming back from L01B: the start director skips the walk-in (C31 G[18] & 0x80)
+    w.start({at.x, at.y, at.z - 300}, 0, w.p.zone);
+    for (int t = 0; t < 90; ++t) {
+        w.tick({.buttons = uint16_t(t > 2 && t < 30 ? PadUp : 0)});
+        if (std::getenv("BBTIME_GAME_DEBUG")) std::printf("  t%d pos %d %d %d state %u carrot act %d dead %d cls %u box %d %d %d %d %d %d\n", t, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.state, w.actors[idx].active, w.actors[idx].dead, w.defs[size_t(w.actors[idx].def)].cls, w.actors[idx].box[0], w.actors[idx].box[1], w.actors[idx].box[2], w.actors[idx].box[3], w.actors[idx].box[4], w.actors[idx].box[5]);
     }
-    std::printf("carrots %d\n", w.carrots());
-    assert(w.carrots() >= 1 && it->taken);
+    std::printf("carrots %d, unsupported:", w.carrots());
+    for (const std::string& u : w.unsupported) std::printf(" %s", u.c_str());
+    std::printf("\n");
+    assert(w.carrots() >= 1 && w.actors[idx].dead);
+}
+
+// L01a level exit (zone trigger flag 0x80000 -> level 5 = L01B, GAMEPLAY §1.2): Bugs placed on the ground at the
+// trigger box centre requests the change deterministically.
+int testExit(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    const auto tr = std::ranges::find_if(w.triggers, [](const Trigger& t) {
+        return std::ranges::any_of(t.entries, [](const TriggerEntry& e) { return e.flags & 0x80000; });
+    });
+    assert(tr != w.triggers.end());
+    const V3 c = rotY(tr->rotY, tr->sizeX / 2, 0, tr->sizeZ / 2);
+    const V3 centre{tr->pos.x + c.x, tr->pos.y, tr->pos.z + c.z};
+    V3 from{centre.x, centre.y - 300, centre.z};
+    Ground g;
+    g.zone = -1;
+    w.hf.groundAt(from, g);
+    from.y = g.groundY;
+    const int16_t yaw = int16_t(tr->rotY);
+    w.G[18] |= 0x80;  // skip the level-start walk-in (see testCarrot)
+    w.start(from, yaw, -1);
+    int t = 0;
+    for (; t < 150 && w.nextLevel < 0; ++t) w.tick({});
+    std::printf("L01a exit: from %d %d %d -> nextLevel %d (%s) after %d ticks\n", from.x, from.y, from.z, w.nextLevel,
+                LitWorld::levelName(w.nextLevel).c_str(), t);
+    assert(w.nextLevel == 5 && LitWorld::levelName(5) == "L01B");
+    return t;
 }
 
 // Health 0 -> death state (HUD 0x44acc0), clip end -> respawn at the checkpoint with health 6 (§3.6). L01a's
 // start trigger sets the checkpoint (flag 0x100000) to (23700, -640, 9655).
-void testDeath(const BzeFile& bze, const ActorModel* model) {
-    LitWorld w = LitWorld::load(bze, model);
+void testDeath(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
     const V3 start = w.p.pos;
     for (int t = 0; t < 40; ++t) w.tick({.buttons = uint16_t(t > 5 ? PadUp : 0)});
     assert(w.p.pos != start);
@@ -206,28 +320,31 @@ void testDeath(const BzeFile& bze, const ActorModel* model) {
     assert(!(w.p.flags14 & 0x1000000) && w.p.pos == w.checkpoint() && w.health() == 6);
 }
 
-// Every LiT level with a player + heightfield loads and survives 120 scripted ticks (crash/UB sweep; run under
-// BBTIME_SANITIZE for bounds checks). Prints the logic ops the levels' player rules/triggers hit but we skip.
+// Every LiT level with a player + heightfield loads (with its scene: actors animate) and survives 240 scripted
+// ticks (crash/UB sweep; run under BBTIME_SANITIZE for bounds checks). Prints what the levels' logic hit but we skip.
 void sweep(const std::filesystem::path& dir) {
-    int loaded = 0, skipped = 0;
+    int loaded = 0, skipped = 0, actors = 0;
     std::set<std::string> unsupported;
     for (const auto& e : std::filesystem::directory_iterator(dir)) {
         std::string ext = e.path().extension().string();
         for (char& c : ext) c = char(std::tolower(uint8_t(c)));
         if (ext != ".bze") continue;
+        const BzeFile bze = loadBze(e.path());
+        const Scene scene = buildLitScene(bze, e.path().stem().string());
         LitWorld w;
         try {
-            w = LitWorld::load(loadBze(e.path()));
+            w = LitWorld::load(bze, &scene);
         } catch (const FormatError&) {
             ++skipped;
             continue;
         }
         ++loaded;
-        for (int t = 0; t < 120; ++t)
+        actors += int(w.actors.size());
+        for (int t = 0; t < 240; ++t)
             w.tick({.buttons = uint16_t(t < 10 ? 0 : t < 60 ? PadUp : t < 80 ? PadUp | PadCross : PadRight | PadSquare)});
         unsupported.insert(w.unsupported.begin(), w.unsupported.end());
     }
-    std::printf("sweep: %d levels simulated, %d without player/heightfield; not interpreted:", loaded, skipped);
+    std::printf("sweep: %d levels simulated (%d actors), %d without player/heightfield; not interpreted:", loaded, actors, skipped);
     for (const std::string& u : unsupported) std::printf(" %s", u.c_str());
     std::printf("\n");
     assert(loaded >= 79);  // GAMEPLAY §4.1: 79 LiT BZEs carry chunk 0x36
@@ -241,6 +358,7 @@ int main() {
     testJumpArc();
     testSteps();
     testFall();
+    testLogic();
     const char* env = std::getenv("BBTIME_DATA");
     if (!env || !*env) { std::printf("BBTIME_DATA unset: real-data checks skipped\n"); return 0; }
     const std::filesystem::path data = env;
@@ -248,14 +366,12 @@ int main() {
     const auto file = data / "lit/Datas/bze/L01a.bze";
     if (!std::filesystem::exists(file)) { std::printf("no L01a.bze: skipped\n"); return 0; }
     const BzeFile bze = loadBze(file);
-    testCarrot(bze);
-    sweep(file.parent_path());
     const Scene scene = buildLitScene(bze, "L01A");
-    const ActorModel* model = nullptr;
-    for (const ActorInstance& a : scene.actors)
-        if (a.player) model = &scene.actorModels[a.model];
-    assert(replayL01a(bze, model) == replayL01a(bze, model));  // deterministic
-    testDeath(bze, model);
+    testCarrot(bze, scene);
+    assert(testExit(bze, scene) == testExit(bze, scene));  // deterministic
+    sweep(file.parent_path());
+    assert(replayL01a(bze, scene) == replayL01a(bze, scene));  // deterministic
+    testDeath(bze, scene);
     std::printf("ok\n");
     return 0;
 }

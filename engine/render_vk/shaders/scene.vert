@@ -12,6 +12,7 @@ layout(push_constant) uniform P {
     uint flags;
     uint tex;
     uint samp;
+    float texGamma;
 } pc;
 layout(location = 0) out vec2 vUv;
 layout(location = 1) out vec4 vCol;

@@ -10,12 +10,14 @@
 #include "settings.h"
 
 #include "bb/actor.h"
+#include "bb/audio.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -45,6 +47,7 @@ struct Args {
     Fidelity fidelity = Fidelity::Enhanced;
     int width = 1280, height = 720;
     bool fullscreen = false, hidden = false, mute = false;
+    bool noHud = false;  // --no-hud: no text HUD / diagnostics overlay (clean screenshots for compares)
     fs::path screenshot;
     int frames = 30;
     std::optional<std::array<float, 5>> camera; // x y z yaw pitch (engine space, radians)
@@ -55,6 +58,8 @@ struct Args {
     float fov = 60.0f;
     std::map<std::string, std::string> bindings;  // action -> SDL key names (settings.ini, launcher)
     std::vector<bb::game::PadInput> autoplay;     // --autoplay: one pad input per tick, lockstep rendering
+    std::vector<bb::game::PadInput> autoplay2;    // --autoplay2: TB player 2 (with --players 2)
+    int players = 1;                              // --players: TB 1-player (switching) or 2-player co-op
 };
 
 fs::path defaultDataRoot() {
@@ -66,9 +71,10 @@ fs::path defaultDataRoot() {
 
 constexpr const char* kUsage =
     "usage: bbtime [--data DIR] [--game lit|tb] [--level NAME] [--fidelity original|enhanced]\n"
-    "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute]\n"
+    "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute] [--no-hud]\n"
     "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
     "              [--renderer gl|vk] [--vk-validation] [--autoplay KEYS*TICKS,...]\n"
+    "              [--players 1|2] [--autoplay2 KEYS*TICKS,...]  (TB co-op; autoplay2 = player 2)\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -117,17 +123,23 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         else if (f == "--fullscreen") a.fullscreen = true;
         else if (f == "--hidden") a.hidden = true;
         else if (f == "--mute") a.mute = true;
+        else if (f == "--no-hud") a.noHud = true;
         else if (f == "--renderer") {
             auto v = value();
             ok = v && (*v == "gl" || *v == "vk");
             if (ok) a.vulkan = *v == "vk";
         }
         else if (f == "--vk-validation") a.vkValidation = true;
-        else if (f == "--autoplay") {
+        else if (f == "--autoplay" || f == "--autoplay2") {
             auto v = value();
             auto script = v ? bbtime::parseAutoplay(*v) : std::nullopt;
             ok = bool(script);
-            if (ok) a.autoplay = std::move(*script);
+            if (ok) (f == "--autoplay" ? a.autoplay : a.autoplay2) = std::move(*script);
+        }
+        else if (f == "--players") {
+            auto v = value();
+            ok = v && (*v == "1" || *v == "2");
+            if (ok) a.players = *v == "2" ? 2 : 1;
         }
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
         else if (f == "--camera") {
@@ -228,31 +240,62 @@ struct App {
     float moveSpeed = 8.0f; // units per second, scaled to the scene in enterLevel()
     bb::render::Camera cam, prevCam;
     SDL_Gamepad* pad = nullptr;
+    SDL_Gamepad* pad2 = nullptr;          // TB player 2
     double frameTime = 1.0 / 60.0;
     float alpha = 0.0f;
     uint32_t simTick = 0;                 // 30 Hz ticks since start (texture animation clock)
     std::vector<bb::AnimState> actorAnim; // per Scene::actors (player excluded in play mode)
     std::vector<bb::Mesh> actorMeshes;    // posed every frame
     std::optional<bbtime::Play> play;     // LiT play mode (bb_game simulation)
+    std::optional<bbtime::TbPlay> tbPlay; // TB play mode (bb_game TbWorld: Bugs + Taz)
+    int players = 1;                      // TB 1 or 2 players (Options, --players)
+    bbtime::KeyMap tbKeys[2] = {bbtime::tbKeyMap(0), bbtime::tbKeyMap(1)};
+    size_t autoplay2At = 0;
     std::string playStatus;               // why a LiT level stayed in viewer mode
+    std::vector<bb::AiffSound> litSfx;    // LiT in-level sound bank (LitWorld::sfx indexes it)
     bbtime::KeyMap keys;
     size_t autoplayAt = 0;
 
     Game& game() { return games[gameIdx]; }
 
-    void enterLevel(const std::string& level) {
+    // globals: GAME_DATA carried over a level change (LiT G persists across levels, GAMEPLAY §1.2).
+    void enterLevel(const std::string& level, const std::array<uint8_t, 256>* globals = nullptr) {
         bb::BzeFile bze;
         scene = bb::loadLevelScene(game().id, game().root, level, &bze);
         r.uploadScene(scene);
         actorAnim.assign(scene.actors.size(), {});
         play.reset();
+        tbPlay.reset();
         playStatus.clear();
         if (game().id == GameId::LostInTime && !scene.placeholder) {
-            const bb::ActorModel* model = nullptr;
-            for (const bb::ActorInstance& a : scene.actors)
-                if (a.player) model = &scene.actorModels[a.model];
+            litSfx.clear();  // in-level AIFF bank (section 3), indexed by LitWorld::sfx
+            if (const int i3 = bze.find(3); i3 >= 0) {
+                const std::vector<uint8_t> s3 = bze.payload(size_t(i3));
+                for (std::span<const uint8_t> blob : bb::sfxBank(s3)) {
+                    try { litSfx.push_back(bb::parseAiff(blob)); } catch (const std::exception&) { litSfx.emplace_back(); }
+                }
+            }
             try {
-                play.emplace(bb::game::LitWorld::load(bze, model));
+                bb::game::LitWorld w = bb::game::LitWorld::load(bze, &scene);
+                // Debug: BBTIME_LIT_START="x,y,z" (PS1 units) places Bugs there in the first LiT level entered
+                // (smoke screenshots of far-away spots such as level exits); later levels start normally.
+                static bool litStartUsed = false;
+                if (const char* s = std::getenv("BBTIME_LIT_START"); s && !litStartUsed) {
+                    litStartUsed = true;
+                    bb::game::V3 at{};
+                    if (std::sscanf(s, "%d,%d,%d", &at.x, &at.y, &at.z) == 3) w.start(at, 0, -1);
+                }
+                if (globals) w.G = *globals;
+                w.loadUpdate();  // as 0x430f80: player + camera initialised before the first rendered frame
+                play.emplace(std::move(w));
+            } catch (const std::exception& e) {
+                playStatus = std::format("viewer only: {}", e.what());
+            }
+        }
+        if (game().id == GameId::TimeBusters && !scene.placeholder) {
+            try {
+                tbPlay.emplace(bb::game::TbWorld::load(bze, scene));
+                tbPlay->world.setTwoPlayer(players == 2);
             } catch (const std::exception& e) {
                 playStatus = std::format("viewer only: {}", e.what());
             }
@@ -297,12 +340,13 @@ struct App {
         s.zFar = s.fogEnd * 1.05f;
         moveSpeed = std::max(8.0f, radius * 0.05f);
         if (play) cam = play->camera(1.0f, false);
+        if (tbPlay) cam = tbPlay->camera(1.0f, false);
         prevCam = cam;
         screen = Screen::Level;
-        SDL_SetWindowRelativeMouseMode(r.window(), !play);
+        SDL_SetWindowRelativeMouseMode(r.window(), !play && !tbPlay);
     }
 
-    bool freeCamera() const { return !play || play->freeFly; }
+    bool freeCamera() const { return play ? play->freeFly : tbPlay ? tbPlay->freeFly : true; }
 
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
@@ -322,8 +366,8 @@ struct App {
             }
             break;
         case Screen::Options:
-            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 7) % 7;
-            else if (a == Action::Back || (a == Action::Accept && optSel == 6)) screen = Screen::Main;
+            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 8) % 8;
+            else if (a == Action::Back || (a == Action::Accept && optSel == 7)) screen = Screen::Main;
             else if (a != Action::Back) changeOption(a == Action::Left ? -1 : 1);
             break;
         case Screen::Game: {
@@ -349,6 +393,7 @@ struct App {
         case 3: s.msaa = !s.msaa; break;
         case 4: vsync = !vsync; r.setVsync(vsync); break;
         case 5: fullscreen = !fullscreen; r.setFullscreen(fullscreen); break;
+        case 6: players = 3 - players; break;  // applies when the next TB level starts
         }
     }
 
@@ -357,9 +402,11 @@ struct App {
         case SDL_EVENT_QUIT: running = false; break;
         case SDL_EVENT_GAMEPAD_ADDED:
             if (!pad) pad = SDL_OpenGamepad(e.gdevice.which);
+            else if (!pad2) pad2 = SDL_OpenGamepad(e.gdevice.which);
             break;
         case SDL_EVENT_GAMEPAD_REMOVED:
             if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = nullptr; }
+            if (pad2 && SDL_GetGamepadID(pad2) == e.gdevice.which) { SDL_CloseGamepad(pad2); pad2 = nullptr; }
             break;
         case SDL_EVENT_MOUSE_MOTION:
             if (screen == Screen::Level && freeCamera()) {
@@ -370,7 +417,7 @@ struct App {
             }
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-            if (screen == Screen::Level && play) { // every other button is a game button (play.cpp)
+            if (screen == Screen::Level && (play || tbPlay)) { // every other button is a game button (play.cpp)
                 if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) menu(Action::Back);
                 break;
             }
@@ -397,6 +444,10 @@ struct App {
                     play->freeFly = !play->freeFly;
                     if (play->freeFly) prevCam = cam = play->camera(alpha, s.fidelity == Fidelity::Enhanced);
                     SDL_SetWindowRelativeMouseMode(r.window(), play->freeFly);
+                } else if (k == SDLK_F1 && tbPlay) {
+                    tbPlay->freeFly = !tbPlay->freeFly;
+                    if (tbPlay->freeFly) prevCam = cam = tbPlay->camera(alpha, s.fidelity == Fidelity::Enhanced);
+                    SDL_SetWindowRelativeMouseMode(r.window(), tbPlay->freeFly);
                 }
             }
             else if (k == SDLK_UP || k == SDLK_W) menu(Action::Up);
@@ -417,7 +468,7 @@ struct App {
         if (screen != Screen::Level) return;
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
-            if (a.chunk == 8 || (play && a.player)) continue; // templates are not placed; Bugs is the simulation's
+            if (a.chunk == 8 || ((play || tbPlay) && a.player)) continue; // templates are not placed; players are simulated
             bb::animTick(scene.actorModels[a.model], actorAnim[i], a.anim, actorAnim[i].parts.empty() ? bb::AnimLoop : 0);
         }
         if (play) {
@@ -425,7 +476,26 @@ struct App {
             if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
             else if (!play->freeFly) in = bbtime::readPad(keys, pad);
             play->tick(in);
+            if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice())
+                for (uint16_t b : play->world.sfx)
+                    if (b < litSfx.size() && !litSfx[b].pcm.empty()) dev->playSfx(litSfx[b]);
+            if (const int next = play->world.nextLevel; next >= 0) {  // level change request (GAMEPLAY §1.2)
+                const auto globals = play->world.G;                   // GAME_DATA persists across levels
+                const std::string name = bb::game::LitWorld::levelName(next);
+                std::printf("level change -> %d %s\n", next, name.c_str());
+                try { enterLevel(name, &globals); } catch (const std::exception& e) { play.reset(); playStatus = e.what(); }
+                return;
+            }
             if (!play->freeFly) return;
+        }
+        if (tbPlay) {
+            bb::game::PadInput p1, p2;
+            if (autoplayAt < args.autoplay.size()) p1 = args.autoplay[autoplayAt++];
+            else if (!tbPlay->freeFly) p1 = bbtime::readPad(tbKeys[0], pad);
+            if (autoplay2At < args.autoplay2.size()) p2 = args.autoplay2[autoplay2At++];
+            else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
+            tbPlay->tick(p1, p2);
+            if (!tbPlay->freeFly) return;
         }
         const bool* key = SDL_GetKeyboardState(nullptr);
         glm::vec3 move(0.0f); // x = right, y = up, z = forward
@@ -491,12 +561,14 @@ struct App {
             r.drawText(float(16 * sc), H * 0.3f - float(24 * sc), sc * 2, "OPTIONS", kYellow);
             list(float(16 * sc), H * 0.3f,
                  {std::format("Renderer mode:  {}", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"),
-                  std::format("Vertical FOV:   {:.0f} deg (Hor+)", s.vfovDeg),
+                  std::format("Vertical FOV:   {:.0f} deg (Hor+, Enhanced; Original 51.28)", s.vfovDeg),
                   std::format("4:3 pillarbox:  {} (Original mode)", onoff(s.pillarbox)),
                   std::format("MSAA:           {} (x{}, Enhanced mode)", onoff(s.msaa), r.msaaSamples()),
                   std::format("VSync:          {}", onoff(vsync)),
-                  std::format("Fullscreen:     {}", onoff(fullscreen)), "Back"},
-                 optSel, 0, 7);
+                  std::format("Fullscreen:     {}", onoff(fullscreen)),
+                  std::format("TB players:     {} ({})", players, players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend"),
+                  "Back"},
+                 optSel, 0, 8);
             break;
         }
         case Screen::Game: {
@@ -516,7 +588,7 @@ struct App {
             const bool lerp = s.fidelity == Fidelity::Enhanced;
             bb::render::Camera c = cam;
             if (!freeCamera()) {
-                c = play->camera(alpha, lerp);
+                c = play ? play->camera(alpha, lerp) : tbPlay->camera(alpha, lerp);
             } else {
                 c.pos = glm::mix(prevCam.pos, cam.pos, alpha);
                 c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
@@ -524,7 +596,8 @@ struct App {
             }
             poseActors(lerp);
             r.drawScene(c, s);
-            if (play) drawHud();
+            if (play && !args.noHud) drawHud();
+            if (tbPlay && !args.noHud) drawTbHud();
             if (scene.placeholder) {
                 const std::string_view msg =
                     scene.notes.empty() ? std::string_view("PLACEHOLDER - not original data") : std::string_view(scene.notes.front());
@@ -546,17 +619,29 @@ struct App {
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
             if (a.chunk == 8) continue;
+            if (tbPlay && a.player) {
+                const size_t k = a.entityId == 2 ? 0 : 1;
+                const auto v = tbPlay->view(alpha, lerp);
+                bb::poseActor(scene.actorModels[a.model], tbPlay->world.actors[k].anim, {v.pos[k].x, v.pos[k].y, v.pos[k].z},
+                              {0, v.yaw[k], v.roll[k]}, a.scale, actorMeshes);
+                continue;
+            }
             if (play && a.player) {
                 const auto v = play->view(alpha, lerp);
                 bb::poseActor(scene.actorModels[a.model], play->world.p.animState, {v.player.x, v.player.y, v.player.z},
                               {0, v.yaw, v.lean}, a.scale, actorMeshes);
                 continue;
             }
-            if (play && std::ranges::any_of(play->world.pickups, [&](const bb::game::Pickup& k) {
-                    return k.taken && k.scriptOffset == a.scriptOffset; }))
-                continue;
+            if (play) continue;  // the simulation's actors are drawn below
             bb::poseActor(scene.actorModels[a.model], actorAnim[i], a.pos, a.rot, a.scale, actorMeshes);
         }
+        if (play)
+            for (const bb::game::LitActor& a : play->world.actors) {
+                const int32_t m = play->world.defs[size_t(a.def)].model;
+                if (a.dead || !a.visible || m < 0 || a.animState.parts.empty()) continue;
+                bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
+                              {a.rot[0], a.yaw, a.rot[2]}, a.scale, actorMeshes);
+            }
         r.setActorMeshes(actorMeshes);
     }
 
@@ -575,6 +660,23 @@ struct App {
         if (play->freeFly) r.drawText(x, y - float(26 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
     }
 
+    // TB text HUD: who has the camera/control, mode, call-friend readiness (the original sprite HUD is not ported).
+    void drawTbHud() {
+        const bb::game::TbWorld& w = tbPlay->world;
+        const int sc = uiScale();
+        const float W = float(r.width()), H = float(r.height());
+        const char* who[2] = {"BUGS", "TAZ"};
+        const std::string t = w.twoPlayer()
+            ? std::format("2P  CAM {}  CALL {}", w.cam.flags & 0x80 ? (w.camFocus ? "TAZ" : "BUGS") : "MIDPOINT",
+                          w.cooldown >= 45 ? "READY" : "WAIT")
+            : std::format("{}  (R1/S SWITCH  L1/A CALL {})", who[w.focus()], w.cooldown >= 45 ? "READY" : "WAIT");
+        const float tw = float(t.size() * size_t(R::kGlyph * sc * 2)), x = (W - tw) * 0.5f, y = H - float(28 * sc);
+        r.drawRect(x - float(6 * sc), y - float(4 * sc), tw + float(12 * sc), float(24 * sc), kPanel);
+        r.drawText(x, y, sc * 2, t, kYellow);
+        if (!w.actors[0].model || !w.actors[1].model) r.drawText(x, y - float(14 * sc), sc, "PLACEHOLDER: actor model missing", kRed);
+        if (tbPlay->freeFly) r.drawText(x, y - float(26 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
+    }
+
     void drawOverlay() {
         const int sc = std::max(1, (r.height() + 300) / 600);
         const bool enh = s.fidelity == Fidelity::Enhanced;
@@ -583,7 +685,7 @@ struct App {
             "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (GAMEPLAY 1.1)  alpha {:.2f}",
             r.glVendor(), r.glRenderer(), r.glVersion(), 1.0 / frameTime, frameTime * 1000.0, r.drawCalls(), r.width(),
             r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy()) : "nearest",
-            enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", s.vfovDeg,
+            enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", glm::degrees(s.vfovRad()),
             !enh && s.pillarbox ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
         if constexpr (requires { r.diagnostics(); }) text += std::format("\n{}", r.diagnostics());
         if (screen == Screen::Level)
@@ -597,6 +699,21 @@ struct App {
                                 "\ncam eye {} {} {}  yaw {}  F1 free-fly  F2 fidelity  F4 fog",
                                 w.ticks, w.p.state, w.p.seq, w.p.anim, w.p.flags14, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.yaw,
                                 w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw);
+            if (!w.unsupported.empty()) {
+                text += "\nnot interpreted:";
+                for (const std::string& u : w.unsupported) text += " " + u;
+            }
+        }
+        if (screen == Screen::Level && tbPlay) {
+            const bb::game::TbWorld& w = tbPlay->world;
+            text += std::format("\nTB PLAY  tick {}  {}  A4 {:02x}  focus {}  cam {}  cooldown {}  music n={}", w.ticks,
+                                w.twoPlayer() ? "2P" : "1P", w.A4, w.focus(), w.camFocus, w.cooldown, w.music);
+            for (const bb::game::TbActor& a : w.actors)
+                text += std::format("\n{} state {} seq {} anim {}  pos {} {} {}  yaw {}  f20 {:08x}  vel {} {} {}",
+                                    a.id == 2 ? "bugs" : "taz ", a.rec() ? a.rec()->id : 0, a.seq, a.curAnim, a.pos.x, a.pos.y,
+                                    a.pos.z, a.yaw, a.f20, a.vel[0] >> 4, a.vel[1] >> 4, a.vel[2] >> 4);
+            text += std::format("\ncam eye {} {} {}  look {} {} {}  D {}  F1 free-fly  F2 fidelity  F4 fog", w.cam.eye.x,
+                                w.cam.eye.y, w.cam.eye.z, w.cam.look.x, w.cam.look.y, w.cam.look.z, w.cam.dist);
             if (!w.unsupported.empty()) {
                 text += "\nnot interpreted:";
                 for (const std::string& u : w.unsupported) text += " " + u;
@@ -622,6 +739,7 @@ int run(const std::optional<Args>& args) {
         App<R> app;
         app.args = *args;
         app.s.fidelity = args->fidelity;
+        app.overlay = !args->noHud;
         app.fullscreen = args->fullscreen;
         bb::render::WindowConfig wc;
         wc.width = args->width;
@@ -632,6 +750,7 @@ int run(const std::optional<Args>& args) {
         app.s.vfovDeg = args->fov;
         app.s.msaa = args->msaa > 0;
         app.vsync = args->vsync;
+        app.players = args->players;
         {
             std::vector<std::string> warn;
             app.keys = bbtime::makeKeyMap(args->bindings, &warn);
@@ -674,6 +793,7 @@ int run(const std::optional<Args>& args) {
                 app.cam.pitch = c[4];
                 app.prevCam = app.cam;
                 if (app.play) app.play->freeFly = true; // explicit camera = debug free-fly view of play mode
+                if (app.tbPlay) app.tbPlay->freeFly = true;
             }
         }
 
@@ -687,7 +807,8 @@ int run(const std::optional<Args>& args) {
             const double dt = double(now - last) * 1e-9;
             last = now;
             app.frameTime += (dt - app.frameTime) * 0.05;
-            if (app.autoplayAt < args->autoplay.size() && app.screen == Screen::Level) { // lockstep: 1 tick per frame
+            if ((app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) &&
+                app.screen == Screen::Level) { // lockstep: 1 tick per frame
                 app.tick(float(step.dt));
                 app.alpha = 1.0f;
             } else {
@@ -696,8 +817,12 @@ int run(const std::optional<Args>& args) {
             }
             if (app.screen == Screen::Main && app.mainSel < 2) musicIdx = app.mainSel; // highlighted game
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
-            bbtime::menuMusic(args->roots[musicIdx], app.screen == Screen::Level || args->mute
-                                              ? std::nullopt : std::optional(app.games[musicIdx].id));
+            fs::path track;  // menu: highlighted game's track; TB level: logic action 126 (GAMEPLAY_TB.md §6)
+            if (!args->mute) {
+                if (app.screen != Screen::Level) track = bbtime::menuTrack(app.games[musicIdx].id, args->roots[musicIdx]);
+                else if (app.tbPlay) track = bbtime::tbLevelTrack(args->roots[1], app.tbPlay->world.music);
+            }
+            bbtime::playMusic(track);
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
                 const bool ok = app.r.screenshot(args->screenshot);
@@ -707,6 +832,7 @@ int run(const std::optional<Args>& args) {
             app.r.present();
         }
         if (app.pad) SDL_CloseGamepad(app.pad);
+        if (app.pad2) SDL_CloseGamepad(app.pad2);
         for (Game& g : app.games) app.r.destroyImage(g.backdrop);
     }
     return 0;

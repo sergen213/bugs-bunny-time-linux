@@ -375,8 +375,10 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
     Scene s;
     s.game = GameId::TimeBusters;
     s.level = level;
-    // Inferred: PS1 modulation (texel * colour / 128) as LiT; vertex colours centre near 128 in the data. The PC
-    // GL path reads colour bytes as byte/255 [COL]; whether its texture stage doubles them is Research Required.
+    // Inferred: PS1 modulation (texel * colour / 128) as LiT; vertex colours centre near 128 in the data (Enhanced).
+    // The PC GL path does not double (byte/255; Original Fidelity uses 1.0): measured gain original/bbtime 1.01-1.03
+    // on ARCA01 (RUNTIME_REFERENCE.md §7). Its texel tables 0x639de0/0x63ae80 (on: 0x639da4 = 1) are identity at
+    // runtime, so pcTexGamma stays 1.
     s.colorScale = 255.0f / 128.0f;
     Builder b{s, {}, {}, {}, {}, 0, false, 0, {}};
 

@@ -1,6 +1,7 @@
 # Bugs Bunny: Lost in Time — `bugs.exe` v1.6 static RE notes
 
-Status: **Researched (static RE only)**; not *Verified Against Original Behavior*. Tags: *observed* (bytes /
+Status: **Researched (static RE)**; the §7 projection globals and the §1 launch note marked R are confirmed at
+runtime under Wine (runtime: RUNTIME_REFERENCE.md §1, §5). Tags: *observed* (bytes /
 decompile at the cited address) vs *inferred*. This file only adds to BugsDecomp
 (`research/BugsDecomp/doc/{functions,internals,bze}.md`, v1.6 addresses; no LICENSE in that repo → facts
 and addresses only). Engine comparison and function map: [ENGINE_COMPARISON.md](ENGINE_COMPARISON.md).
@@ -19,7 +20,10 @@ WinMain 0x405950: `FindWindowA("BBLIT Game")` single instance, bugs.ini 0x409e30
 language → resource-string block (6 languages, resource strings 1–24), registry
 `HKCU\Software\Infogrames\Bugs Bunny Lost In Time`. Startup screens and timer init 0x406190 (three 3 s
 splash screens, BZE IDs 0x4e–0x50 = `screen1..3`). Command-line parser 0x408f70 (switches in BugsDecomp
-`internals.md`; LiT checks upper- and lower-case spellings, TB lower-cases instead).
+`internals.md`; LiT checks upper- and lower-case spellings, TB lower-cases instead). On PC, **`/b00` is needed to
+reach the title**: the disc launcher `Datas/BugsBunny.exe` passes `" /b00"`; with no `/b` WinMain sets
+`GD.currentLevel = 2` (LANGUAGE.BZE), which the PC disc does not ship → "File not found: ..\BZE\LANGUAGE.BZE"
+(R; runtime: RUNTIME_REFERENCE.md §1).
 
 `hv3dfx.dll` is the 3dfx OpenGL ICD 1.0.0.0438 (`3dfxogl.dll`, imports `glide3x.dll`), loadable via `/dll:`;
 not game code.
@@ -85,4 +89,6 @@ joystick mapped onto an emulated PSX pad. No `DINPUT.dll` import; *inferred* tha
 | .rdata 0x45c298 / 0x45c2a8 / 0x45c2b8 | f64 2.0 / 1.5 / 1.0 tier thresholds | 0x481318 / 0x481310 / 0x4812e0 |
 
 Consumer of sx/sy: 0x408910 (Q12 scale × `RotMatrixX(0x800)` × camera, TB 0x404d40). Derived FOV is the
-same as TB: ≈ 65.2° × 51.3° at H = 400, stretched (not widened) on non-4:3 outputs.
+same as TB: ≈ 65.2° × 51.3° at H = 400, stretched (not widened) on non-4:3 outputs. Runtime at 640×480: the table
+values above (sx = sy = 5120, H 400) and vertical FOV 2·atan(240 / (1.25·400)) = 51.28° are **Verified**
+(runtime: RUNTIME_REFERENCE.md §5).

@@ -1,6 +1,7 @@
 # Bugs Bunny & Taz: Time Busters — `bblit2.exe` static RE notes
 
-Status: **Researched (static RE only)**, nothing here is *Verified Against Original Behavior* yet.
+Status: **Researched (static RE)**; the §9 projection/clip globals (except `0x639aa8`, Contradicted) and the §1
+launch behaviour notes marked R are confirmed at runtime under Wine (runtime: RUNTIME_REFERENCE.md §4–§5).
 Tags: *observed* = read from bytes / decompiled code at the cited address; *inferred* = interpretation.
 
 | file | MD5 | SHA-256 |
@@ -48,11 +49,15 @@ Reproduction scripts: `tools/ghidra/` (see ENGINE_COMPARISON.md "Reproduction").
 | `/full`, `/win` | fullscreen = `/win` absent (`DAT_00639b54`); `/full` is overwritten, i.e. redundant |
 | `/ogl` `/opengl` | renderer = 2 (`DAT_00639b44`) |
 | `/soft` `/soft8` `/softpal` `/softrgb` `/soft16` `/soft24` | renderer = 1 (all variants identical in TB) |
-| `/skip_intro` | `DAT_0048aff4 = 0` |
+| `/skip_intro` | `DAT_0048aff4 = 0` → skips the logo AVIs **and** the GDI title menu: boot goes straight to CCINTRO → GRANNY (R; runtime: RUNTIME_REFERENCE.md §1) |
 | `/cons` | `DAT_004d03f0 = 1` |
 | `/fntp` | `DAT_004d03ac = 1` |
 | `/dll:<name>` | GL library name → `DAT_00639460` |
 | `/comp` | `DAT_004d03e8 = 1` → BZE sections are LZSS-compressed (default: raw) |
+
+Without `/skip_intro` and `/b`, the logo AVIs play and the GDI title menu (1 Player / 2 Players / Load Game /
+Configuration / Quit) appears; "2 Players" is reachable only there and sets `GD+0xA4 = 0x12` (R; runtime:
+RUNTIME_REFERENCE.md §1, §4 `tbplay/F_2p_granny.csv`).
 
 ## 2. Level table and files
 
@@ -207,7 +212,7 @@ logic VM (0x45d7a0), not by hard-coded strings. Needs dynamic or BZE-level analy
 | **0x639a70** | i32 | projection distance H (default 400) | 0x402640, 0x4038f0, 0x403b30, 0x408b60, 0x408f20 |
 | 0x639a74 / 0x639a78 / 0x639a7c | f32 | H, 1/H, −(H/2) | 0x408900, 0x408990, 0x408d00 |
 | 0x639a80 | f32 | 0.0 → glOrtho near | 0x424ae0 |
-| 0x639ac0 / 0x639aa8 | f32 | 10000.0 / 5000.0 | *inferred* far clip distances |
+| 0x639ac0 / 0x639aa8 | f32 | 10000.0 / **0.0** at runtime (not 5000.0, so not a far clip; runtime: RUNTIME_REFERENCE.md §5) | 0x639ac0 *inferred* far clip; 0x639aa8 role unknown |
 | 0x63bc14, 0x63bb50, 0x63bc20, 0x63bc1c | f32 | −w/2, w/2−1, 1−h/2, h/2 | *inferred* 2D clip rectangle |
 | 0x639aa0 / 0x639aa4 | f32 | screen offsets from 0x63bc04/0x63bc08 | 0x404d40 |
 | .rdata 0x48130c / 0x481308 | f32 | 0.75 / 4096.0 | 0x405ef0 |

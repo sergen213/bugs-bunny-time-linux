@@ -123,4 +123,51 @@ bb::render::Camera Play::camera(float a, bool interpolate) const {
     return c;
 }
 
+KeyMap tbKeyMap(int player) {
+    KeyMap m;
+    if (player == 0)
+        m.keys = {{SDL_SCANCODE_UP, PadUp},     {SDL_SCANCODE_DOWN, PadDown}, {SDL_SCANCODE_RIGHT, PadRight},
+                  {SDL_SCANCODE_LEFT, PadLeft}, {SDL_SCANCODE_A, PadL1},      {SDL_SCANCODE_D, PadL2},
+                  {SDL_SCANCODE_S, PadR1},      {SDL_SCANCODE_F, PadR2},      {SDL_SCANCODE_W, PadTriangle},
+                  {SDL_SCANCODE_Q, PadCircle},  {SDL_SCANCODE_E, PadCross},   {SDL_SCANCODE_R, PadSquare},
+                  {SDL_SCANCODE_TAB, PadSelect}, {SDL_SCANCODE_SPACE, PadCross}, {SDL_SCANCODE_LCTRL, PadSquare}};
+    else
+        m.keys = {{SDL_SCANCODE_KP_8, PadUp},       {SDL_SCANCODE_KP_5, PadDown},      {SDL_SCANCODE_KP_6, PadRight},
+                  {SDL_SCANCODE_KP_4, PadLeft},     {SDL_SCANCODE_L, PadL1},           {SDL_SCANCODE_SEMICOLON, PadL2},
+                  {SDL_SCANCODE_K, PadR1},          {SDL_SCANCODE_APOSTROPHE, PadR2},  {SDL_SCANCODE_O, PadTriangle},
+                  {SDL_SCANCODE_I, PadCircle},      {SDL_SCANCODE_P, PadCross},        {SDL_SCANCODE_LEFTBRACKET, PadSquare},
+                  {SDL_SCANCODE_RCTRL, PadSelect},  {SDL_SCANCODE_RSHIFT, PadStart}};
+    return m;
+}
+
+TbPlay::Snap TbPlay::view(float a, bool interpolate) const {
+    if (!interpolate) return cur;
+    auto mix = [a](const V3& p, const V3& q) {
+        auto m = [a](int32_t x, int32_t y) { return int32_t(std::lround(double(x) + double(y - x) * a)); };
+        return V3{m(p.x, q.x), m(p.y, q.y), m(p.z, q.z)};
+    };
+    auto mixAngle = [a](int16_t p, int16_t q) { return int16_t(p + int16_t(std::lround(angleDiff(q, p) * a))); };
+    Snap s;
+    s.eye = mix(prev.eye, cur.eye);
+    s.look = mix(prev.look, cur.look);
+    for (size_t i = 0; i < 2; ++i) {
+        // a teleport (call friend, respawn) is not smeared across the screen
+        const bool jump = std::abs(cur.pos[i].x - prev.pos[i].x) + std::abs(cur.pos[i].z - prev.pos[i].z) > 400;
+        s.pos[i] = jump ? cur.pos[i] : mix(prev.pos[i], cur.pos[i]);
+        s.yaw[i] = mixAngle(prev.yaw[i], cur.yaw[i]);
+        s.roll[i] = mixAngle(prev.roll[i], cur.roll[i]);
+    }
+    return s;
+}
+
+bb::render::Camera TbPlay::camera(float a, bool interpolate) const {
+    const Snap v = view(a, interpolate);
+    bb::render::Camera c;
+    c.pos = toEngine(v.eye);
+    const glm::vec3 d = toEngine(v.look) - c.pos;
+    c.yaw = std::atan2(-d.x, -d.z);
+    c.pitch = std::atan2(d.y, std::sqrt(d.x * d.x + d.z * d.z));
+    return c;
+}
+
 } // namespace bbtime

@@ -64,6 +64,7 @@ struct Tod {
     std::vector<uint32_t> frameStart; // frame k = packets[frameStart[k], frameStart[k + 1])
     std::vector<TodPacket> packets;
     size_t frames() const { return frameStart.empty() ? 0 : frameStart.size() - 1; }
+    bool packed = false;  // TB chunk-0x22 tag-0x25 packed TOD (GAMEPLAY_TB.md §5): applied by applyTbFrame (bb/tb_actor.h)
 };
 struct ActorAnim {
     uint16_t id = 0;             // chunk 0x22 tag 0x27 role = animation id used by move nodes
@@ -114,8 +115,8 @@ struct SceneStats {
     uint32_t invalidPrims = 0;     // TB octree primitives rejected by CheckPrimValidity (not drawn)
     uint64_t worldFaces = 0;       // TB valid octree primitives (world + sky, all trees incl. the undrawn far LOD)
     uint64_t faces = 0, triangles = 0;
-    // Faces whose id is neither a decoded texture nor a texture link. TB: not drawn (the original skips alias 0,
-    // TEXTURE_GAP.md §1); LiT: still drawn untextured until its texture links are decoded.
+    // Faces whose id is neither a decoded texture nor a texture link: not drawn in either game (the original skips
+    // alias 0, TEXTURE_GAP.md §1).
     uint64_t missingTextureFaces = 0;
     uint64_t worldMissingTextureFaces = 0;   // subset of missingTextureFaces in chunk-0x20 world models
     uint64_t linkedFaces = 0;                // faces whose texture id resolves through a TextureAnim
@@ -130,6 +131,7 @@ struct Scene {
     std::vector<TextureAnim> textureAnims;
     bool placeholder = false;    // true when content is NOT decoded original data (incl. galleries)
     float colorScale = 1.0f;     // vertex rgb multiplier; LiT uses PS1 modulation texel*colour/128 -> 255/128
+    float pcTexGamma = 1.0f;     // PC GL texel curve c' = floor(256·(c/256)^g) (LiT 5/6), applied in Original Fidelity
     std::optional<std::array<float, 3>> spawn; // player start, engine space
     float spawnYaw = 0.0f;       // radians, engine Camera convention
     std::vector<ActorModel> actorModels; // LiT TOD-animated actor models (bb/actor.h poses them)

@@ -77,33 +77,99 @@ struct Xform {
 // 4.12 angle (0x1000 = 360 degrees) -> radians.
 float angle(int16_t a) { return float(a) * 2.0f * std::numbers::pi_v<float> / 4096.0f; }
 
+// Sprite-sequence asset (chunk 0x22 tag 0x40, TEXTURE_GAP.md): the tex id u16 @+10 of every 16-byte type-0x64
+// record, in object/group order (the 0x64 records FUN_00438830 indexes by frame).
+std::vector<uint16_t> spriteTexIds(std::span<const uint8_t> sec4, uint32_t off, uint32_t size) {
+    if (off > sec4.size() || sec4.size() - off < size) throw FormatError(std::format("sprite model 0x{:x} outside section 4", off));
+    const In in{sec4.subspan(off, size), "sprite model"};
+    std::vector<uint16_t> ids;
+    const uint32_t nobj = in.u32(8);
+    for (uint32_t o = 0; o < nobj; ++o) {
+        const size_t e = 12 + size_t(o) * 28;
+        size_t p = 12 + size_t(in.u32(e + 16));
+        for (int64_t nprim = in.u32(e + 20); nprim > 0;) {
+            const uint8_t t = in.u8(p + 3);
+            const uint16_t cnt = in.u16(p);
+            if (t == 0x00 || t == 0x04 || t == 0x08 || t == 0x0c || t == 0x10) {
+                p += t == 0x08 || t == 0x0c ? 56 : t == 0x10 ? 20 : 16;
+                nprim -= 1;
+            } else if (t == 0x44) {
+                p += 4 + size_t(cnt) * 12;
+                nprim -= 1;
+            } else {
+                size_t stride = otherGroupStride(t);
+                for (const Poly& k : kPolys)
+                    if (k.type == t) stride = k.stride;
+                if (!stride || !cnt) throw FormatError(std::format("sprite model 0x{:x}: bad group 0x{:02x}", off, t));
+                if (t == 0x64)
+                    for (size_t r = 0; r < cnt; ++r) ids.push_back(in.u16(p + r * 16 + 10));
+                p += cnt * stride;
+                nprim -= cnt;
+            }
+        }
+    }
+    return ids;
+}
+
 struct Builder {
     Scene& s;
-    std::map<uint32_t, int32_t> tex;  // texture id -> Scene::textures index
-    std::set<uint32_t> missing;
-    std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf;
+    std::map<uint32_t, int32_t> tex{};    // texture id -> Scene::textures index
+    std::map<uint32_t, int32_t> links{};  // texture link id -> Scene::textureAnims index (TEXTURE_GAP.md)
+    std::set<uint32_t> missing{};
+    std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf{};
     ActorModel* actor = nullptr;            // set while building an actor model: meshes go to actor->meshes
     std::vector<uint16_t>* slots = nullptr; // the current actor mesh's slot list
+    bool world = false;                     // building a chunk-0x20 world model (stats split)
 
-    Mesh& mesh(uint32_t group, const std::string& gname, int32_t t, Blend b, bool twoSided) {
+    // Face texture id -> texture index (>= 0), texture link (-2 - anim index), or -1 = alias 0: the original resolves
+    // ids through the alias table DAT_004e5e80 and never draws bucket 0 (TEXTURE_GAP.md §1).
+    int32_t resolve(uint32_t id) {
+        if (auto it = tex.find(id); it != tex.end()) return it->second;
+        if (auto it = links.find(id); it != links.end()) {
+            ++s.stats.linkedFaces;
+            return -2 - it->second;
+        }
+        ++s.stats.missingTextureFaces;
+        s.stats.worldMissingTextureFaces += world;
+        missing.insert(id);
+        return -1;
+    }
+    // Static texture of a key (a link binds its start frame) and its texture-anim index.
+    int32_t fallback(int32_t key) const {
+        if (key >= 0) return key;
+        const TextureAnim& a = s.textureAnims[size_t(-2 - key)];
+        return a.frames[a.startFrame];
+    }
+    bool hasAlpha(int32_t key) const {
+        if (key >= 0) return s.textures[size_t(key)].hasAlpha;
+        return std::ranges::any_of(s.textureAnims[size_t(-2 - key)].frames, [&](int32_t f) { return s.textures[size_t(f)].hasAlpha; });
+    }
+
+    // key: -1 untextured, else as resolve().
+    Mesh& mesh(uint32_t group, const std::string& gname, int32_t key, Blend b, bool twoSided) {
+        const int32_t t = key == -1 ? -1 : fallback(key), anim = key <= -2 ? -2 - key : -1;
+        auto what = [&] { return anim >= 0 ? std::format("link{}", s.textureAnims[size_t(anim)].linkId) : std::format("tex{}", t); };
         if (actor) {  // group = object index
             for (ActorMesh& am : actor->meshes)
-                if (am.object == group && am.mesh.texture == t && am.mesh.blend == b && am.mesh.twoSided == twoSided)
+                if (am.object == group && am.mesh.texture == t && am.mesh.textureAnim == anim && am.mesh.blend == b &&
+                    am.mesh.twoSided == twoSided)
                     return slots = &am.slots, am.mesh;
             ActorMesh& am = actor->meshes.emplace_back();
             am.object = group;
-            am.mesh.name = std::format("{}/obj{}/tex{}{}", gname, group, t, twoSided ? "/2s" : "");
+            am.mesh.name = std::format("{}/obj{}/{}{}", gname, group, what(), twoSided ? "/2s" : "");
             am.mesh.texture = t;
+            am.mesh.textureAnim = anim;
             am.mesh.blend = b;
             am.mesh.twoSided = twoSided;
             slots = &am.slots;
             return am.mesh;
         }
-        auto [it, fresh] = meshOf.try_emplace({group, t, b, twoSided}, s.meshes.size());
+        auto [it, fresh] = meshOf.try_emplace({group, key, b, twoSided}, s.meshes.size());
         if (fresh) {
             Mesh& m = s.meshes.emplace_back();
-            m.name = std::format("{}/tex{}{}", gname, t, twoSided ? "/2s" : "");
+            m.name = std::format("{}/{}{}", gname, what(), twoSided ? "/2s" : "");
             m.texture = t;
+            m.textureAnim = anim;
             m.blend = b;
             m.twoSided = twoSided;
         }
@@ -114,6 +180,7 @@ struct Builder {
     // advance it per cell header, props pass a unique value.
     void model(std::span<const uint8_t> sec4, uint32_t off, uint32_t size, const Xform& xf, uint32_t& group,
                bool world, const std::string& gname) {
+        this->world = world;
         if (off > sec4.size() || sec4.size() - off < size)
             throw FormatError(std::format("model 0x{:x}+0x{:x} outside section 4 (0x{:x})", off, size, sec4.size()));
         const In in{sec4.subspan(off, size), "model"};
@@ -196,16 +263,13 @@ struct Builder {
     void polygon(const In& in, size_t q, const Poly& k, const std::vector<std::array<float, 3>>& verts, const Xform& xf,
                  uint32_t group, const std::string& gname, bool twoSided) {
         const uint8_t flags = in.u8(q + 2);
-        int32_t ti = -1;
+        int32_t key = -1, ti = -1;
         Blend blend = Blend::Opaque;
         uint8_t alpha = 255;
         if (k.tex) {
-            const uint16_t id = in.u16(q + k.tex);
-            if (auto it = tex.find(id); it != tex.end()) ti = it->second;
-            else {
-                ++s.stats.missingTextureFaces;
-                missing.insert(id);
-            }
+            key = resolve(in.u16(q + k.tex));
+            if (key == -1) return;  // alias 0: not drawn (TEXTURE_GAP.md §4)
+            ti = fallback(key);
             if (flags & 8) {  // semi-transparent: ABR from tpage bits 5-6
                 switch (in.u8(q + k.tpage) >> 5 & 3) {
                 case 0: blend = Blend::Alpha, alpha = 128; break;
@@ -213,11 +277,11 @@ struct Builder {
                 case 2: blend = Blend::Subtract; break;
                 case 3: blend = Blend::Additive, alpha = 64; break;
                 }
-            } else if (ti >= 0 && s.textures[size_t(ti)].hasAlpha) blend = Blend::AlphaTest;
+            } else if (hasAlpha(key)) blend = Blend::AlphaTest;
         }
         const float tw = ti >= 0 ? float(s.textures[size_t(ti)].width) : 1.0f;
         const float th = ti >= 0 ? float(s.textures[size_t(ti)].height) : 1.0f;
-        Mesh& m = mesh(group, gname, ti, blend, twoSided);
+        Mesh& m = mesh(group, gname, key, blend, twoSided);
         const uint32_t base = uint32_t(m.vertices.size());
         for (int i = 0; i < k.n; ++i) {
             const uint16_t vi = in.u16(q + k.idx[i]);
@@ -267,7 +331,10 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     s.game = GameId::LostInTime;
     s.level = level;
     s.colorScale = 255.0f / 128.0f;  // PS1 texel * colour / 128 (MODELS.md §5); the PC port uses /255
-    Builder b{s, {}, {}, {}};
+    // bugs.exe OpenGL renderer (0x4ac094 = 2, 0x422a40): CLUT colours (<< 3, 0x420d10) pass through table 0x4b5b40 =
+    // trunc(256·(i/256)^(5/6)) (0x45ca08) before upload while 0x4ac034 = 1 (runtime: both set, RUNTIME_REFERENCE §7).
+    s.pcTexGamma = 5.0f / 6.0f;
+    Builder b{.s = s};
 
     // Textures (chunk 0x29 tag 0x2a: u32 section-3 offset, u32 id).
     std::vector<std::string> texErrors;
@@ -301,6 +368,89 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
         auto mdl = tagData(it, 0x24);
         if (mdl.empty()) mdl = tagData(it, 0x40);
         if (!mdl.empty()) assets[aid] = {le32(mdl, 0), le32(mdl, 4)};
+    }
+
+    // Texture links (TEXTURE_GAP.md): entity tag 0x0b {u16 link id, 0} writes the current frame of a sprite sequence
+    // (tag-0x40 asset, tex id @+10 per record) into alias[link id] at run time (FUN_004247a0 at load, FUN_00438830 per
+    // frame). Type 20 (FUN_00445500): the first listed asset of class 8, start frame +0x50 and hold byte +0x54 (box
+    // tags 0x1c/0x42, last writer wins), +1 frame every `hold` ticks (0 = 256: u8 countdown wrap), wrap after the last
+    // record. Type 2 and others: the latest sprite asset listed before tag 0x0b, frames from the script animation
+    // (0x438970): the start step's animation id is the role of a listed asset whose tag 0x3f flipbook list
+    // {u16 n, u16 0, u32 off, u32 size} -> n x {u8 record, u8 ticks} picks the record and its duration; looped.
+    // Runtime-verified on L02A1 links 16/63 (alias table traces, GAMEPLAY_STATUS.md). Without such a list the
+    // records are cycled in order, 2 ticks per frame (Inferred).
+    std::map<uint16_t, std::pair<uint16_t, std::vector<uint16_t>>> sprites;  // asset id -> (class, frame tex ids)
+    for (const auto& [aid, a] : all)
+        if (a.tag == 0x40) sprites[aid] = {a.role, spriteTexIds(s4, a.off, a.size)};
+    std::map<uint16_t, std::pair<uint16_t, std::span<const uint8_t>>> flipbooks;  // asset id -> (role, {record, ticks} pairs)
+    for (const ScriptItem& it : script.items) {
+        if (it.kind != ScriptItem::Kind::Chunk || it.code != 0x22) continue;
+        const auto id = tagData(it, 0x27), fl = tagData(it, 0x3f);
+        if (id.empty() || fl.size() < 8) continue;
+        const uint32_t n = uint32_t(fl[0] | fl[1] << 8), off = le32(fl, 4);
+        if (off > s4.size() || s4.size() - off < size_t(n) * 2) throw FormatError(std::format("flipbook list 0x{:x} outside section 4", off));
+        flipbooks[uint16_t(id[2] | id[3] << 8)] = {uint16_t(id[0] | id[1] << 8), std::span(s4).subspan(off, size_t(n) * 2)};
+    }
+    // The entity's start animation (state id 2 else 1 -> first step -> tag-0x30 anim id) as a flipbook list.
+    auto startFlipbook = [&](const ScriptItem& it) -> std::span<const uint8_t> {
+        std::optional<uint16_t> step;
+        for (uint16_t want : {2, 1})
+            for (const ScriptTag& t : it.tags)
+                if (!step && t.id == 0x32 && (t.data[0] | t.data[1] << 8) == want) step = uint16_t(t.data[2] | t.data[3] << 8);
+        for (const ScriptTag& t : it.tags) {
+            if (!step || t.id != 0x30 || (t.data[0] | t.data[1] << 8) != *step) continue;
+            const uint16_t anim = uint16_t(t.data[2] | t.data[3] << 8);
+            for (const ScriptTag& r : it.tags)
+                if (auto f = r.id == 0x0f ? flipbooks.find(uint16_t(r.data[0] | r.data[1] << 8)) : flipbooks.end();
+                    f != flipbooks.end() && f->second.first == anim)
+                    return f->second.second;
+        }
+        return {};
+    };
+    uint32_t linkFrameErrors = 0;
+    for (const ScriptItem& it : script.items) {
+        if (it.kind != ScriptItem::Kind::Chunk || (it.code != 0x07 && it.code != 0x08 && it.code != 0x0a)) continue;
+        const auto type = tagData(it, 0x13);
+        const std::vector<uint16_t>* last = nullptr;
+        std::span<const uint8_t> box;  // +0x50/+0x54: last of tags 0x1c / 0x42 (may follow tag 0x0b)
+        for (const ScriptTag& t : it.tags)
+            if (t.id == 0x1c || t.id == 0x42) box = t.data;
+        for (const ScriptTag& t : it.tags) {
+            if (t.id == 0x0f) {
+                if (auto sp = sprites.find(uint16_t(t.data[0] | t.data[1] << 8)); sp != sprites.end()) last = &sp->second.second;
+                continue;
+            }
+            if (t.id != 0x0b || !last) continue;
+            const bool flip = !type.empty() && type[0] == 20;
+            const std::vector<uint16_t>* src = flip ? nullptr : last;
+            for (const ScriptTag& a : it.tags) {
+                if (!flip || src || a.id != 0x0f) continue;
+                if (auto sp = sprites.find(uint16_t(a.data[0] | a.data[1] << 8)); sp != sprites.end() && sp->second.first == 8)
+                    src = &sp->second.second;
+            }
+            if (!src) continue;
+            TextureAnim an;
+            an.linkId = uint16_t(t.data[0] | t.data[1] << 8);
+            for (uint16_t fid : *src)
+                if (auto x = b.tex.find(fid); x != b.tex.end()) an.frames.push_back(x->second);
+                else ++linkFrameErrors;
+            if (an.frames.empty()) continue;
+            if (flip) {
+                an.startFrame = box.empty() ? 0 : uint32_t(box[0] | box[1] << 8) % an.frames.size();
+                an.holdTicks = box.empty() || !box[4] ? 256 : box[4];
+            } else if (const auto fl = startFlipbook(it); !fl.empty()) {
+                std::vector<int32_t> seq;
+                for (size_t k = 0; k + 1 < fl.size(); k += 2)
+                    seq.insert(seq.end(), std::max<size_t>(fl[k + 1], 1), an.frames[fl[k] % an.frames.size()]);
+                an.frames = std::move(seq);
+                an.holdTicks = 1;
+            } else {
+                an.holdTicks = 2;
+                an.timingInferred = true;
+            }
+            if (auto [x, fresh] = b.links.try_emplace(an.linkId, int32_t(s.textureAnims.size())); fresh) s.textureAnims.push_back(std::move(an));
+            else s.textureAnims[size_t(x->second)] = std::move(an);  // several writers: the last entity wins (Inferred)
+        }
     }
     std::map<std::vector<uint16_t>, uint32_t> modelOf;  // tag 0x0f list -> Scene::actorModels index
     std::vector<uint16_t> idleOf;                       // per actor model: initial animation id
@@ -419,9 +569,13 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     s.notes.push_back(std::format("{} world models, {} cells, {} rigid props (placement Inferred), {} TOD actors ({} models), "
                                   "{} multi-object entities skipped", s.stats.worldModels, s.stats.cells, s.stats.props,
                                   s.actors.size(), s.actorModels.size(), s.stats.skippedActors));
+    if (!s.textureAnims.empty())
+        s.notes.push_back(std::format("{} texture links (animated, TEXTURE_GAP.md) drive {} faces{}", s.textureAnims.size(),
+                                      s.stats.linkedFaces,
+                                      linkFrameErrors ? std::format("; {} link frames have no TIM", linkFrameErrors) : ""));
     if (s.stats.missingTextureFaces)
-        s.notes.push_back(std::format("{} faces reference {} texture ids absent from this level: drawn untextured",
-                                      s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));
+        s.notes.push_back(std::format("{} faces reference {} texture ids that are neither TIMs nor links: not drawn (as the "
+                                      "original's alias 0)", s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));
     for (const std::string& e : texErrors) s.notes.push_back(e);
     return s;
 }

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <span>
 
 namespace bb::game {
 namespace {
@@ -27,19 +28,18 @@ LogicItem item(const std::vector<uint8_t>& d, size_t o) {
     return {d[o], d[o + 1], d[o + 2], d[o + 3], le<uint16_t>(d, o + 4), le<uint16_t>(d, o + 6)};
 }
 
-// Pickup items (tag 0x31, LOGIC.md §2): what the type-14 interpreter would award (§7.4, tools/re/entities.py).
-struct Item31 { LogicItem it; uint32_t flags = 0; int32_t p1 = 0; uint32_t p2 = 0; };
-std::vector<Item31> items31(const ScriptItem& e) {
-    std::vector<Item31> v;
-    for (const ScriptTag& t : e.tags)
-        if (t.id == 0x31 && t.data.size() >= 32)
-            v.push_back({item(t.data, 12), le<uint32_t>(t.data, 20), le<int32_t>(t.data, 24), le<uint32_t>(t.data, 28)});
-    return v;
-}
-bool awards(const LogicItem& it, int idx) {  // A4 incg / A37 addgi / A23 incgg
-    if (it.act == 4 || it.act == 37) return it.y == idx;
-    return it.act == 23 && (it.x == idx || it.y == idx);
-}
+// Exe level table 0x4ad380 (`..\BZE\<NAME>.BZE;1`, ids 0..110; 111/112 are the XA files).
+constexpr const char* kLevels[] = {
+    "TITLE", "LOADING", "LANGUAGE", "LS01", "L01A", "L01B", "L01C", "L01D1", "L01D2", "L02A1", "L02A2", "L02A3",
+    "L02A4", "L02A5", "L02A6", "L02B1", "L02B2", "L02C1", "L02C2", "L02C3", "L02C4", "L03A", "L03ACOM", "L03A2",
+    "L03B", "L03C", "L03C1", "L03C2", "L03D1", "L04A1", "L04A2", "L04A3", "L04B1", "L04B2", "L04B3", "L04C1", "L04C2",
+    "L04C3", "L04D1", "L04D2", "L04E", "L04E2", "L05A1", "L05A2", "L05A3A", "L05A3B", "L05A3C", "L05A4", "L05A5",
+    "L05B1", "L05C", "MERLIN", "LB01", "LB02", "LB04", "LB05", "CCINTRO", "CC1A", "CC2A", "CC2B", "CC2C", "CC3A",
+    "CC3B", "CC3C", "CC3D", "CC4A", "CC4B", "CC4C", "CC4D", "CC5A", "CCMERLIN", "CCEND", "CREDITS", "DEMO2A2",
+    "DEMO3C1", "DEMO4A1", "DEMO5C", "DEMOB02", "SCREEN1", "SCREEN2", "SCREEN3", "L_30BANK", "L_30CF", "L_30ESCA",
+    "L_30LOAD", "L_30RIDE", "L_BCORRI", "L_BDUCK", "L_BHUNT", "L_FLOAD", "L_FLOAD2", "L_FRIDE", "L_FXFILE",
+    "L_FXROOM", "L_MCOOK", "L_MLOAD", "L_MLOAD2", "L_MWITCH", "L_PCANON", "L_PDOCK", "L_PLOAD", "L_PMINE", "L_PRED",
+    "L_SAKICK", "L_SALOAD", "L_SANIGH", "L_SARUN", "L_MERLIN", "L_THALL", "SCREEN4", "SCREEN5"};
 
 constexpr int16_t kStay = -13;            // §3.1 nextState "stay"
 constexpr uint16_t kNoButtons = 0xfff1;   // §3.1 authoring value "no button"
@@ -53,19 +53,39 @@ constexpr int16_t kApproxBoxTop = -400;   // ponytail: used until the TOD bbox (
 
 } // namespace
 
-LitWorld LitWorld::load(const BzeFile& bze, const ActorModel* playerModel) {
+std::string LitWorld::levelName(int id) {
+    return id >= 0 && size_t(id) < std::size(kLevels) ? kLevels[id] : std::string();
+}
+
+LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
     LitWorld w;
-    w.model_ = playerModel;
+    w.scene_ = scene;
     const int i1 = bze.find(1), i4 = bze.find(4);
     if (i1 < 0 || i4 < 0) throw FormatError("LitWorld: needs sections 1 and 4");
     const std::vector<uint8_t> s1 = bze.payload(size_t(i1)), s4 = bze.payload(size_t(i4));
     const LevelScript ls = parseLevelScript(s1);
+    std::map<uint32_t, const ActorInstance*> at;  // ScriptItem::offset -> scene actor (TOD model)
+    if (scene)
+        for (const ActorInstance& a : scene->actors) at[a.scriptOffset] = &a;
     bool player = false;
-    std::map<uint16_t, const ScriptItem*> templates;
-    std::vector<const ScriptItem*> type14;
+    std::span<const uint8_t> prog;  // chunk 0 tag 0x01: u32 n, n x 16 programs x 8 B {u16 1-based blob, ...} (0x41e030)
     for (const ScriptItem& it : ls.items) {
         if (it.kind != ScriptItem::Kind::Chunk) continue;
-        if (it.code == 0x36) {
+        if (it.code == 0x00) {  // sound table entries tag 0x04 {u16 id, u8 bank, u8 program, u16 flags, u8, u8} (0x41de40)
+            if (const ScriptTag* t = tag(it, 0x01)) {
+                const uint32_t off = le<uint32_t>(t->data, 0), size = le<uint32_t>(t->data, 4);
+                if (size_t(off) + size <= s4.size()) prog = std::span(s4).subspan(off, size);
+            }
+            for (const ScriptTag& t : it.tags) {
+                if (t.id != 0x04) continue;
+                const uint16_t id = le<uint16_t>(t.data, 0), flags = le<uint16_t>(t.data, 4);
+                // 0x41edb0: program entry (bank * 16 + program) of DAT_0054afc4; flag 0x400 = per-language speech table.
+                const size_t e = 4 + (size_t(t.data[2]) * 16 + t.data[3]) * 8;
+                const int32_t blob = !(flags & 0x400) && e + 2 <= prog.size() ? int32_t(prog[e] | prog[e + 1] << 8) - 1 : -1;
+                if (id >= w.sounds_.size()) w.sounds_.resize(id + 1u, {-1, 0});
+                w.sounds_[id] = {blob, flags};
+            }
+        } else if (it.code == 0x36) {
             if (const ScriptTag* t = tag(it, 0x37)) {
                 const uint32_t off = le<uint32_t>(t->data, 0), size = le<uint32_t>(t->data, 4);
                 if (size_t(off) + size > s4.size()) throw FormatError("LitWorld: chunk 0x36 block outside section 4");
@@ -92,72 +112,78 @@ LitWorld LitWorld::load(const BzeFile& bze, const ActorModel* playerModel) {
             w.triggers.push_back(std::move(tr));
         } else if (it.code == 0x07 || it.code == 0x08 || it.code == 0x0a) {
             const ScriptTag* type = tag(it, 0x13);
-            const ScriptTag* id = tag(it, 0x27);
-            if (it.code == 0x08 && id) templates[le<uint16_t>(id->data, 0)] = &it;
-            if (!type) continue;
-            if (type->data[0] == 14 && it.code != 0x08) type14.push_back(&it);
-            if (type->data[0] != 1 || player) continue;
-            player = true;  // §3.1: tables of the player entity (tag 0x13 == 1)
-            w.spawn_ = v3(tag(it, 0x10));
-            if (const ScriptTag* t = tag(it, 0x11)) w.spawnYaw_ = int16_t(wrapSigned(le<int16_t>(t->data, 2)));
-            if (id) w.entityId_ = le<uint16_t>(id->data, 0);
-            if (const ScriptTag* t = tag(it, 0x1f)) w.p.zone = t->data[0];
+            if (type && type->data[0] == 1 && it.code != 0x08) {
+                if (player) continue;
+                player = true;  // §3.1: tables of the player entity (tag 0x13 == 1)
+                w.spawn_ = v3(tag(it, 0x10));
+                if (const ScriptTag* t = tag(it, 0x11)) w.spawnYaw_ = int16_t(wrapSigned(le<int16_t>(t->data, 2)));
+                if (const ScriptTag* t = tag(it, 0x27)) w.p.entityId = le<uint16_t>(t->data, 0);
+                if (const ScriptTag* t = tag(it, 0x1f)) w.p.zone = t->data[0];
+                if (auto m = at.find(it.offset); m != at.end()) w.model_ = &scene->actorModels[m->second->model];
+                for (const ScriptTag& t : it.tags) {
+                    const auto& d = t.data;
+                    if (t.id == 0x32) {
+                        PlayerState s{le<uint16_t>(d, 0), {}};
+                        for (size_t k = 0; k < 5; ++k) s.moves[k] = le<int16_t>(d, 2 + k * 2);
+                        w.states.push_back(s);
+                    } else if (t.id == 0x34) {
+                        w.moves.push_back({le<uint16_t>(d, 0), le<uint16_t>(d, 2), le<int16_t>(d, 4), le<uint32_t>(d, 8),
+                                           le<uint32_t>(d, 12), le<uint16_t>(d, 16), le<int16_t>(d, 18), le<int16_t>(d, 20),
+                                           le<int16_t>(d, 22)});
+                    } else if (t.id == 0x35) {
+                        w.rules.push_back({le<uint16_t>(d, 0), le<uint16_t>(d, 2), le<uint16_t>(d, 4), le<uint16_t>(d, 6),
+                                           le<int16_t>(d, 8), item(d, 10), le<uint16_t>(d, 20), le<uint32_t>(d, 24),
+                                           le<uint32_t>(d, 28), le<uint32_t>(d, 32), le<uint32_t>(d, 36)});
+                    }
+                }
+                continue;
+            }
+            ActorDef d;  // §7.1 tag map
+            d.chunk = it.code;
+            if (type) d.type = type->data[0];
+            if (auto m = at.find(it.offset); m != at.end()) d.model = int32_t(m->second->model), d.idleAnim = m->second->anim;
             for (const ScriptTag& t : it.tags) {
-                const auto& d = t.data;
-                if (t.id == 0x32) {
-                    PlayerState s{le<uint16_t>(d, 0), {}};
-                    for (size_t k = 0; k < 5; ++k) s.moves[k] = le<int16_t>(d, 2 + k * 2);
-                    w.states.push_back(s);
-                } else if (t.id == 0x34) {
-                    w.moves.push_back({le<uint16_t>(d, 0), le<uint16_t>(d, 2), le<int16_t>(d, 4), le<uint32_t>(d, 8),
-                                       le<uint32_t>(d, 12), le<uint16_t>(d, 16), le<int16_t>(d, 18), le<int16_t>(d, 20),
-                                       le<int16_t>(d, 22)});
-                } else if (t.id == 0x35) {
-                    w.rules.push_back({le<uint16_t>(d, 0), le<uint16_t>(d, 2), le<uint16_t>(d, 4), le<uint16_t>(d, 6),
-                                       le<int16_t>(d, 8), item(d, 10), le<uint16_t>(d, 20), le<uint32_t>(d, 24),
-                                       le<uint32_t>(d, 28), le<uint32_t>(d, 32), le<uint32_t>(d, 36)});
+                const auto& x = t.data;
+                switch (t.id) {
+                case 0x10: d.pos = v3(&t); break;
+                case 0x11: for (size_t k = 0; k < 3; ++k) d.rot[k] = le<int16_t>(x, k * 2); break;
+                case 0x12: for (size_t k = 0; k < 3; ++k) d.scale[k] = le<int32_t>(x, k * 4); break;
+                case 0x15: d.cls = x[0]; break;
+                case 0x16: d.flags8 = le<uint32_t>(x, 0), d.flagsC = le<uint32_t>(x, 4); break;
+                case 0x1b: for (size_t k = 0; k < 3; ++k) d.box[k] = le<int16_t>(x, k * 2); break;
+                case 0x1c: case 0x42: for (size_t k = 0; k < 3; ++k) d.box[3 + k] = le<int16_t>(x, k * 2); break;
+                case 0x1d: d.param = le<int16_t>(x, 0); break;
+                case 0x1e: d.reg = le<int16_t>(x, 0); break;
+                case 0x1f: d.zone = x[0]; break;
+                case 0x27: d.entityId = le<uint16_t>(x, 0); break;
+                case 0x38: d.inflate = le<int16_t>(x, 0); break;
+                case 0x3a: d.act3c = le<uint16_t>(x, 0), d.act3e = le<uint16_t>(x, 2); break;
+                case 0x32: {
+                    PlayerState s{le<uint16_t>(x, 0), {}};
+                    for (size_t k = 0; k < 5; ++k) s.moves[k] = le<int16_t>(x, 2 + k * 2);
+                    d.states.push_back(s);
+                    break;
+                }
+                case 0x30:
+                    d.steps.push_back({le<uint16_t>(x, 0), le<uint16_t>(x, 2), le<int16_t>(x, 4), le<uint16_t>(x, 8),
+                                       le<uint32_t>(x, 12), le<uint32_t>(x, 16),
+                                       {le<int16_t>(x, 20), le<int16_t>(x, 22), le<int16_t>(x, 24), le<int16_t>(x, 26),
+                                        le<int16_t>(x, 28)}});
+                    break;
+                case 0x31:
+                    d.items.push_back({le<uint16_t>(x, 0), le<uint16_t>(x, 2), le<uint32_t>(x, 4), le<uint32_t>(x, 8),
+                                       item(x, 12), le<uint32_t>(x, 20), le<int32_t>(x, 24), le<int32_t>(x, 28)});
+                    break;
+                default: break;
                 }
             }
+            w.defs.push_back(std::move(d));
         }
     }
     if (!player) throw FormatError("LitWorld: no player entity (tag 0x13 == 1)");
     if (w.hf.empty()) throw FormatError("LitWorld: no chunk 0x36 collision heightfield");
     if (!w.findState(1) || !w.findMove(uint16_t(w.findState(1)->moves[0])))
         throw FormatError("LitWorld: player tables lack state 1");
-
-    // Collectibles (§7.4): classify like tools/re/entities.py.
-    for (const ScriptItem* e : type14) {
-        const std::vector<Item31> its = items31(*e);
-        Pickup pk;
-        bool known = true;
-        if (std::ranges::any_of(its, [](const Item31& i) { return awards(i.it, 7); })) pk.kind = PickupKind::GoldenCarrot;
-        else if (std::ranges::any_of(its, [](const Item31& i) { return awards(i.it, 5); })) pk.kind = PickupKind::Clock;
-        else {
-            known = std::ranges::any_of(its, [&](const Item31& i) {
-                if (!(i.flags & 0x40100) || (i.flags & 0x20000000)) return false;
-                const auto t = templates.find(uint16_t(i.p2));
-                return t != templates.end() && t->second != e &&
-                       std::ranges::any_of(items31(*t->second), [](const Item31& j) { return j.it.act == 48; });
-            });
-        }
-        if (!known) continue;
-        for (const Item31& i : its) {
-            if (i.it.act == 12) pk.bits.emplace_back(i.it.x, i.it.y);
-            const int idx = pk.kind == PickupKind::GoldenCarrot ? 7 : 5;
-            if (pk.kind != PickupKind::Carrot && i.it.act == 23 && (i.it.x == idx || i.it.y == idx))
-                pk.counter = i.it.x == idx ? i.it.y : i.it.x;
-        }
-        std::ranges::sort(pk.bits);
-        pk.bits.erase(std::unique(pk.bits.begin(), pk.bits.end()), pk.bits.end());
-        pk.scriptOffset = e->offset;
-        pk.pos = v3(tag(*e, 0x10));
-        if (const ScriptTag* t = tag(*e, 0x11)) pk.rotY = le<int16_t>(t->data, 2);
-        if (const ScriptTag* t = tag(*e, 0x1b)) for (size_t k = 0; k < 3; ++k) pk.box[k] = le<int16_t>(t->data, k * 2);
-        if (const ScriptTag* t = tag(*e, 0x1c)) for (size_t k = 0; k < 3; ++k) pk.box[3 + k] = le<int16_t>(t->data, k * 2);
-        if (const ScriptTag* t = tag(*e, 0x38)) pk.inflate = le<int16_t>(t->data, 0);
-        w.pickups.push_back(std::move(pk));
-    }
-
     w.start(w.spawn_, w.spawnYaw_, w.p.zone);
     return w;
 }
@@ -168,7 +194,9 @@ void LitWorld::start(V3 spawn, int16_t yaw, int16_t zone) {
     G[1] = G[2] = 6;
     spawn_ = spawn;
     spawnYaw_ = yaw;
+    const uint16_t id = p.entityId;
     p = Player{};
+    p.entityId = id;
     p.pos = spawn;
     p.yaw = yaw;
     p.zone = zone;
@@ -176,6 +204,9 @@ void LitWorld::start(V3 spawn, int16_t yaw, int16_t zone) {
     checkpointYaw_ = yaw;
     cam = Camera{};
     cam.eye = cam.eyeCopy = levelEye_;
+    actors.clear();  // live list DAT_004b3740: chunks 0x07 / 0x0a in file order (§7.1)
+    for (size_t i = 0; i < defs.size(); ++i)
+        if (defs[i].chunk != 0x08) actors.push_back(instantiate(i));
 }
 
 const PlayerState* LitWorld::findState(uint16_t id) const {
@@ -190,87 +221,28 @@ const PlayerMove* LitWorld::findMove(uint16_t id) const {
 }
 int16_t LitWorld::boxTop() const { return p.animState.box[4] ? p.animState.box[4] : kApproxBoxTop; }
 
-// ---- logic VM subset (LOGIC.md §4/§5) used by player rules and zone triggers ----
-
-bool LitWorld::cond(const LogicItem& it) {
-    const uint16_t ab = uint16_t(it.a | it.b << 8);
-    switch (it.cond) {
-    case 0: return true;                                  // C0 true
-    case 1: return int8_t(S[it.b]) == int8_t(it.a);       // C1 ciseq
-    case 2: return G[it.b] == it.a;                       // C2 cigeq
-    case 4: return it.a < G[it.b];                        // C4 cigltu
-    case 11: return (p.flags14 & 0x2000020) == 0;         // C11
-    case 12: return p.state == it.a;                      // C12
-    case 14: return p.zone == it.a;                       // C14
-    case 21: return p.timer < ab;                         // C21
-    case 22: return p.timer > ab;                         // C22
-    case 23: return p.timer == ab;                        // C23
-    case 30: return (S[it.b] & it.a) != 0;                // C30 tismnz
-    case 31: return (G[it.b] & it.a) != 0;                // C31 tigmnz
-    case 34: case 39: return (S[it.b] & it.a) == 0;       // C34/C39 tismz
-    case 35: case 40: return (G[it.b] & it.a) == 0;       // C35/C40 tigmz
-    case 37: return S[it.b] != it.a;                      // C37 cisne
-    case 38: return G[it.b] != it.a;                      // C38 cigne
-    case 44: return p.zone != it.a;                       // C44
-    case 46: return S[it.b] == it.a;                      // C46
-    case 47: return G[it.b] == it.a;                      // C47
-    case 90: return (pad.pressed & ((it.a & 1 ? PadTriangle : 0) | (it.a & 2 ? PadCircle : 0) |   // C90 (C57 bytes)
-                                    (it.a & 4 ? PadCross : 0) | (it.a & 8 ? PadSquare : 0) | (it.a & 0x10 ? PadUp : 0) |
-                                    (it.a & 0x20 ? PadRight : 0) | (it.a & 0x40 ? PadDown : 0) |
-                                    (it.a & 0x80 ? PadLeft : 0))) != 0;
-    default:
-        unsupported.insert(std::format("C{}", it.cond));
-        return false;  // out-of-table conditions also return false in the exe
-    }
-}
-
-void LitWorld::act(const LogicItem& it) {
-    switch (it.act) {
-    case 0: return;
-    case 3: ++S[it.y & 0xff]; return;                   // A3 incs
-    case 11: S[it.y & 0xff] |= uint8_t(it.x); return;   // A11 orsi
-    case 12: G[it.y & 0xff] |= uint8_t(it.x); return;   // A12 orgi
-    case 13: S[it.y & 0xff] &= uint8_t(it.x); return;   // A13 andsi
-    case 14: G[it.y & 0xff] &= uint8_t(it.x); return;   // A14 andgi
-    case 18: S[it.y & 0xff] = uint8_t(it.x); return;    // A18 movsi
-    case 19: G[it.y & 0xff] = uint8_t(it.x); return;    // A19 movgi
-    case 25: p.timer = 0; return;                       // A25 reset self timer
-    case 28: S[it.y & 0xff] = G[it.x & 0xff]; return;   // A28 movsg
-    case 35: G[1] = 0; kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_)); return;  // A35 kill player
-    case 72:                                            // A72 damage player X (§3.6)
-        if (invuln_ == 0) {
-            G[1] = uint8_t(G[1] - it.x);
-            p.flags14 |= 0x2000000;
-            invuln_ = 0x1e;
-        }
-        return;
-    case 74: cam.flags |= 0x2000; return;               // A74 look disabled
-    case 92: deathStateA92_ = it.x; return;             // A92 death-state override
-    case 94: cam.flags |= 1; return;                    // A94
-    case 36: S[it.y & 0xff] = uint8_t(S[it.y & 0xff] + it.x); return;  // A36 addsi
-    case 39: S[it.y & 0xff] = uint8_t(S[it.y & 0xff] - it.x); return;  // A39 subsi
-    case 58: return;                                    // A58 rumble (PadSetAct is a no-op on PC)
-    default: unsupported.insert(std::format("A{}", it.act));
-    }
+// Sound start 0x41deb0 mode 1 (mode 2 releases a looping voice: no voices are simulated).
+void LitWorld::playSound(uint32_t id) {
+    if (id < sounds_.size() && sounds_[id][0] >= 0) sfx.push_back(uint16_t(sounds_[id][0]));
 }
 
 // ---- tick ----
 
 void LitWorld::tick(const PadInput& in) {
     ++ticks;
-    // §2.2: all words zero while the player is scripted/dead (flags14 0x1000000).
-    if (p.flags14 & 0x1000000) {
+    sfx.clear();
+    // §2.2: all words zero while the player is scripted/dead (flags14 0x1000000) or a level change is pending.
+    if ((p.flags14 & 0x1000000) || nextLevel >= 0) {
         pad.raw = pad.held = pad.prev = pad.pressed = 0;
         pad.sx = pad.sy = 0;
     } else {
         padTick(pad, in);
     }
     cameraTick();   // §1.1 step 3a: camera first, from the previous tick's player position
-    playerTick();   // §7.1: the player runs first among behaviours
+    actorsTick();   // §7.1: activation, then behaviours in active-list order (player among them)
     // HUD actor 0x44acc0 (§3.6): health below 1 -> death state (A92 override, else the zone-trigger default).
     if (int8_t(G[1]) < 1 && !(p.flags14 & 0x1000000))
         kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_));
-    ++p.timer;      // §7.1: +0x22 increments after the behaviour
 }
 
 void LitWorld::initPlayer() {  // 0x43a880 first call (part list not built yet)
@@ -290,80 +262,80 @@ void LitWorld::initPlayer() {  // 0x43a880 first call (part list not built yet)
 }
 
 // 0x43a250: jump arc phase step (§3.3).
-void LitWorld::arcTick() {
-    const int16_t ph = p.phase;
-    p.flags14 = ph < 0x800 ? p.flags14 & ~8u : p.flags14 | 8;
-    if (ph < 0xc01 && (!(p.flags14 & 4) || (p.flags14 & 0x10))) {
-        const int32_t s = rsin(ph) * p.jumpH;
-        p.vy = (p.flags14 & 8) ? int16_t(uint16_t((-s) >> 11) & 0xfffe) : int16_t((-s) >> 12);  // down twice as fast
-        p.phase = int16_t(p.phase + p.jumpStep);
+void LitWorld::arcTick(Mover& m) {
+    const int16_t ph = m.phase;
+    m.flags14 = ph < 0x800 ? m.flags14 & ~8u : m.flags14 | 8;
+    if (ph < 0xc01 && (!(m.flags14 & 4) || (m.flags14 & 0x10))) {
+        const int32_t s = rsin(ph) * m.jumpH;
+        m.vy = (m.flags14 & 8) ? int16_t(uint16_t((-s) >> 11) & 0xfffe) : int16_t((-s) >> 12);  // down twice as fast
+        m.phase = int16_t(m.phase + m.jumpStep);
         return;
     }
-    p.vy = 0;
-    const uint32_t f = p.flags14;
-    p.flags14 = f & ~9u;
-    if (!(f & 2)) p.flags14 |= 0x200;  // arc ended airborne -> free fall
+    m.vy = 0;
+    const uint32_t f = m.flags14;
+    m.flags14 = f & ~9u;
+    if (!(f & 2)) m.flags14 |= 0x200;  // arc ended airborne -> free fall
 }
 
 // MoveActor 0x437390 (§4.3): horizontal trace with diagonal wall-slide retry (0x436ff0), vertical target
 // (0x4371f0), fall/landing/smoothing (0x436de0). delta is in/out (world units this tick).
-void LitWorld::moveActor(V3& d, Ground& r) {
-    r.zone = p.zone;
+void LitWorld::moveActor(Mover& m, V3& d, Ground& r, int16_t top) {
+    r.zone = m.zone;
     // --- 0x436ff0 ---
-    const V3 save = p.pos;
-    if (p.vy < 0) p.pos.y += p.vy;  // rising: trace from the raised height
-    const int32_t yTrace = p.pos.y;
+    const V3 save = m.pos;
+    if (m.vy < 0) m.pos.y += m.vy;  // rising: trace from the raised height
+    const int32_t yTrace = m.pos.y;
     const int16_t origDx = int16_t(d.x), origDz = int16_t(d.z);
     int32_t dx = d.x, dz = d.z;
-    hf.trace(p.pos, dx, dz, r);
+    hf.trace(m.pos, dx, dz, r);
     int32_t accX = dx, accZ = dz;
-    p.pos.x += dx;
-    p.pos.z += dz;
+    m.pos.x += dx;
+    m.pos.z += dz;
     if (r.kind & KindDiagonal) {  // wall slide: retry the remaining X, then the remaining Z
         int32_t rx = int32_t(origDx) - dx, rz = 0;
         const int16_t remZ = int16_t(origDz - int16_t(dz));
-        p.pos.y = yTrace;
-        hf.trace(p.pos, rx, rz, r);
-        if (rx != 0) { accX += rx; p.pos.x += rx; }
+        m.pos.y = yTrace;
+        hf.trace(m.pos, rx, rz, r);
+        if (rx != 0) { accX += rx; m.pos.x += rx; }
         rx = 0;
         rz = remZ;
-        p.pos.y = yTrace;
-        hf.trace(p.pos, rx, rz, r);
-        if (rz != 0) { accZ += rz; p.pos.z += rz; }
+        m.pos.y = yTrace;
+        hf.trace(m.pos, rx, rz, r);
+        if (rz != 0) { accZ += rz; m.pos.z += rz; }
     } else if (r.kind & KindBlocked) {
-        p.flags14 |= 0x100000;
+        m.flags14 |= 0x100000;
     }
     if (r.kind & KindOpen) {  // open sub-cell: floor of the zone below (§4.2)
-        p.pos.y += 1;
+        m.pos.y += 1;
         const int16_t keep = r.zone;
-        hf.groundAt(p.pos, r);
+        hf.groundAt(m.pos, r);
         r.zone = keep;
     }
-    p.groundBase = p.pos.y;
-    p.hoff = r.hoff;
-    p.pos = save;
+    m.groundBase = m.pos.y;
+    m.hoff = r.hoff;
+    m.pos = save;
     d.x = accX;
     d.z = accZ;
     // --- 0x437390 ---
-    if (r.kind & KindBlocked) p.flags14 |= 0x100000;
-    if (r.zone != -1) p.zone = r.zone;
+    if (r.kind & KindBlocked) m.flags14 |= 0x100000;
+    if (r.zone != -1) m.zone = r.zone;
     // --- 0x4371f0: vertical target ---
-    const int32_t ground = p.hoff + p.groundBase;
-    const uint32_t f = p.flags14;
+    const int32_t ground = m.hoff + m.groundBase;
+    const uint32_t f = m.flags14;
     if (!(f & 1)) {
-        if (!(f & 4)) d.y = (r.kind & KindNoZone) ? 200 : ground - p.pos.y;  // no zone: dy = 200 (§4.3)
-        else if (ground < p.pos.y + d.y) d.y = ground - p.pos.y;
+        if (!(f & 4)) d.y = (r.kind & KindNoZone) ? 200 : ground - m.pos.y;  // no zone: dy = 200 (§4.3)
+        else if (ground < m.pos.y + d.y) d.y = ground - m.pos.y;
     } else {
-        int32_t target = p.vy + p.pos.y;
+        int32_t target = m.vy + m.pos.y;
         bool land = false;
-        if (p.phase < 0x801) {
-            if (target + boxTop() < r.ceiling) {  // head above the zone ceiling
+        if (m.phase < 0x801) {
+            if (target + top < r.ceiling) {  // head above the zone ceiling
                 if (target <= ground) {
-                    V3 q{p.pos.x + d.x, r.ceiling - 1, p.pos.z + d.z};
+                    V3 q{m.pos.x + d.x, r.ceiling - 1, m.pos.z + d.z};
                     Ground above;
                     above.zone = -1;
                     hf.groundAt(q, above);
-                    if (!(above.kind & KindOpen)) target = std::min(r.ceiling - int32_t(boxTop()), ground);
+                    if (!(above.kind & KindOpen)) target = std::min(r.ceiling - int32_t(top), ground);
                     else if (!(target < ground)) land = true;
                 } else {
                     land = true;
@@ -372,24 +344,24 @@ void LitWorld::moveActor(V3& d, Ground& r) {
                 land = true;
             }
         } else if (r.kind == KindOpen || target <= ground) {
-            if (r.kind == KindOpen || r.kind == KindNoZone) p.groundBase += 1;
+            if (r.kind == KindOpen || r.kind == KindNoZone) m.groundBase += 1;
             if (!(target < ground)) land = true;
         } else {
             land = true;
         }
         if (land) {
-            p.flags14 = f & ~9u;
+            m.flags14 = f & ~9u;
             target = ground;
         }
-        d.y = target - p.pos.y;
+        d.y = target - m.pos.y;
     }
     // --- 0x436de0: smoothing, fall, landing (§3.3) ---
     const int32_t dy0 = d.y;
-    const int32_t to = p.pos.y + dy0;
+    const int32_t to = m.pos.y + dy0;
     uint32_t keep = 0, cleared = 0;
     bool done = false;
-    if (to < p.pos.y + 200 || (p.flags14 & 1)) {
-        const uint32_t g = p.flags14;
+    if (to < m.pos.y + 200 || (m.flags14 & 1)) {
+        const uint32_t g = m.flags14;
         if (!(g & 1)) {
             if (!(g & 2)) {
                 if (!(g & 4)) d.y = std::clamp(d.y, -70, 70);  // airborne snap clamp ±70
@@ -399,42 +371,42 @@ void LitWorld::moveActor(V3& d, Ground& r) {
                 d.y >>= 1;
             }
         }
-        if (d.y + p.pos.y == p.hoff + p.groundBase && r.kind != KindOpen && r.kind != KindNoZone) {
-            p.phase = 0x800;  // landing
-            p.flags14 = (p.flags14 & 0xfffefdff) | 2;
+        if (d.y + m.pos.y == m.hoff + m.groundBase && r.kind != KindOpen && r.kind != KindNoZone) {
+            m.phase = 0x800;  // landing
+            m.flags14 = (m.flags14 & 0xfffefdff) | 2;
             done = true;
-        } else if (p.flags14 & 2) {
+        } else if (m.flags14 & 2) {
             done = true;
         } else {
-            cleared = p.flags14 & ~2u;
-            keep = p.flags14 & 5;
-            p.flags14 = cleared;
+            cleared = m.flags14 & ~2u;
+            keep = m.flags14 & 5;
+            m.flags14 = cleared;
         }
     } else {  // more than 200 below: free fall vy = 70 + 70·cos (§3.3)
-        if (p.phase > 0xbff) p.phase = 0xc00;
-        const int32_t s = rsin(p.phase + 0x400);
-        p.phase = int16_t(p.phase + 0x44);
+        if (m.phase > 0xbff) m.phase = 0xc00;
+        const int32_t s = rsin(m.phase + 0x400);
+        m.phase = int16_t(m.phase + 0x44);
         const int16_t vy = int16_t(0x46 - int16_t((s * -0x46) >> 12));
-        const uint32_t g = p.flags14;
-        const int32_t next = (g & 0x10000) ? p.pos.y + 12 : vy + p.pos.y;  // glide: 12
+        const uint32_t g = m.flags14;
+        const int32_t next = (g & 0x10000) ? m.pos.y + 12 : vy + m.pos.y;  // glide: 12
         if (to <= next) {
             if (r.kind == KindOpen || r.kind == KindNoZone) {
-                p.flags14 = g & ~2u;
-                if (!(g & 4)) p.flags14 = (g & ~2u) | 0x200;
+                m.flags14 = g & ~2u;
+                if (!(g & 4)) m.flags14 = (g & ~2u) | 0x200;
             } else {
-                p.phase = 0x800;
-                p.flags14 = (g & 0xfffefdff) | 2;
+                m.phase = 0x800;
+                m.flags14 = (g & 0xfffefdff) | 2;
             }
             done = true;
         } else {
             d.y = (g & 0x10000) ? 12 : vy;
-            cleared = p.flags14 & ~2u;
-            keep = p.flags14 & 4;
-            p.flags14 = cleared;
+            cleared = m.flags14 & ~2u;
+            keep = m.flags14 & 4;
+            m.flags14 = cleared;
         }
     }
-    if (!done && keep == 0) p.flags14 = cleared | 0x200;
-    if (p.flags14 & 4) d.y = dy0;
+    if (!done && keep == 0) m.flags14 = cleared | 0x200;
+    if (m.flags14 & 4) d.y = dy0;
 }
 
 void LitWorld::kill(int16_t deathState) {  // 0x437b90(state, NULL)
@@ -456,14 +428,52 @@ void LitWorld::respawn() {  // end of the death clip (0x43a880 tail): checkpoint
     G[1] = 6;
 }
 
-// 0x4384a0 + 0x434b00: the first trigger volume containing the player runs its entries (§7.5). Only the
-// flags listed in the switch are interpreted; logic items go through the VM subset above.
-void LitWorld::zoneTriggers() {
+// 0x4377a0: force Bugs into state `state` (move index 0, animation restarted).
+void LitWorld::forceState(uint16_t state) {
+    if (p.flags14 & 0x1000000) return;
+    const PlayerState* st = findState(state);
+    if (!st) { unsupported.insert(std::format("state {}", state)); return; }
+    p.state = state;
+    p.seq = 0;
+    p.anim = 0;
+    p.lean = 0;
+    if (const PlayerMove* mv = findMove(uint16_t(st->moves[0])); mv && (mv->flagsB & 0x800)) p.flags14 &= 0xfffffdf6;
+    turnErr_ = -1;
+}
+
+// 0x437d90: enemy hit on Bugs. Damage only while his move is vulnerable (flagsA 0x4000), no invulnerability,
+// no level change, S[3] == 0 and not scripted: 1, or the attacker step +0x16 clamped to 2 (0 = none); 30 ticks
+// invulnerable. Returns whether the hit counted (the caller then forces the knock-back state).
+bool LitWorld::damagePlayer(LitActor& a, const ActorStep* st) {
+    if (invuln_ > 0 || nextLevel >= 0 || S[3] || (p.flags14 & 0x81000000)) return false;
+    a.flags14 |= 0x8000;
+    const PlayerState* ps = findState(p.state);
+    const PlayerMove* mv = ps && p.seq <= 4 ? findMove(uint16_t(ps->moves[p.seq])) : nullptr;
+    if (!mv || !(mv->flagsA & 0x4000)) return false;
+    p.contact = a.entityId;
+    a.contact = 1;
+    int dmg = 1;
+    if (st && !((a.flags8 & 0x10000000) && (a.flags14 & 1)) && !(st->flagsA & 0x200000)) dmg = std::min<int>(st->w[1], 2);
+    if (dmg > 0) {
+        G[1] = uint8_t(G[1] - dmg);
+        invuln_ = 0x1e;
+        p.flags14 |= 0x2000000;
+    }
+    a.flags18 |= 0x4000;
+    if (int8_t(G[1]) < 1) a.flags18 |= 0x2000;
+    return true;
+}
+
+// 0x4384a0 + 0x434b00 for actor m (self, nullptr = Bugs): the first trigger volume containing it runs the entries
+// addressed to its entity id (§7.5; the logic item goes through the VM).
+void LitWorld::zoneTriggers(Mover& m, LitActor* self) {
+    if (nextLevel >= 0) return;
+    const int16_t top = self ? self->box[4] : boxTop();
     for (const Trigger& t : triggers) {
-        if (!(t.flags & 2) && t.zone != p.zone) continue;
-        const int16_t lx0 = int16_t(int16_t(p.pos.x) - int16_t(t.pos.x)), ly = int16_t(int16_t(p.pos.y) - int16_t(t.pos.y)),
-                      lz0 = int16_t(int16_t(p.pos.z) - int16_t(t.pos.z));
-        if (!(boxTop() + ly < 1 && t.minY <= ly)) continue;
+        if (!(t.flags & 2) && t.zone != m.zone) continue;
+        const int16_t lx0 = int16_t(int16_t(m.pos.x) - int16_t(t.pos.x)), ly = int16_t(int16_t(m.pos.y) - int16_t(t.pos.y)),
+                      lz0 = int16_t(int16_t(m.pos.z) - int16_t(t.pos.z));
+        if (!(top + ly < 1 && t.minY <= ly)) continue;
         int32_t lx = lx0, lz = lz0;
         if (!(t.flags & 1)) {  // local frame: RotMatrixZYX(0x1000 - rot); only the yaw is modelled
             const V3 l = rotY(0x1000 - t.rotY, lx0, 0, lz0);
@@ -472,48 +482,30 @@ void LitWorld::zoneTriggers() {
         }
         if (lx < 0 || lx > t.sizeX || lz < 0 || lz > t.sizeZ) continue;
         for (const TriggerEntry& e : t.entries) {
-            if (e.actor != entityId_) continue;
-            if (e.mask14 && !(p.flags14 & e.mask14)) continue;
-            if (e.item.cond && !cond(e.item)) continue;
-            if (e.item.act) act(e.item);
-            if (e.flags & 0x40000000) p.pos = {e.arg[0], e.arg[1], e.arg[2]};  // teleport
+            if ((m.entityId == 6 || e.actor == 6) && self && (self->flagsC & 2)) { self->flags14 |= 0x100; return; }
+            if (e.actor != m.entityId) continue;
+            if (e.mask14 && !(m.flags14 & e.mask14)) continue;
+            if (e.item.cond && !cond(e.item, self)) continue;
+            if (e.item.act) act(e.item, self);
+            const V3 arg{e.arg[0], e.arg[1], e.arg[2]};
+            if (e.flags & 0x80000000) forceState(uint16_t(e.arg[0]));
+            if (e.flags & 0x800) { p.pos = arg; p.platform = -1; p.flags14 &= ~0x14u; cameraSnap(arg); }  // 0x4379b0
+            if (e.flags & 0x40000000) {  // teleport self
+                m.pos = arg;
+                if (!self && p.platform >= 0) { p.platform = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x202; }
+            }
+            if (e.flags & 0x80000) nextLevel = e.arg[0];  // level exit: GD+0 = arg, DAT_004b39bc = 1
             if (e.flags & 0x200000) { kill(int16_t(e.arg[0])); G[1] = 0; }  // kill, death state arg0
             if (e.flags & 0x400000) defaultDeathState_ = e.arg[0];
-            if (e.flags & 0x100000) { checkpoint_ = {e.arg[0], e.arg[1], e.arg[2]}; checkpointYaw_ = p.yaw; }
+            if (e.flags & 0x100000) { checkpoint_ = arg; checkpointYaw_ = p.yaw; }
             if (e.flags & 0x10000) break;
-            if (e.flags & 0x40) cameraSnap({e.arg[0], e.arg[1], e.arg[2]});
-            for (uint32_t fl : {0x80000000u, 0x800u, 0x800000u, 0x80000u, 0x200u, 0x2000u})
+            if (e.flags & 0x200) playSound(uint32_t(e.arg[0]));
+            if (e.flags & 0x40) cameraSnap(arg);
+            for (uint32_t fl : {0x800000u, 0x2000u})  // respawn point 0x4b2180 (no reader found), 0x437510
                 if (e.flags & fl) unsupported.insert(std::format("trigger flag 0x{:x}", fl));
             if (!(e.flags & 0x8000)) return;
         }
         return;
-    }
-}
-
-// Collectible touch (§7.4). Implemented (approximation): the exe marks pickups through the player's box push
-// 0x433500 and the type-14 item interpreter applies the rewards; here the player's centre (radius 80) against
-// the pickup box inflated by tag 0x38, reward applied on the touching tick.
-void LitWorld::pickupTouch() {
-    for (Pickup& k : pickups) {
-        if (k.taken) continue;
-        const V3 l = rotY(0x1000 - k.rotY, int16_t(p.pos.x - k.pos.x), 0, int16_t(p.pos.z - k.pos.z));
-        const int32_t ly = p.pos.y - k.pos.y, r = 80 + k.inflate;
-        if (l.x < k.box[0] - r || l.x > k.box[3] + r || l.z < k.box[2] - r || l.z > k.box[5] + r) continue;
-        if (ly + boxTop() > k.box[1] + k.inflate || ly < k.box[4] - k.inflate) continue;
-        k.taken = true;
-        for (auto [x, y] : k.bits) G[y & 0xff] |= uint8_t(x);  // A12 orgi collected flag
-        auto inc = [&](int idx) {
-            if (idx == 7) { const int gc = goldenCarrots() + 1; G[7] = uint8_t(gc); G[0xfc] = uint8_t(gc >> 8); }
-            else if (idx >= 0) G[size_t(idx)] = uint8_t(G[size_t(idx)] + 1);
-        };
-        switch (k.kind) {
-        case PickupKind::Carrot:  // template 37 -> A48 gvcrt: health +1 if hurt, else carrots +1 (HUD cap 99)
-            if (G[1] < G[2]) ++G[1];
-            else G[3] = uint8_t(std::min(99, G[3] + 1));
-            break;
-        case PickupKind::GoldenCarrot: inc(7); inc(k.counter); break;  // A23 incgg
-        case PickupKind::Clock: inc(5); inc(k.counter); break;         // A23 incgg (state-95 celebration not played)
-        }
     }
 }
 
@@ -669,8 +661,9 @@ void LitWorld::playerTick() {
         p.vy = 0;
         p.flags14 = (p.flags14 & 0xeffff9f1) | 1;
     }
-    if ((p.flags14 & 1) && (!(p.flags14 & 0x200) || (p.flags14 & 0x400)) && !frozen) arcTick();
+    if ((p.flags14 & 1) && (!(p.flags14 & 0x200) || (p.flags14 & 0x400)) && !frozen) arcTick(p);
     p.flags14 = (mv->flagsA & 0x810000) ? p.flags14 | 0x40 : p.flags14 & ~0x40u;  // attack active
+    playerAttacks(*mv);
 
     // 5. Collision move (§4.4 reimplementation notes): X-only, Z-only, then MoveActor with the clamped delta.
     const int32_t sum0 = w.z + w.x;
@@ -689,10 +682,9 @@ void LitWorld::playerTick() {
         w.x = cx;
         w.z = dz;
     }
-    if ((p.flags14 & 0x81000000) == 0) moveActor(w, r);
+    if ((p.flags14 & 0x81000000) == 0) moveActor(p, w, r, boxTop());
     if (sum0 != w.z + w.x) p.flags14 |= 0x100000;  // blocked by a wall this tick
-    // (0x433500 solid-actor push: no solid actors are simulated.)
-    pickupTouch();
+    playerContacts(w);  // 0x433500 mask 0x9a690a: solids, platforms, pickups (approximation)
     p.pos.x += w.x;
     p.pos.y += w.y;
     p.pos.z += w.z;
@@ -703,14 +695,16 @@ void LitWorld::playerTick() {
         int16_t next = kStay;
         for (const PlayerRule& ru : rules) {
             if (ru.group != mv->link) continue;
-            if (ru.heldMask) continue;  // needs a held actor (none simulated)
-            if (ru.parentMask && !((ru.parentMask & 0x8000) && (p.flags18 & 0x40))) continue;  // no support actor
+            if (ru.heldMask) continue;  // needs a held actor (carrying is not simulated)
+            if (ru.parentMask && !(p.platform >= 0 && (actors[size_t(p.platform)].flags8 & ru.parentMask)) &&
+                !((ru.parentMask & 0x8000) && (p.flags18 & 0x40)))
+                continue;
             if (ru.flags14Mask && (((p.flags14 & ru.flags14Mask) != 0) == bool(ru.invert & 2))) continue;
             if (ru.flags18Mask && (((p.flags18 & ru.flags18Mask) != 0) == bool(ru.invert & 1))) continue;
             if (ru.any && !(pad.pressed & ru.any)) continue;
             if (ru.all != (pad.pressed & ru.all) && ru.all != kNoButtons) continue;
-            if (!cond(ru.item)) continue;
-            act(ru.item);
+            if (!cond(ru.item, nullptr)) continue;
+            act(ru.item, nullptr);
             next = ru.next;
             break;
         }
@@ -763,7 +757,7 @@ void LitWorld::playerTick() {
         } else {
             V3 z{};
             p.pos = safe_;
-            moveActor(z, g);
+            moveActor(p, z, g, boxTop());
             safe_.y = p.pos.y + z.y;
             p.pos.y = safe_.y;
         }
@@ -775,7 +769,7 @@ void LitWorld::playerTick() {
         if (invuln_ < 0x1e) p.flags14 &= 0xfdffffdf;
         --invuln_;
     }
-    if (!(p.flags14 & 0x1000000)) zoneTriggers();
+    if (!(p.flags14 & 0x1000000)) zoneTriggers(p, nullptr);
     p.lastMove = w.x | w.y | w.z;
 }
 
@@ -810,6 +804,11 @@ void LitWorld::cameraReset() {  // 0x431160 (camera reset, also A77)
 void LitWorld::cameraTick() {
     if (const Zone* z = hf.findZone(p.pos, p.zone)) p.zone = int16_t(z->id);
     if (!p.initialised) return;
+    if (camHold_ > 0) {  // A41 hold 0x4b3dac: camera frozen, Bugs frozen (flags14 0x80000000, cleared each tick)
+        --camHold_;
+        p.flags14 |= 0x80000000;
+        return;
+    }
     bool moved = p.lastMove != 0;  // param_2 = P+0x1b4
     if (cam.lastPlayer != p.pos) moved = true;
     cam.lastPlayer = p.pos;
@@ -818,6 +817,39 @@ void LitWorld::cameraTick() {
         else cam.flags &= ~0x40u;
     }
     const int32_t dist = (p.flags14 & 0x1000000) ? 500 : cam.distance;
+    if (cam.flags & 0xc00) {  // scripted points (type-36 directors, 0x4318f0 0xc00 branch): no follow this tick
+        cam.flags &= ~0x10u;
+        const V3 P = p.pos;
+        const V3 to = (cam.flags & 0x800) ? cam.lookPoint : V3{P.x, P.y - 400, P.z};
+        cam.target.x -= (cam.target.x - to.x) >> 2;
+        cam.target.y -= (cam.target.y - to.y) >> 2;
+        cam.target.z -= (cam.target.z - to.z) >> 2;
+        if (cam.flags & 0x1000) {  // eye point kept at fixedDist from the target (s16 deltas as the exe)
+            const int32_t dx = int16_t(cam.point.x - cam.target.x), dy = int16_t(cam.point.y - cam.target.y),
+                          dz = int16_t(cam.point.z - cam.target.z);
+            const int32_t len = std::max(isqrt(dy * dy + dz * dz + dx * dx), 1);
+            cam.point.x = (((dx << 12) / len) * cam.fixedDist >> 12) + cam.target.x;
+            cam.point.y = (((dy << 12) / len) * cam.fixedDist >> 12) + cam.target.y;
+            cam.point.z = (((dz << 12) / len) * cam.fixedDist >> 12) + cam.target.z;
+        }
+        if (cam.flags & 0x400) {
+            cam.eye.x -= (cam.eye.x - cam.point.x) >> 2;
+            cam.eye.y -= (cam.eye.y - cam.point.y) >> 2;
+            cam.eye.z -= (cam.eye.z - cam.point.z) >> 2;
+        }
+        if (cam.flags & 0x4000) {
+            cam.cand = cam.eyeCopy = cam.candCopy = cam.eye;
+            cam.targetCopy = cam.target;
+        }
+        if (cam.flags & 8) cam.flags &= 0xffffa3f7;
+        const int32_t dx = int16_t(cam.eye.x - cam.target.x), dz = int16_t(cam.eye.z - cam.target.z);
+        cam.yaw = cam.cachedYaw = int16_t(ratan2(dx, dz));
+        cam.cachedDist = isqrt(dz * dz + dx * dx) + 1;
+        cam.flags |= 0x40;
+        cam.recentreTimer = 0x3c;
+        cam.recentreRequest = 0;
+        return;
+    }
     // Manual rotation (§5 step 4): L2 +0x26, R2 -0x26 per tick; holds the yaw (flags |= 0x82).
     const uint32_t f = cam.flags & ~0x10u;
     cam.flags = f & 0xffffa3e7;

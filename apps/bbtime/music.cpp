@@ -3,6 +3,7 @@
 #include "bb/audio.h"
 
 #include <cctype>
+#include <format>
 #include <memory>
 #include <print>
 #include <string>
@@ -29,6 +30,10 @@ fs::path find(fs::path p, std::initializer_list<std::string> parts) {
     return p;
 }
 
+std::unique_ptr<bb::AudioDevice> dev;
+
+} // namespace
+
 // LiT: title.bze section-1 music table (chunk 0x05, tag 0x06 {zone, track, track}) = {1,25,25},{2,25,25};
 //      bugs.exe 0x41d630 opens ..\track\Track%d.xa with that number -> TRACK25.xa. Verified (code + data).
 // TB:  the original front end plays NO music (only bong.wav volume test; docs/re/GAMEPLAY_TB.md §6).
@@ -39,26 +44,34 @@ fs::path menuTrack(bb::GameId g, const fs::path& gameRoot) {
                                        : find(gameRoot, {"Datas", "TRACK", "track2.xa"});
 }
 
-} // namespace
+fs::path tbLevelTrack(const fs::path& gameRoot, int n) {
+    if (n <= 1) return {};
+    fs::path t = find(gameRoot, {"Datas", "TRACK", std::format("Track{}.xa", n - 1)});
+    return t.empty() ? find(gameRoot, {"Datas", "TRACK", "Track14.xa"}) : t;
+}
 
-void menuMusic(const fs::path& gameRoot, std::optional<bb::GameId> game) {
-    static std::unique_ptr<bb::AudioDevice> dev;
-    static std::optional<bb::GameId> current;
-    if (game != current) {
-        current = game;
+bb::AudioDevice* audioDevice() {
+    if (!dev) {
+        dev = std::make_unique<bb::AudioDevice>();
+        if (!dev->ok()) std::println(stderr, "bbtime: no OpenAL device, audio disabled");
+    }
+    return dev->ok() ? dev.get() : nullptr;
+}
+
+void playMusic(const fs::path& track) {
+    static fs::path current;
+    if (track != current) {
+        current = track;
         if (dev) dev->stopMusic();
-        if (game) {
-            if (!dev) {
-                dev = std::make_unique<bb::AudioDevice>();
-                if (!dev->ok()) std::println(stderr, "bbtime: no OpenAL device, music disabled");
+        if (!track.empty())
+            if (bb::AudioDevice* d = audioDevice()) {
+                try {
+                    d->playMusic(track);
+                    std::println("bbtime: music {}", track.string());
+                } catch (const std::exception& e) {
+                    std::println(stderr, "bbtime: music {}: {}", track.string(), e.what());
+                }
             }
-            const fs::path track = menuTrack(*game, gameRoot);
-            if (track.empty()) std::println(stderr, "bbtime: menu track not found under {}", gameRoot.string());
-            else if (dev->ok()) {
-                dev->playMusic(track);
-                std::println("bbtime: music {}", track.string());
-            }
-        }
     }
     if (dev) dev->update();
 }

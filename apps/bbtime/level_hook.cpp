@@ -1,6 +1,7 @@
 #include "level_hook.h"
 
 #include "bb/level.h"
+#include "bb/tb_actor.h"
 #include "bb/tb_level.h"
 
 #include <algorithm>
@@ -142,6 +143,12 @@ Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& l
     try {
         BzeFile bze = loadBze(file);
         Scene s = lit ? buildLitScene(bze, level) : buildTbScene(bze, level);
+        if (!lit) {  // skinned TB actors (Bugs, Taz, NPCs) posed by packed-TOD animation (GAMEPLAY_TB.md §5)
+            const size_t props = s.actors.size();
+            addTbActors(s, bze);
+            s.notes.push_back(std::format("{} skinned actors animated (packed TOD; initial anim from the start state)",
+                                          s.actors.size() - props));
+        }
         if (bzeOut) *bzeOut = std::move(bze);
         return s;
     } catch (const std::exception& e) {

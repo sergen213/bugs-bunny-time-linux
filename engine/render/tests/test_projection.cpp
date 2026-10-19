@@ -33,6 +33,9 @@ int main() {
         assert(near(m[0][0], 1.0f / (t * 4.0f / 3.0f)));
         assert(horPlusVFov(v, a) > v);
     }
+    // Original Fidelity: the exe at 640x480 (sy 5120 = 1.25, H 400) maps y/z = 240/500 to the screen edge.
+    assert(near(glm::degrees(kOriginalVFovRad), 51.2819f, 1e-3f));
+    assert(near(projection(kOriginalVFovRad, 4.0f / 3.0f, 0.1f, 100.0f)[1][1], 500.0f / 240.0f));
 
     // Camera: yaw 0 looks down -Z; a point straight ahead projects to the view axis.
     Camera c;

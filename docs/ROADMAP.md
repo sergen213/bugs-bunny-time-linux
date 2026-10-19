@@ -28,14 +28,14 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 | TIM textures | Tested (C++, 28,206 refs; 1 unsupported 24-bit image) | Tested (C++, 17,103 refs) |
 | World geometry → renderer | Tested (79 levels, 342k tris; visual check only) | Tested (58 levels, octree trees A+B; tree C = far LOD, not drawn) |
 | Rigid props | Implemented (placement rule inferred) | Implemented (placement rule inferred) |
-| Missing texture ids | Designed (rule verified: texture links, `formats/TEXTURE_GAP.md`); LiT loader not yet applying it | Tested (C++: 1,558/1,558 world faces resolve, animated) |
-| Animation (Sony TOD, rigid parts) | Tested (233,491 poses; matches python to 5e-4) | Designed (same posing, compressed packets; `re/GAMEPLAY_TB.md` §5) |
-| Collision | Tested (heightfield, `bb_game`; trace = approximation, GAMEPLAY_STATUS.md) | Designed (collision mesh + octree decoded in python; `re/GAMEPLAY_TB.md` §1) |
-| Player controller / camera / entities | Tested: player + camera + collectibles playable on L01a (GAMEPLAY_STATUS.md); enemies/platforms not ported | Designed (constants + move tables, `re/GAMEPLAY_TB.md` §2–3) |
-| Bugs/Taz switching, co-op | — | Designed (R1 swap, L1 call-friend, spring/midpoint camera; `re/GAMEPLAY_TB.md` §4) |
-| `.xa` IMA ADPCM music/speech | Tested (C++, 35 files) + menu music | Tested (C++, 446 files); menu track UNVERIFIED |
+| Missing texture ids | Verified Against Original Behavior (rule `formats/TEXTURE_GAP.md`; loader resolves 5,271/5,271 world faces; L04C3 links 9/11 and L02A1 link 16 frame timings match the original alias-table traces `csv/litworld_L04C3_links.csv`, `csv/litworld_L02A1_links.csv` — RUNTIME_REFERENCE.md §8, GAMEPLAY_STATUS.md) | Tested (C++: 1,558/1,558 world faces resolve, animated) |
+| Animation (Sony TOD, rigid parts) | Tested (233,491 poses; matches python to 5e-4) | Tested (packed TOD via the shared player, `bb/tb_actor.h`; Bugs, Taz + other skinned actors animate) |
+| Collision | Tested (heightfield, `bb_game`; trace = approximation, GAMEPLAY_STATUS.md) | Tested (mesh + octree queries bit-exact vs python; mover = approximation; box/grip/jump Verified at runtime) |
+| Player controller / camera / entities | Tested: player + camera + collectibles playable on L01a (GAMEPLAY_STATUS.md); jump arc and camera parameters (−200/600/1100, target-y lerp) Verified Against Original Behavior (RUNTIME_REFERENCE.md §3); enemies/platforms not ported | Tested: Bugs + Taz playable on ARCA01 (state-record interpreter, jump/run/steer, spring camera); jump/gravity and camera parameters (constants, spring rest 1200, look-at T.y − 300, 2P framing) Verified Against Original Behavior, run Consistent (48.84 u/tick observed) (RUNTIME_REFERENCE.md §4); NPCs/items not ported |
+| Bugs/Taz switching, co-op | — | Verified Against Original Behavior (R1 switch timing — Consistent in RUNTIME_REFERENCE.md §4; L1 call-friend spot + cooldown 45, RUNTIME_REFERENCE.md §4); 2-player co-op camera Tested (`--players 2`, framing fitted to a runtime trace) |
+| `.xa` IMA ADPCM music/speech | Tested (C++, 35 files) + menu music | Tested (C++, 446 files); level tracks per logic action 126 Implemented (GAMEPLAY_TB.md §6); menu track = design choice (original menu silent) |
 | In-level SFX | Tested parse (3,055 AIFF PCM) | Tested parse (2,302 AIFF-wrapped ADPCM) |
-| Simulation tick | 30 Hz observed statically; Implemented (`bb_game`, render locked in Original Fidelity) | 30 Hz observed statically |
+| Simulation tick | Verified Against Original Behavior (30 Hz, counter +2/tick, 30.005 ticks/s; RUNTIME_REFERENCE.md §2); Implemented (`bb_game`, render locked in Original Fidelity) | Verified Against Original Behavior (tick `0x4d2708` +2/tick, 29.99 ticks/s; RUNTIME_REFERENCE.md §2); Implemented (`bb_game` TbWorld) |
 | GL renderer, Hor+, fidelity modes | Tested on real levels | Tested on real levels |
 | Collection menu + real title art | Tested | Tested |
 | Save / config | Designed (`Savegame%d.dat` 1-based, `Savedata.dat`; GAMEPLAY §8) — untested | Designed (layout in GAMEPLAY §8) — untested |
@@ -47,5 +47,5 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 ## Known caveats
 
 - The TB disc image is a third-party repack; `bblit2.exe` should be compared with the copy inside the original InstallShield cabs before treating addresses as canonical.
-- Original renderer: CPU-projected screen-space vertices via GL 1.1, affine texturing (LiT). Our GL path is perspective-correct; Original Fidelity mode approximates filtering and aspect, not the affine warp.
-- Original FOV is fixed ≈65.2°×51.3° and stretches on non-4:3; we use Hor+.
+- Original renderer: CPU-projected screen-space vertices via GL 1.1, affine texturing (LiT; TB's shipped GL path is perspective-correct, `0x639dc8 = 1` at runtime — RUNTIME_REFERENCE.md §5). Our GL path is perspective-correct; Original Fidelity mode approximates filtering and aspect, not the affine warp.
+- Original FOV is fixed ≈65.2°×51.3° (vertical **51.28°** = 2·atan(240 / (1.25·400)), Verified at runtime — RUNTIME_REFERENCE.md §5, §7) and stretches on non-4:3. Original Fidelity uses vertical FOV 51.28°; Enhanced keeps Hor+.

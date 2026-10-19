@@ -1,6 +1,7 @@
 # Engine comparison: Lost in Time (LiT 1.6) vs Time Busters (TB)
 
-Status: **Verified Against Original Behavior** = no (static analysis only). Everything below is
+Status: **Verified Against Original Behavior** = only for items marked R (runtime under Wine:
+RUNTIME_REFERENCE.md §2 pacer/tick rate, §5 projection and the TB texturing flag). Everything else is
 **Researched (static RE)**; claims are tagged *observed* (read from bytes / decompiled code at the
 cited address) or *inferred* (interpretation of observed facts).
 
@@ -90,7 +91,9 @@ but never called — checked by raw xref count on LiT's slot table and by decomp
   `glColor3fv`, `glVertex3fv` and either `glTexCoord2fv` (affine) or, when `DAT_00639dc8 != 0`,
   `glTexCoord4f(s·q, t·q, 0, q)` with `q = |1.0 / v.z|` → **perspective-correct texturing** (new in TB).
   The writer of `DAT_00639dc8` was not found statically (only reads at 0x424041/0x42408c/0x425763/
-  0x4257d4) — *inferred* menu/detail option written through a pointer.
+  0x4257d4) — *inferred* menu/detail option written through a pointer. At runtime `0x639dc8 = 1` (GL renderer,
+  both Wine runners) → the shipped TB GL path **is** perspective-correct (R; runtime: RUNTIME_REFERENCE.md §5).
+  LiT stays affine (static).
 
 **Conclusion:** vertices are fully CPU-transformed and perspective-divided (PSX GTE emulation:
 `RotMatrix`, `MulMatrix0`, `ApplyMatrix*` etc.), submitted as screen-space pixels centred on the
@@ -117,7 +120,8 @@ One game-logic step runs per loop iteration regardless of the skip flag (TB 0x40
 then per-view render 0x4013b0 which only does minimal work when skipping). **Fixed simulation tick =
 30 Hz (1/30 s); rendering is locked to the tick, frames may be dropped, no interpolation.** Both keep a
 frame counter incremented by 2 per tick (LiT `DAT_004b24a4`, TB `DAT_004d2708` in 0x401960) —
-*inferred* to be PSX 60 Hz field units.
+*inferred* to be PSX 60 Hz field units. R **Verified**: every counter change is +2, LiT 30.005 / TB 29.99 ticks/s
+(runtime: RUNTIME_REFERENCE.md §2).
 
 ## Incompatibilities between the two games' data (*observed* unless noted)
 

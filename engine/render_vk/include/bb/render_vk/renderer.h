@@ -161,7 +161,7 @@ private:
     size_t sceneMeshCount_ = 0;
     std::vector<Vertex> actorVerts_;
     std::vector<uint32_t> actorIdx_;
-    float colorScale_ = 1.0f;
+    float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
 
     std::vector<V2> batch_;
 };

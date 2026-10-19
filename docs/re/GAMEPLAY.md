@@ -1,8 +1,12 @@
 # Gameplay RE — Lost in Time 1.6 (`bugs.exe`) first, Time Busters (`bblit2.exe`) deltas
 
-Status: **Researched (static RE)**. Nothing here is *Verified Against Original Behavior* (no runtime traces were
-taken). Tags: *observed* (O) = read in the decompile `ghidra/diff/out/{bugs,bblit2}.exe.c`, in exe bytes, or counted
-in game data by a probe; *inferred* (I) = interpretation. Confidence H/M/L. Addresses are VAs (image base 0x400000);
+Status: **Researched (static RE)**, except these LiT items, which are **Verified Against Original Behavior** by
+runtime traces of `bugs.exe` under Wine (R; [RUNTIME_REFERENCE.md](RUNTIME_REFERENCE.md) §2–§3): §1.1 30 Hz tick
+and the +2 frame counter; §3.3 jump arc (H39/step 70 apex 389 @ arc tick 15, lands 26; early-release apex 285 @ 8,
+lands 18; cut to 0x800; descent in even steps); §5 parameters −200/600/1100 and the target-y `>> 2` lerp. Runtime
+corrections are marked "(runtime: RUNTIME_REFERENCE.md §N)". Tags: *observed* (O) = read in the decompile
+`ghidra/diff/out/{bugs,bblit2}.exe.c`, in exe bytes, or counted in game data by a probe; *observed-runtime* (R) =
+read from the running original; *inferred* (I) = interpretation. Confidence H/M/L. Addresses are VAs (image base 0x400000);
 LiT unless prefixed "TB". Conventions: Q12 (0x1000 = 1.0), angles 4.12 (0x1000 = 360°, `rsin` table `0x45f3f0`, `rcos`
 `0x4633f0`, `atan2` = `0x4079e0` = round(atan2(a,b)·4096/2π)), integer world units, PS1 axes (+Y **down**),
 **30 Hz fixed tick**. C `/` and `%` truncate toward zero; `>>` is arithmetic.
@@ -27,7 +31,7 @@ no-argument self-check):
 
 ## 1. Main loop and tick order
 
-### 1.1 LiT per-tick function `0x4065e0` (called from WinMain `0x405950`) — O/H
+### 1.1 LiT per-tick function `0x4065e0` (called from WinMain `0x405950`) — O/H; tick rate and +2 counter R Verified (30.005 ticks/s; runtime: RUNTIME_REFERENCE.md §2)
 
 | # | step | address / globals |
 |---|---|---|
@@ -57,9 +61,13 @@ and rendering uses the camera computed at step 3a.
   `l_mload`, 3→0x64 `l_pload`, 4→0x54 `l_30load`, 5→0x59 `l_fload`, else 1 `loading`.
 * The tick loop keeps running while the loading screen shows; for target level ids {2, 6, 7, 0x28, 0x2c, 0x31, 0x32,
   0x34–0x36, 0x39–0x43, 0x45, 0x46} (mostly `cc*` cut-scenes) a **minimum 3000 ms** (`GetTickCount`) is enforced.
-* Then `0x430f80(id)`: BZE load `0x42e7a0(id, psxRam+0x200000)`, collision init `0x434c30(DAT_004b2490)`, one actor
-  update `0x447d40` (initialises behaviours, camera reset `0x431160` via the player), audio restart, fade-in
-  `0x44be90(1,0x100)`, two silent ticks, then normal play. Counter reset `DAT_004b24a4 = 1`.
+* Then `0x430f80(id)`: BZE load `0x42e7a0(id, psxRam+0x200000)`, collision init `0x434c30(DAT_004b2490)`, counter
+  reset `DAT_004b24a4 = 1`, then one load-time actor update `0x447d40` (initialises behaviours, camera reset
+  `0x431160` via the player), audio restart, fade-in `0x44be90(1,0x100)`, two unrendered ticks (loop `iVar1 < 2`
+  at 0x406a3a.. calling `0x4065e0` + `0x40a530`), then normal rendered play.
+* L01A start (R; runtime: RUNTIME_REFERENCE.md §3, `csv/lit_spawn.csv`, `csv/litworld_L01A_idle.csv`): player state
+  2 at counter 3, **scripted walk-in** state 130 from counter 5 (+25 z/tick, z 8830 → 9655), state 1 at counter 71.
+  Camera flags `0x4b3940` = 0x440 during the walk-in, 0x40 for 10 ticks, then 0 (§5).
 
 ### 1.3 TB tick `0x4011c0` — O/H
 
@@ -244,8 +252,10 @@ Per tick (O/H):
   snap clamped to ±70. Landing: phase 0x800, flags14 |= 2, clear 0x200|0x10000.
 * **No fall damage** exists (no distance tracking); pits kill through zone triggers (§7.5).
 * Simulated arcs (exact integer math, flat ground): H39/step70 (standard) apex −389 at tick 15, lands tick 26; early
-  ✕ release apex −285 tick 8, lands tick 18; bounce H50/70 −495 @15; high jump H50/32 −1059 @32 (lands 55); dig hop
-  H50/100 −354 @11; run-attack hop H10/128 −59 @8; water jump H80/60.
+  ✕ release apex −285 tick 8, lands tick 18 (both **Verified**: same ticks and heights, descent steps 2, 10, 18, …
+  even, release → phase 0x800 + step; runtime: RUNTIME_REFERENCE.md §3, `csv/lit_jump_hold.csv`); bounce H50/70
+  −495 @15; high jump H50/32 −1059 @32 (lands 55); dig hop H50/100 −354 @11; run-attack hop H10/128 −59 @8; water
+  jump H80/60.
 
 ### 3.4 Player flags — O (names I unless obvious), H
 
@@ -487,10 +497,16 @@ trace X-only, trace Z-only, MoveActor(full delta) with diagonal retry, then `0x4
 ## 5. Camera (LiT `0x4318f0`, called first in `0x447d40`) — O/H unless noted
 
 Globals: eye `DAT_004b38c0/c4/c8`, target (look-at) `DAT_004b38cc/d0/d4`, flags `DAT_004b3940`, yaw `DAT_004b3e1a`,
-distance cache `0x4b3da8`, camera target actor `DAT_004b39b8` (default player; A85 sets self), focus actor
+`0x4b3da8` (called "distance cache" here; naming needs re-deriving: the live follow also restores `0x4b38c0..d4` from
+saved copies `0x4b3954..0x4b397c`, decompile 0x432438 — runtime: RUNTIME_REFERENCE.md §3), camera target actor
+`DAT_004b39b8` (default player; A85 sets self), focus actor
 `DAT_004b3950` (type 16 directors), parameters `DAT_004b215c` (target height offset), `DAT_004b2150` (eye height above
 target), `DAT_004b2154` (follow distance). Level defaults (camera reset `0x431160`, also A77): **−200, 600, 1100**
-(`0x4b3da8 = 1100`, flags = 0x40). Initial eye per level: section-1 chunk **0x3b tag 0x2b** (3 × s32 → eye).
+(`0x4b3da8 = 1100`, flags = 0x40; the three parameters are **Verified** at runtime). Section-1 chunk **0x3b tag 0x2b**
+(3 × s32 → eye) is the static initial eye, but on L01A it is **(0,0,0)**; the live eye after load (23613, −1000,
+11550) comes from the walk-in (§1.2): flags 0x440 → the type-36 camera director `0x444b50` sets the eye point to its
+own position (23610, −1000, 11550) via item flags 0x1081 and flag 0x400 lerps the eye `>> 2` (runtime:
+RUNTIME_REFERENCE.md §3).
 Spawn snap `0x4373f0`: target = player − (0,400,0), eye = target + R(yaw)·(0,0,−100), yaw = player yaw + 0x800.
 
 Per tick (normal follow, flags & 0x300 == 0):
@@ -510,11 +526,14 @@ Per tick (normal follow, flags & 0x300 == 0):
    otherwise; while (`moved` or timer == 0) and no manual hold (flag 2), yaw approaches `player.yaw + 0x800` by
    `diff·0x1e >> 0xb` per tick (≈ 1.5 % of the error). L2/R2 set the hold (flags |= 0x82); moving without L2/R2
    clears it.
-7. Eye placement: from target, `R(yaw)·(0,0,distance)`; distance converges toward `0x4b2154 ± 100` (`>> 3` when
-   closer, `>> 1` when farther); collision: ground traces `0x434cd0` along the eye path, `0x4313a0` actor boxes
+7. Eye placement: candidate from target, `R(yaw)·(0,0,r)`; `r` (`0x4b3da8`) converges toward `0x4b2154 ± 100` (`>> 3`
+   when closer, `>> 1` when farther) and rests at the band edge (**1200**, not 1100); the eye sits **400 beyond the
+   candidate**: at rest the eye–target xz distance is `0x4b3da8 + 400` (1600 when `0x4b3da8` = 1200; runtime:
+   RUNTIME_REFERENCE.md §3, three captures 1596–1602). Collision: ground traces `0x434cd0` along the eye path, `0x4313a0` actor boxes
    (masks 0x24000/0x20000) in 200-unit steps, `0x431770` 25 rotated probe traces (table `0x4adaa8`) to swing the yaw
    out of walls (`>> 2` of the probe result); if probes hit at > 500, the last manual step is undone.
-8. Target follows the player: `t += (p − t) >> 2` with target y = player.y + `0x4b215c` (−200 = above the feet);
+8. Target follows the player: `t += (p − t) >> 2` with target y = player.y + `0x4b215c` (−200 = above the feet;
+   **Verified**: rest target y = player.y − 203, runtime: RUNTIME_REFERENCE.md §3);
    eye y is pulled (`>> 3`) into ±100 of `min(ground, player.y) − 0x4b2150` (600 above), ceiling checks with 600-unit
    probes (`0x436c20`).
 9. Camera shake `0x4312c0` (A59/A68): target x += `sin(phase)·amp >> 11`, y += `cos(phase)·amp >> 12`, phase +=
@@ -531,7 +550,8 @@ TB (O/M): `0x439700 → 0x437800` follow, `0x4373c0` first person (L2+R2 / View 
 (`0x4d5200` bit 0x100, lerp `0x4d9acc`).
 
 **Reimplementation notes (camera).** Port the follow algorithm as listed with the exact shifts: target lerp `>>2`,
-eye lerp `>>1`/`>>2`, distance band ±100 around 1100, height 600, target offset −200, L2/R2 ±0x26/tick, recentre after
+eye lerp `>>1`/`>>2`, distance band ±100 around 1100 (rests at 1200) with the eye 400 beyond that candidate (rest
+xz 1600; runtime: RUNTIME_REFERENCE.md §3 — bbtime `lit_world.cpp` already uses `rotY(a, 0, 0, r + 400)`), height 600, target offset −200, L2/R2 ±0x26/tick, recentre after
 60 idle ticks at 30/2048 of the error per tick, look clamp ±0x14a, focus-actor yaw `>>4`. Logic actions A41, A59,
 A73/74, A77–A80, A83–A85, A90, A94–A101 drive the parameters. The 4:3 projection (sx, sy, H = 400) is shared with
 the renderer (ENGINE_COMPARISON.md); keep logic visibility tests at 4:3.
@@ -691,7 +711,8 @@ rule), `[2]` flags14 mask, logic item, `[5]` flags, args `[6..8]`; flags 0x80000
 default death state, 0x100000 checkpoint `0x4b2460..6c`, 0x10000 stop, 0x200 sound, 0x2000 `0x437510`, 0x40 camera
 snap; continue only with 0x8000.
 
-Per-level globals chunk 0x3b (O): tag 0x2b initial camera eye; 0x3c `0x4b2378` (shadow/ground clamp) + two bytes;
+Per-level globals chunk 0x3b (O): tag 0x2b initial camera eye (L01A: (0,0,0); the live start eye comes from the
+walk-in director, §5; runtime: RUNTIME_REFERENCE.md §3); 0x3c `0x4b2378` (shadow/ground clamp) + two bytes;
 0x3d fog distance base (`0x4b38a0 = v/4`, `0x40cc80`; RESEARCH.md §2.7); 0x3e pool sizes (+100 each; vertex/part pools,
 arena limit `0x4b247c = v + 20000`, BZE size limit). Chunk 0x47 tag 0x48 = demo input stream (sets `G[0x0f] = 1`);
 chunk 0x49 tag 0x4a = 6 per-language `{offset, size}` pairs selected by `G[0x10]`.

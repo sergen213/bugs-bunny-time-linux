@@ -125,7 +125,8 @@ Source-path strings in LiT: `D:\Projets\Bugs\src\Pcrogl.c`, `D:\Projets\Bugs\src
   The scale-matrix user diag(sx, sy, 0x1000) is at LiT 0x408910 and TB 0x404D40. The two are byte-pattern twins.
 
 ### 2.7 Fog / draw distance (High)
-- 0x40CC80 is the only writer of fog parameters: D = min(0xFFFF, b + K·u) with K = (9·fogDist) >> 1. fogDist is `config.pc`+0x1C (0 near, 1 normal, 2 far); u is a per-level word at 0x4B38A0. Derived globals: 0x4EFB40 = D, 0x4EFB48 = −D, 0x4EFB60 = −0.75·D, 0x4EFB64 = 1/(0.25·D). So the fog ramp covers the last 25 % of D.
+- 0x40CC80 is the only writer of fog parameters: D = min(0xFFFF, b + K·u) with K = (9·fogDist) >> 1. fogDist is `config.pc`+0x1C (0 near, 1 normal, 2 far); u is a per-level word at 0x4B38A0. Derived globals: 0x4EFB40 = D, 0x4EFB48 = −D (**float**), 0x4EFB60 = −0.75·D, 0x4EFB64 = 1/(0.25·D). So the fog ramp covers the last 25 % of D.
+- Runtime (L01A, fogDist 2, 640×480; RUNTIME_REFERENCE.md §5): u = 1764, D = 39876 ⇒ base **b = 24000**; 0x4EFB48 = −39876.0 (f32), 0x4EFB60 = −29907.0, 0x4EFB64 = 1.00311e-4 — formula **Verified**.
 - Separately, **actor activation distance** is word `actor+0x3E` (≈6–7k units), compared at 0x447F3A. Beyond it, flagged actors (`+0x3C & 2`) are neither updated nor drawn, independent of fog. The sleep timer at `+0x24` is (dist − edx) >> 7.
 - Room/portal traversal depth is limited by `room+0xB5` (0x410F6C).
 - Hard capacity limits:
@@ -309,7 +310,7 @@ Save-game load/write functions: not recovered (**Research Required**).
   - joystick → type 7 (analog, with one stick copied to both axes);
   - buttons are active-low, ordered L2, R2, L1, R1, △, ○, ✕, □, select, L3, R3, start, up, right, down, left.
 - Launch options (internals.md):
-  - `/b<N>` level id;
+  - `/b<N>` level id (2 digits; `/b00` = title, which the disc launcher `Datas/BugsBunny.exe` passes as `" /b00"`; with no `/b` LiT starts level 2 LANGUAGE.BZE, missing from the PC disc → "File not found" dialog, so `/b00` is required to reach the title on PC — runtime: RUNTIME_REFERENCE.md §1);
   - `/x /y /win /full`;
   - `/ogl|/opengl`, `/soft*`, `/soft8|/softpal`;
   - `/skip_intro /no_sync /no_skip`;

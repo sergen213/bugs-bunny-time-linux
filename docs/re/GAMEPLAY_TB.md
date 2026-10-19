@@ -1,6 +1,7 @@
 # Gameplay RE — Time Busters (`bblit2.exe` 1.0.3.0)
 
-Status: **Researched (static RE)**; nothing here is *Verified Against Original Behavior* (no runtime traces).
+Status: **Researched (static RE)**, partly **Verified Against Original Behavior** by runtime traces of the original
+under Wine (§9; corrections there override the sections below).
 Tags: **O** = observed (decompile `ghidra/diff/out/bblit2.exe.c`, exe bytes, or counted in the 58 shipped BZEs by a
 probe), **I** = inferred. Confidence H/M/L. Addresses are TB VAs (image base 0x400000). Conventions as
 [GAMEPLAY.md](GAMEPLAY.md): Q12 (0x1000 = 1.0), **Q14 for collision normals (0x4000 = 1.0)**, angles 4.12, PS1 axes
@@ -236,7 +237,7 @@ Probe: `tools/re/tb_moves.py`.
 | smoothed magnitude | `DAT_004d5ec0 -= (DAT_004d5ec0 − mag) >> 3` — written, **never read** (GAMEPLAY.md §3.8 "smoothed 1/8" is dead code) | `0x453de0` | O | H |
 | run threshold | `mag > 0x77` (≥ 120): flagsB 0x4000000 states raise event `0x4000000 \| run` → sequence index 0 walk / 1 run | `0x453de0`, `0x44d990` | O | H |
 | target speed | `v = max((spd·dt·mag) >> 7, 1)`, `spd` = record `fwd`; `fwd > 0 && fwd & 0x6000` → `spd = (s8)S[fwd & 0x9fff]` | `0x453de0` | O | H |
-| Bugs walk / run | walk state 36 `fwd 13` → **26 u/tick**; run 37 `fwd 0x4066` → `S[0x66]` = 25 in 402/450 setters (also 30/32/70/80) → **50 u/tick** | ARCA01 data | O | H (M for S) |
+| Bugs walk / run | walk state 36 `fwd 13` → **26 u/tick**; run 37 `fwd 0x4066` → `S[0x66]` = 25 in 402/450 setters (also 30/32/70/80) → **50 u/tick** | ARCA01 data | O; run R **Consistent** (S[0x66] = 25, steady 48.84 u/tick with a residual heading error); walk **Not exercised** (runtime: RUNTIME_REFERENCE.md §4) | H (M for S) |
 | Taz walk / run | 36 `fwd 13` → 26; run 37 `fwd 0x4067` → `S[0x67]` = 25 (150 setters) → 50 | data | O | H/M |
 | keyboard | digital stick ±0x7f → mag ≥ 127 → always run | | I | H |
 | heading | `t = atan2(sx, sy) + camYaw`, camYaw = atan2 of the view camera block (`0x4d5120 + view·0x2c0`) look-at − eye, **every tick** (LiT only while grounded) | `0x453de0` | O | H |
@@ -251,7 +252,7 @@ Probe: `tools/re/tb_moves.py`.
 | what | value | address | O/I | conf |
 |---|---|---|---|---|
 | smoothing | §1.5 step 2 (k = 0 keeps the axis) | `0x4450c0` | O | H |
-| **gravity** | `vy += 5·dt` = **+10 u/tick²** unless `+0x24 & 0x200` (flagsA 0x2000000 hold), `+0x20 & 0x200`, flagsA & 0xa2008601, flagsC & 1 | `0x4450c0` | O | H |
+| **gravity** | `vy += 5·dt` = **+10 u/tick²** unless `+0x24 & 0x200` (flagsA 0x2000000 hold), `+0x20 & 0x200`, flagsA & 0xa2008601, flagsC & 1 | `0x4450c0` | O; R **Verified** (vy +160 ×16 every tick; runtime: RUNTIME_REFERENCE.md §4) | H |
 | terminal velocity | **none** (k_y = 0 while falling); s16 wrap caught at the tail of `0x453de0`: `y < −30000 && prevY > 30000 && vy > 0xc80` → respawn at checkpoint `0x4d26e0..ec`, camera reset | | O | M |
 | ground grip | floor contact: tangential `v += ((target − v)·g + 0xfff) >> 12`, `g = clamp(grip·friction >> 12 + actor+0x40, 0, 0x1000)` (actor support: `actor+0x3a` instead of friction); grip = record `+0x10`: 3000 idle/jump, **1500 Bugs walk/run, 3500 Taz walk**, 750 skid, 1000 Taz spin, 4096 swim/climb; floor contact also takes `5·dt·g >> 12` off the upward speed | `0x443f40` | O | H (code) / M (values) |
 | air control | jump (`+0x20` bit 1): kx = kz = 10 → ¼ of the error per tick; **walking off a ledge**: k = 0 → momentum kept, no steering until landing | `0x4450c0` | O (feel I) | M |
@@ -267,7 +268,9 @@ Probe: `tools/re/tb_moves.py`.
 homing jump to the selector target. Actor `+0x194..+0x19a` are **not** the arc (GAMEPLAY.md §3.8 correction): water
 bob (`+0x198` phase +100/tick, `+0x19a` amplitude 7..16, `+0x196` ramp +0x40/tick) and pitch-follow scratch.
 
-Flat-ground simulation (exact integers, `tb_moves.jump_arc`):
+Flat-ground simulation (exact integers, `tb_moves.jump_arc`). The vy0 formula (Bugs −1760 = −110 × 16) and the bold
+Bugs/Taz arcs are **Verified** at runtime (runtime: RUNTIME_REFERENCE.md §4, `tbplay/A_idle_jump.csv`,
+`tbplay/C_switch_taz_jump.csv`):
 
 | state (ARCA01) | H | vy0 | apex @ tick | lands | air speed (k 10) |
 |---|---|---|---|---|---|
@@ -376,7 +379,7 @@ masks) and the collision shape (§1.5: Bugs capsule, Taz sphere).
 
 ## 4. Switching, call friend, co-op camera
 
-### 4.1 Switching — `0x45eee0` per view per tick (O/H)
+### 4.1 Switching — `0x45eee0` per view per tick (O/H; R **Consistent**: A4 0 → 12 → 4, focus follows one tick later — runtime: RUNTIME_REFERENCE.md §4)
 
 The camera target `DAT_004d5028 = focus` is latched in `0x4011c0` **before** `0x45eee0` → the camera follows the old
 focus for one tick. Bits of `GD+0xA4` as GAMEPLAY.md §9.
@@ -408,7 +411,8 @@ AI code was found → the partner idles in its current state (I/M).
 ### 4.2 Call friend — `0x45eb10(force, work)` (O/H loop and constants; "in front of the camera" I/M)
 
 Refused (unless `force`) when paused, `GD+0x9f`, `S[3] & 3`, **focus airborne > 2 ticks**, focus `+0x24 & 0x40`
-(in water, I/M), no partner, partner dead (`+0x20 & 0x2000000`) or **cooldown < 45**; refusal plays sound 0x5f
+(in water, I/M), no partner, partner dead (`+0x20 & 0x2000000`) or **cooldown < 45** (R **Verified**: refused at +20,
+accepted at +80, cooldown `0x4ceb08` resets to 0 — runtime: RUNTIME_REFERENCE.md §4); refusal plays sound 0x5f
 (`0x407080`) unless `S[3] & 0x10`/paused/dialog.
 
 ```
@@ -434,7 +438,9 @@ place(): p = focus.pos; p.y −= 200; partner collision bit 0x100 cleared during
 
 Camera block `B = 0x4d5120 + view·0x2c0`: `+4` eye, `+0x10` look-at, `+0x2c` spring body P, `+0x3c` script flags,
 `+0x44` override actor, `+0xbc` rail camera (`0x43a2c0`), `+0xc0..c8` body velocity (Q12), `+0xe0` follow flags
-(`0x4d5200`), `+0xe4` L2/R2 accumulator, `+0xe8` settle counter, `+0x118..` constants set once by `0x437800`:
+(`0x4d5200`), `+0xe4` L2/R2 accumulator, `+0xe8` settle counter, `+0x118..` constants set once by `0x437800`
+(R **Verified**: peek `0x4d5238` s32×13 = the values below; spring rest `0x4d9ae0` = 1200, blend `0x4d9acc` = 0x1000;
+look-at = T.y − 300; 2P framing `e > 15 → D += e`, e clamped 40 — runtime: RUNTIME_REFERENCE.md §4):
 
 | param | value | use |
 |---|---|---|
@@ -672,7 +678,9 @@ wanted track to 0 on level load (music stops until the level logic runs).
 
 ## 8. Residual unknowns (Research Required)
 
-1. Runtime confirmation of everything (no traces): arcs, grip feel, camera spring, call-friend placement.
+1. Runtime confirmation: arcs, gravity, camera constants/spring rest/look-at, 2P framing and call-friend cooldown
+   are now Verified, run speed and switch Consistent (§9; RUNTIME_REFERENCE.md §4). Still open: walk speeds (not
+   exercisable from the keyboard), idle fidgets ('W' condition), the partner's arrival programs (states 260–263).
 2. Collision: header +0 low u16, polygon +0x14, surface +2/+6; surface flags 0x1/0x4/0x10/0x20/0x40/0x100/0x80000
    gameplay names; per-mode sweep internals (`0x44ba20`, `0x442430`, `0x44cf80`, `0x440060`, polygon tests) not
    transcribed; world-origin shift entity `DAT_004d5924+0x9c`; how TRCA02 relocates its players.
@@ -681,3 +689,21 @@ wanted track to 0 on level load (music stops until the level logic runs).
 4. Camera: `0x440360` sphere-probe output layout (look-mode eye placement I/L); params +0x12c/+0x130.
 5. Animation: role-12 models, packet 0x600, part subtypes 2–4, the 37 models with all-zero vertex word 3.
 6. Music: whether the PlayMusic(−1) → Track99 → Track14 path is reachable in normal play.
+
+## 9. Runtime verification (original under Wine, ARCA01 / Granny) — O (runtime)
+
+Captures `local/wine/tbplay/*.csv` (WineRef harness `tools/wine/`, one row per tick `0x4d2708`), reproduced by
+`engine/game` (`ctest -R game.tb`, numbers asserted). Per-item status: `docs/GAMEPLAY_STATUS.md` (TB section).
+Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
+
+| claim | runtime | result |
+|---|---|---|
+| §2.3 jump arcs | Bugs vy0 −1760, apex 550 @ 10, lands @ 21 (state 50 the tick after); Taz apex 490 @ 10 | Verified |
+| §2.1 walk/run, grip | S[0x66] = S[0x67] = 25; keyboard run 49 u/tick (mag 127); grip ramp 13/14, 21/23, 26/28 … 33/36 | Verified (run, grip); RUNTIME_REFERENCE.md §4: run **Consistent** (steady velocity (528, 0, 576)/16 = 48.84 u/tick ≈ 50·(0x800 − \|Δ\|)/0x800 with a residual heading error); walk 26 **Not exercised** (keyboard = full stick) |
+| §4.1 switch | A4 0 → 12 on the R1 tick, camera target `0x4d5028` one tick later | Verified (tick order/latch); RUNTIME_REFERENCE.md §4: **Consistent** (A4 0 → 12 → 4) |
+| §2.2 gravity, §4.3 constants | vy +160 (×16) per tick; `B+0x118..0x148` = 1200 500 20 400 50 5000 800 300 300 30 10 15 400, `0x4d9ae0` 1200, `0x4d9acc` 0x1000, look-at T.y − 300 | Verified (RUNTIME_REFERENCE.md §4) |
+| §4.2 call friend | spot (326, 148) from Bugs for camYaw 490 = first candidate; cooldown 50 at level start, refused < 45 | Verified; **correction**: `d ·= (\|d\| − 50)/\|d\|` comes **before** `d ·= 0.8` (q uses the 0.8-scaled cut vector); partner appears ≈1230 above the spot and descends ≈104/tick in template states 260–263 (entity program on `+0x20 & 0x10000000`) |
+| §1.5 collision box | `+0x60..` = tag-0x61 record 0 (Bugs −70 0 −60 \| 70 −400 80, Taz −85 0 −50 \| 85 −240 125) | **correction**: the box comes from tag 0x61 records (loader case 0x61, action 82 `0x432530` selects `+0x123`, `0x450460` morphs ±20/tick); TOD 0x900 applies only with `+0x123` = 0xff (all-zero packets for the players) |
+| §4.3 camera | D (`0x4d9ae0`) = 1200, flags `0x4d5200` = 0x1280 (1P) / 0x300 (2P), body `0x4d514c` = eye + 400·dir(L − eye), rest \|aim − eye\| = 1203; L follows T with f8 (xz) / f4 (y) exactly | **correction**: the spring error `(\|d\| − D) >> 2` is measured from the **eye** (B+4) to T − (0,400,0) and moves the body; no vertical dead band observed after landing; L2/R2 ramp 5, 9, 13 … as §4.3, L2 = +yaw orbit |
+| §4.3 2P framing | D +16, +28, +38, then +40/tick as the players separate; split at \|Δxz\| 2752 → snap to the focus, D −= (D − 1200) >> 2 | Verified; projection distance ≈ 248 for the ±190 × ±90 bounds (fit, I/M) |
+| §3.2 idle fidgets | 8 → 26 → 27 → 28 → 8 while idle | needs the unknown 'W' condition (open) |

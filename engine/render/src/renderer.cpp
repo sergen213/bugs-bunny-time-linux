@@ -36,12 +36,15 @@ uniform vec2 uFog;         // linear fog start, end; end <= start = off
 uniform vec3 uFogColor;
 uniform int uAdditive;     // additive/subtractive surfaces fade to black, not to the fog colour
 uniform float uColorScale; // vertex rgb multiplier (PS1 modulation: 255/128), result saturates
+uniform float uTexGamma;   // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
 in vec2 vUv;
 in vec4 vCol;
 in float vDist;
 out vec4 oCol;
 void main() {
-    vec4 c = texture(uTex, vUv) * vCol;
+    vec4 t = texture(uTex, vUv);
+    if (uTexGamma != 1.0) t.rgb = floor(256.0 * pow(t.rgb * (255.0 / 256.0), vec3(uTexGamma)) + 1e-3) / 255.0;
+    vec4 c = t * vCol;
     c.rgb = min(c.rgb * uColorScale, vec3(1.0));
     if (c.a < uAlphaRef) discard;
     if (uFog.y > uFog.x) {
@@ -221,6 +224,7 @@ std::string Renderer::init(const WindowConfig& cfg) {
     uFogColor_ = glGetUniformLocation(prog3D_, "uFogColor");
     uAdditive_ = glGetUniformLocation(prog3D_, "uAdditive");
     uColorScale_ = glGetUniformLocation(prog3D_, "uColorScale");
+    uTexGamma_ = glGetUniformLocation(prog3D_, "uTexGamma");
     prog2D_ = link(kVs2D, kFs2D);
     uScreen_ = glGetUniformLocation(prog2D_, "uScreen");
 
@@ -305,6 +309,7 @@ std::vector<uint8_t> bleedTransparent(const Texture& t) {
 void Renderer::uploadScene(const Scene& scene) {
     freeScene();
     colorScale_ = scene.colorScale;
+    texGamma_ = scene.pcTexGamma;
     for (const Texture& t : scene.textures) {
         const bool valid = t.width && t.height && t.rgba.size() == size_t(t.width) * t.height * 4;
         sceneTextures_.push_back(!valid       ? 0
@@ -409,13 +414,14 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const glm::mat4 view = cam.view();
-    const glm::mat4 vp3 = projection(glm::radians(s.vfovDeg), float(vp.w) / float(vp.h), s.zNear, s.zFar) * view;
+    const glm::mat4 vp3 = projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, s.zFar) * view;
     glUseProgram(prog3D_);
     glUniformMatrix4fv(uViewProj_, 1, GL_FALSE, glm::value_ptr(vp3));
     glUniformMatrix4fv(uView_, 1, GL_FALSE, glm::value_ptr(view));
     glUniform2f(uFog_, s.fog ? s.fogStart : 0.0f, s.fog ? s.fogEnd : 0.0f);
     glUniform3fv(uFogColor_, 1, s.fogColor);
-    glUniform1f(uColorScale_, colorScale_);
+    glUniform1f(uColorScale_, s.colorScale(colorScale_));
+    glUniform1f(uTexGamma_, s.texGamma(texGamma_));
     glActiveTexture(GL_TEXTURE0);
     glBindSampler(0, original ? sampNearest_ : sampTrilinear_);
     uint32_t boundVao = 0;
