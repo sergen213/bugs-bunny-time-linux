@@ -1,0 +1,66 @@
+#include "music.h"
+
+#include "bb/audio.h"
+
+#include <cctype>
+#include <memory>
+#include <print>
+#include <string>
+
+namespace fs = std::filesystem;
+
+namespace bbtime {
+namespace {
+
+// Install trees mix case (LiT Datas/track/TRACK25.xa, TB Datas/TRACK/track14.xa): match components ignoring case.
+fs::path find(fs::path p, std::initializer_list<std::string> parts) {
+    auto lower = [](std::string s) {
+        for (char& c : s) c = char(std::tolower(uint8_t(c)));
+        return s;
+    };
+    for (const std::string& part : parts) {
+        std::error_code ec;
+        fs::path next;
+        for (const auto& e : fs::directory_iterator(p, ec))
+            if (lower(e.path().filename().string()) == lower(part)) { next = e.path(); break; }
+        if (next.empty()) return {};
+        p = next;
+    }
+    return p;
+}
+
+// LiT: title.bze section-1 music table (chunk 0x05, tag 0x06 {zone, track, track}) = {1,25,25},{2,25,25};
+//      bugs.exe 0x41d630 opens ..\track\Track%d.xa with that number -> TRACK25.xa. Verified (code + data).
+// TB:  UNVERIFIED. The GDI front end never changes track; music comes only from logic action 126
+//      (bblit2 0x432db0). Track14.xa is the exe's hard-coded fallback (0x4291e0 retries Track14 when the
+//      requested file is missing), used here as TB's menu theme.
+fs::path menuTrack(bb::GameId g, const fs::path& dataRoot) {
+    return g == bb::GameId::LostInTime ? find(dataRoot / "lit", {"Datas", "track", "TRACK25.xa"})
+                                       : find(dataRoot / "tb", {"Datas", "TRACK", "track14.xa"});
+}
+
+} // namespace
+
+void menuMusic(const fs::path& dataRoot, std::optional<bb::GameId> game) {
+    static std::unique_ptr<bb::AudioDevice> dev;
+    static std::optional<bb::GameId> current;
+    if (game != current) {
+        current = game;
+        if (dev) dev->stopMusic();
+        if (game) {
+            if (!dev) {
+                dev = std::make_unique<bb::AudioDevice>();
+                if (!dev->ok()) std::println(stderr, "bbtime: no OpenAL device, music disabled");
+            }
+            const fs::path track = menuTrack(*game, dataRoot);
+            if (track.empty()) std::println(stderr, "bbtime: menu track not found under {}", dataRoot.string());
+            else if (dev->ok()) {
+                dev->playMusic(track);
+                std::println("bbtime: music {}", track.string());
+            }
+        }
+    }
+    if (dev) dev->update();
+}
+
+} // namespace bbtime

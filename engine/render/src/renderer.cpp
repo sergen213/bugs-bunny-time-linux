@@ -34,13 +34,15 @@ uniform sampler2D uTex;
 uniform float uAlphaRef;   // texels below are discarded (AlphaTest); negative = off
 uniform vec2 uFog;         // linear fog start, end; end <= start = off
 uniform vec3 uFogColor;
-uniform int uAdditive;     // additive surfaces fade to black, not to the fog colour
+uniform int uAdditive;     // additive/subtractive surfaces fade to black, not to the fog colour
+uniform float uColorScale; // vertex rgb multiplier (PS1 modulation: 255/128), result saturates
 in vec2 vUv;
 in vec4 vCol;
 in float vDist;
 out vec4 oCol;
 void main() {
     vec4 c = texture(uTex, vUv) * vCol;
+    c.rgb = min(c.rgb * uColorScale, vec3(1.0));
     if (c.a < uAlphaRef) discard;
     if (uFog.y > uFog.x) {
         float f = clamp((uFog.y - vDist) / (uFog.y - uFog.x), 0.0, 1.0);
@@ -214,6 +216,7 @@ std::string Renderer::init(const WindowConfig& cfg) {
     uFog_ = glGetUniformLocation(prog3D_, "uFog");
     uFogColor_ = glGetUniformLocation(prog3D_, "uFogColor");
     uAdditive_ = glGetUniformLocation(prog3D_, "uAdditive");
+    uColorScale_ = glGetUniformLocation(prog3D_, "uColorScale");
     prog2D_ = link(kVs2D, kFs2D);
     uScreen_ = glGetUniformLocation(prog2D_, "uScreen");
 
@@ -256,11 +259,48 @@ void Renderer::freeScene() {
     sceneVbo_ = sceneIbo_ = sceneVao_ = 0;
 }
 
+// Fills the rgb of fully transparent texels from opaque neighbours (alpha stays 0), so bilinear filtering and
+// mipmaps do not pull black fringes into colour-keyed cutouts (PS1 0x0000 = transparent black).
+// ponytail: up to 16 dilation passes; textures with wider transparent areas keep black beyond that.
+static std::vector<uint8_t> bleedTransparent(const Texture& t) {
+    std::vector<uint8_t> px = t.rgba;
+    const int w = int(t.width), h = int(t.height);
+    std::vector<uint8_t> filled(size_t(w) * h);
+    for (size_t i = 0; i < filled.size(); ++i) filled[i] = px[i * 4 + 3] != 0;
+    for (int pass = 0; pass < 16; ++pass) {
+        std::vector<uint8_t> next = filled;
+        bool changed = false;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const size_t i = size_t(y) * w + x;
+                if (filled[i]) continue;
+                int sum[3] = {}, n = 0;
+                for (auto [dx, dy] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                    const int nx = (x + dx + w) % w, ny = (y + dy + h) % h;  // GL_REPEAT neighbourhood
+                    const size_t j = size_t(ny) * w + nx;
+                    if (!filled[j]) continue;
+                    for (int c = 0; c < 3; ++c) sum[c] += px[j * 4 + c];
+                    ++n;
+                }
+                if (!n) continue;
+                for (int c = 0; c < 3; ++c) px[i * 4 + c] = uint8_t(sum[c] / n);
+                next[i] = 1;
+                changed = true;
+            }
+        filled.swap(next);
+        if (!changed) break;
+    }
+    return px;
+}
+
 void Renderer::uploadScene(const Scene& scene) {
     freeScene();
+    colorScale_ = scene.colorScale;
     for (const Texture& t : scene.textures) {
         const bool valid = t.width && t.height && t.rgba.size() == size_t(t.width) * t.height * 4;
-        sceneTextures_.push_back(valid ? makeTexture(t.width, t.height, t.rgba.data(), true) : 0);
+        sceneTextures_.push_back(!valid       ? 0
+                                 : t.hasAlpha ? makeTexture(t.width, t.height, bleedTransparent(t).data(), true)
+                                              : makeTexture(t.width, t.height, t.rgba.data(), true));
     }
 
     std::vector<Vertex> verts;
@@ -273,7 +313,7 @@ void Renderer::uploadScene(const Scene& scene) {
             hi = glm::max(hi, glm::vec3(v.pos[0], v.pos[1], v.pos[2]));
         }
         const bool texOk = m.texture >= 0 && size_t(m.texture) < sceneTextures_.size() && sceneTextures_[size_t(m.texture)];
-        meshes_.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, int32_t(verts.size()),
+        meshes_.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
                            uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f});
         verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
         idx.insert(idx.end(), m.indices.begin(), m.indices.end());
@@ -336,17 +376,23 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glUniformMatrix4fv(uView_, 1, GL_FALSE, glm::value_ptr(view));
     glUniform2f(uFog_, s.fog ? s.fogStart : 0.0f, s.fog ? s.fogEnd : 0.0f);
     glUniform3fv(uFogColor_, 1, s.fogColor);
+    glUniform1f(uColorScale_, colorScale_);
     glActiveTexture(GL_TEXTURE0);
     glBindSampler(0, original ? sampNearest_ : sampTrilinear_);
     glBindVertexArray(sceneVao_);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
-    glDisable(GL_CULL_FACE); // original winding not yet known (Research Required)
+    // Front faces are CCW in engine space (scene.h); decoders emit that order. Double-sided primitives
+    // (LiT flag bit 1) come as twoSided meshes.
+    glFrontFace(GL_CCW);
+    glCullFace(GL_BACK);
 
     auto draw = [&](const GpuMesh& m) {
+        if (m.twoSided) glDisable(GL_CULL_FACE);
+        else glEnable(GL_CULL_FACE);
         glBindTexture(GL_TEXTURE_2D, m.texture);
         glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : -1.0f);
-        glUniform1i(uAdditive_, m.blend == Blend::Additive);
+        glUniform1i(uAdditive_, m.blend == Blend::Additive || m.blend == Blend::Subtract);
         glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(m.indexCount), GL_UNSIGNED_INT,
                                  reinterpret_cast<void*>(size_t(m.firstIndex) * sizeof(uint32_t)), m.baseVertex);
         ++drawCalls_;
@@ -359,11 +405,11 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         for (const GpuMesh& m : meshes_)
             if (m.blend == pass) draw(m);
 
-    // Pass 3: translucent (alpha + additive), back-to-front by mesh centre, no depth writes.
+    // Pass 3: translucent (alpha, additive, subtractive), back-to-front by mesh centre, no depth writes.
     // ponytail: per-mesh sort; per-triangle sort if intersecting translucent meshes show artefacts.
     std::vector<const GpuMesh*> translucent;
     for (const GpuMesh& m : meshes_)
-        if (m.blend == Blend::Alpha || m.blend == Blend::Additive) translucent.push_back(&m);
+        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest) translucent.push_back(&m);
     std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
         const glm::vec3 d = m->center - cam.pos;
         return glm::dot(d, d);
@@ -372,10 +418,13 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glDepthMask(GL_FALSE);
     for (const GpuMesh* m : translucent) {
         // Destination alpha is kept at 1 so the window never turns see-through under a compositor.
-        if (m->blend == Blend::Additive) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
-        else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        if (m->blend == Blend::Alpha) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+        glBlendEquationSeparate(m->blend == Blend::Subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
         draw(*m);
     }
+    glBlendEquation(GL_FUNC_ADD);
+    glDisable(GL_CULL_FACE);
 
     glDepthMask(GL_TRUE);
     glDisable(GL_DEPTH_TEST);

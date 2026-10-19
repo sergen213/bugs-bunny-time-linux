@@ -81,7 +81,7 @@ public:
     int drawCalls() const { return drawCalls_; }
 
 private:
-    struct GpuMesh { uint32_t texture; Blend blend; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; };
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; };
     struct V2 { float x, y, u, v; uint8_t rgba[4]; };
 
     void flush2D();
@@ -97,7 +97,9 @@ private:
     int w_ = 0, h_ = 0, drawCalls_ = 0;
 
     uint32_t prog3D_ = 0, prog2D_ = 0;
-    int uViewProj_ = -1, uView_ = -1, uAlphaRef_ = -1, uFog_ = -1, uFogColor_ = -1, uAdditive_ = -1, uScreen_ = -1;
+    int uViewProj_ = -1, uView_ = -1, uAlphaRef_ = -1, uFog_ = -1, uFogColor_ = -1, uAdditive_ = -1, uScreen_ = -1,
+        uColorScale_ = -1;
+    float colorScale_ = 1.0f;
     uint32_t sampNearest_ = 0, sampTrilinear_ = 0, sampUiNearest_ = 0, sampUiLinear_ = 0;
     uint32_t white_ = 0, font_ = 0;
 

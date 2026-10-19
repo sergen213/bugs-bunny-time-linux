@@ -16,6 +16,7 @@ enable_testing()
 
 # Ownership: each subdirectory owns its own CMakeLists.txt.
 add_subdirectory(engine/core)    # bb::core  — formats, BZE, LZSS, importer lib (no GPU deps)
+add_subdirectory(engine/audio)   # bb::audio — .xa IMA-ADPCM decode + OpenAL playback
 add_subdirectory(engine/render)  # bb::render — SDL3 + OpenGL renderer
 add_subdirectory(apps/bbtime)    # collection executable (game-select menu)
 add_subdirectory(tools)          # CLI tools (bbimport, bzedump, ...)

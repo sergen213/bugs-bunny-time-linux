@@ -128,7 +128,7 @@ def write_obj(path, faces, mtl_name=None, texsizes=None):
             vs.append(f"v {x:g} {-y:g} {z:g}")  # PS1 +Y is down -> flip for OBJ
             if uv:
                 u, v = uv[k]
-                vts.append(f"vt {u / 255:.5f} {1 - v / 255:.5f}")  # UV byte / 255 over the whole TIM
+                vts.append(f"vt {u / 255:.5f} {v / 255:.5f}")  # v=0 = bottom TIM row (MODELS.md §5) = OBJ vt 0
                 f.append(f"{len(vs)}/{len(vts)}")
             else:
                 f.append(f"{len(vs)}")

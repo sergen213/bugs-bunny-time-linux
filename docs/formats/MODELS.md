@@ -153,16 +153,24 @@ or `tex` from u16[2] (0x4a/0x4e) [WALK]; real data matches (L01a 0x4e: tex 386/3
 first L01a quad has indices (0,1,3,2) and UVs (255,0),(255,255),(0,0),(0,255), which only form a non-twisted
 square in Z order. Visually verified (textured renders).
 
-**Backface rule [BF]:** with transformed screen vertices `a=v[slot0], b=v[slot1], c=v[slot2]` (slot = index
-descriptor order: 0x34 → i0,i1,i2; quads → i0,i1,i2), cull when
-`(c.y − b.y)*(a.x − b.x) − (c.x − b.x)*(a.y − b.y) < 0` (`_DAT_0045c308` = 0.0f, read from the exe) in the
-projected float buffer `x' = f·x/z, y' = f·y/z` **before** the y flip (`y_screen = centre − y'` is only applied
-to the integer copy) [BV], i.e. PS1 camera space with +Y down. Winding convention of the data therefore = PS1 GTE NCLIP
-convention; a new renderer should take the sign from this formula, not from OBJ conventions.
+**Front face — Verified (data), corrected:** in PS1 world coordinates (+Y down) the **visible side** of a
+triangle (v0,v1,v2) — and of both quad triangles (v0,v1,v2), (v1,v3,v2) — is the side the normal
+`N = (v0 − v1) × (v2 − v1)` points to. Measured on single-sided near-horizontal world faces: N points up
+(−Y) for 708/762 (L01a), 1160/1172 (L03A), 737/900 (L02A1); the remainder are ceilings/undersides.
+Equivalently (peer LevelLoaderLiT, engine mapping PS1 → (x, −y, −z)) the visible side is **clockwise on
+screen** in a y-up GL-style view. [BF] tests `(c.y − b.y)*(a.x − b.x) − (c.x − b.x)*(a.y − b.y) < 0`
+(`_DAT_0045c308` = 0.0f) with `a,b,c` = projected slots 0,1,2 *before* the integer y flip [BV][OV], but the
+view matrix `DAT_006ac220..` sign conventions are not decoded, so take the sign from the data rule above,
+not from that expression. (An earlier revision of this doc read the [BF] sign the other way — wrong.)
 
 **UVs:** `u, v` bytes are **normalised to the whole TIM**: texel = `(u/255)·(w−1)`, `(v/255)·(h−1)`
 (tables `0x467f50`/`0x468350` = i/255, multiplied by `texW−1`/`texH−1` in [EM]). Not PS1 texture-page
-coordinates. `v = 0` is the first (top) image row. OBJ export uses `vt = (u/255, 1 − v/255)`.
+coordinates. **`v` is measured from the bottom image row** (`v = 0` → last TIM row, `v = 255` → first row) —
+Verified (data): L03A crate model sec4 `0x10fbc`, tex 20 "ACME": top vertices (y = −210) have v = 255, bottom
+(y = 0) v = 0; the lettering reads upright only with this convention (also found by LevelLoaderLiT; ship
+windows/balusters in L03A agree). Code hint: the PC resample loop in `FUN_00420d10` uploads rows from the
+bottom. So sample row `(1 − v/255)·(h−1)` counted from the top of the decoded TIM; in GL with row 0 uploaded
+first, use `t = 1 − v/255`. OBJ export: `vt = (u/255, v/255)` (OBJ vt 0 = image bottom).
 
 **Implicit UVs (0x4a / 0x4e, and any poly emitted with a null UV table) [EM]:** tri: i0 (0,1), i1 (1,1),
 i2 (0,0); quad: i0 (0,1), i1 (1,1), i2 (1,0), i3 (0,0) in normalised (u,v). Used with small single-colour
@@ -228,15 +236,160 @@ located.
 - All 167 LiT BZE files: every referenced model parses with the stride table, all cell/hull size invariants hold,
   no out-of-range vertex index; 79 levels with world geometry, 168 963 world polygons total.
 
-## 10. TB applicability — Research Required
+## 10. TB (`bblit2.exe`) model formats
 
-TB (`bblit2.exe`) uses a **different model format**. Its chunk `0x20`/`0x22` tag `0x24` handlers call
-`FUN_004067f0 → FUN_00404ed0`, which walks a node tree: header words `[0]`, `[1]`, `[2]` are offsets, nodes
-start at `+0x18`, node byte `+2` = 0 → leaf (drawn via a function pointer), 1 → inner node with eight u16 child
-offsets at `+0x10..+0x1f` (×4 bytes) — an **octree**. Actor models are distinguished by
-`(u32 @+0x18 & 0xffffff) == 0x1ffff` (`FUN_004347c0` chunk `0x22`) and otherwise go through
-`FUN_00406f70`/`FUN_00406eb0`. Example: ARCA01 world model at section-4 `0xb04` (+0x1f7a8). TB textures are
-compatible (TEXTURES.md). The LiT primitive/record layouts above must **not** be assumed for TB.
+TB does **not** use the LiT PC-TMD (§2–§8). It has three section-4 model formats, chosen by the section-1 tag
+that references them (`docs/formats/TB_LEVELS.md` §3.4/§3.5 for the tags, offsets and placement). Prototype:
+`tools/re/tb_world.py` (`--check DIR` asserts every invariant below over all 58 levels).
+
+Evidence keys (TB, decompile `/mnt/1st4TB/BugsBunny/ghidra/diff/out/bblit2.exe.c`, VAs):
+`[TL]` loader `FUN_004347c0`; `[OT]` `FUN_00404ed0`/`FUN_004050e0` octree walk; `[RB]` `FUN_00404f40` +
+`FUN_004055c0` runtime build of a world model (prims sorted into 4 lists); `[CULL]` `FUN_004052b0` +
+`FUN_00409950` node box test; `[DRAW]` `FUN_00405470` leaf draw; `[PV]` `FUN_00405c90` CheckPrimValidity;
+`[GLQ]`/`[GLT]` GL quad/tri setup `FUN_0041f420`/`FUN_0041f760` (renderer vtable `FUN_0041ee30`); `[SWQ]`
+`FUN_00421140` + `FUN_00420bb0` software quad setup; `[COL]` `FUN_0041f190`/`FUN_0041f300` colour readers;
+`[AW]` `FUN_00406f70`/`FUN_00406eb0`/`FUN_00406cd0` actor relocate/mark/draw; `[AQ]`/`[AT]` GL actor quad/tri
+`FUN_0041fa40`/`FUN_0041fd80`; `[AV]` `FUN_00406d90`.. `FUN_00406e80` per-object vertex loops; `[SP]` `FUN_004084b0`;
+`[DATA]` `tools/re/tb_world.py --check` over all 58 TB files.
+
+Common to all three: vertices are **s16** `x, y, z` + s16 pad (always 0 [DATA], 178 201/178 201 world verts),
+8 bytes each, PS1 axes (+Y down, §3). UV bytes are normalised over the whole TIM: float table `i × (1/255)`
+(`DAT_004d1e84/88`, constant f32 `0x481660` = 0.0039215689) → same convention as LiT §5. Colour bytes go through
+the same table (`DAT_004d1e8c`), i.e. colour = byte/255 in the GL path.
+
+### 10.1 Octree model (world: chunk 0x20 tag 0x24; sky dome: chunk 0x22 tag 0x24) — Verified (data + visual)
+
+Header (24 bytes) [OT][RB]:
+
+| off | type | field |
+|---|---|---|
+| 0x00 | u32 | `altTree`: offset − 0x18 of tree B root (0 = none). Walked by [OT]; [RB] list `+0x40` |
+| 0x04 | u32 | `detailTree`: offset − 0x18 of tree C root (0 = none). [RB] builds it only when `DETAILS` config `DAT_00639b58` ≤ 1 |
+| 0x08 | u32 | `uvTable`: offset of the UV table (0 iff every prim has b1 bit 6 [DATA]) |
+| 0x0c | u32 | `extra`: offset of an extra block, [RB] stores `model+extra` at runtime `+0x44` (non-zero in 31/182 models). Research Required |
+| 0x10 | u32 | unknown (e.g. `0x01580654`); not read by [TL]/[OT]/[RB] |
+| 0x14 | u32 | unknown (e.g. `0x1d58`); not read by [TL]/[OT]/[RB] |
+| 0x18 | node | tree A root (main) |
+
+Block order in the file [DATA]: tree A, UV table, [extra], [tree B], [tree C]; tree A's last leaf ends exactly at
+`uvTable` when present; the UV table is `12 × n` bytes (all `+0x1a` offsets are multiples of 12 and in range,
+138 341/138 341).
+
+Node (all trees) [OT]:
+
+| off | type | field |
+|---|---|---|
+| 0x00 | u16 | unknown (root `0xffff`; others 0/8/16/24/…). Not read by [OT]. Research Required |
+| 0x02 | u8 | kind: 0 = leaf, 1 = inner; anything else is ignored by [OT] (never occurs) |
+| 0x03 | u8 | 0 |
+| 0x04 | s16 ×3 | box corner `x0, y0, z0` |
+| 0x0a | u16 ×3 | box size `sx, sy, sz`; box = `[x0, x0+sx] × [y0−sy, y0] × [z0, z0+sz]` ([CULL] builds the 8 corners this way; every leaf vertex lies inside its leaf box, 178 201/178 201 [DATA]) |
+| 0x10 | u16 ×8 | inner only: child offsets; child = **tree root** + `u16 × 4` (the base is the root of the tree, not the current node); 0 = empty |
+| 0x10 | u16 | leaf only: `nv` vertex count (max 214 [DATA]; prim indices are u8) |
+| 0x12 | u16 | leaf only: `np` primitive count |
+| 0x14 | vertex[nv] | leaf only: 8-byte vertices (world coordinates; leaf-local index space) |
+| 0x14+8·nv | prim[np] | leaf only: 28-byte primitives |
+
+Max tree depth 5 [DATA]. Draw order inside a leaf [RB][DRAW]: opaque quads, opaque tris, semi-transparent quads,
+semi-transparent tris (each list in file order). Visibility: a node is visited only if its box passes the 6-plane
+test [CULL]; there are no portals/cells in TB.
+
+World primitive, 28 bytes [GLQ][GLT][SWQ][COL][PV]:
+
+| off | type | field |
+|---|---|---|
+| 0x00 | u8 | `b0`: bit 3 = quad (4 indices) else tri; bit 4 = Gouraud (4 colours) else flat (colour 0 only); bit 1 = semi-transparent, ABR = `(uv[6] >> 5) & 3`, else opaque (mode 4); bits 2 and 5 must be set, bit 6 clear [PV] |
+| 0x01 | u8 | `b1`: bit 6 = no UVs (fixed per-vertex UVs below; also invalid together with b0 bit 1) ; bit 5 = flag `|1` at render `+0x67` (tris with it are invalid [PV]); bit 4 = flag `0x80` at render `+0x67`; bits 0–3 Research Required (values 0,1,4,5,8,9,12,13) |
+| 0x02 | u16 | texture id = low 12 bits (`& 0xfff`, the id of chunk 0x28 tag 0x29); high nibble is 7 in 138 341/138 341 [DATA], ignored |
+| 0x04 | u8 ×4 | colour 0: r, g, b, pad (pad = PS1 code byte, ignored, not always 0) |
+| 0x08, 0x0c, 0x10 | u8 ×4 | colours 1, 2, 3 (Gouraud only; flat prims use colour 0 for all vertices) |
+| 0x14 | u8 ×4 | vertex indices i0..i3 (leaf-local; tris use i0..i2, `+0x17` is junk) |
+| 0x18 | u16 | copy of `+0x1a` (equal in 138 341/138 341 [DATA]; unused by the renderers) |
+| 0x1a | u16 | byte offset into the UV table |
+
+UV table entry (12 bytes, PS1 `POLY_FT4` UV/CLUT/TPAGE layout): `u0 v0` @0, clut @2 (ignored), `u1 v1` @4,
+`tpage` @6 (only bits 5–6 = ABR used), `u2 v2` @8, `u3 v3` @10. Vertex i0 ← uv0, i1 ← uv1, i2 ← uv2, i3 ← uv3.
+
+No-UV prims (b1 bit 6) [GLQ][SWQ]: i0 (0,0), i1 (1,0), i2 (1,1), i3 (0,1) — note this is **not** the LiT §5
+implicit mapping, and with Z-order quads it gives a crossed mapping; it is used with 4×4 single-colour textures
+(e.g. ARCA01 id 347) so only the vertex colour is visible.
+
+**Quad order: PS1 Z order** (outline i0 → i1 → i3 → i2): the software path puts i3 in slot 2 and i2 in slot 3
+[SWQ]; in data 2 755/2 759 ARCA01 quads are convex only in Z order (4 degenerate) [DATA]. Visually verified.
+
+Trees (semantics Inferred from renders): A = main textured world; B (`altTree`) = alpha-tested overlays (ivy,
+foliage; b1 = `0x18/0x1c/0x2c/…`); C (`detailTree`) = untextured vertex-coloured shell (b1 bit 6, 4×4 texture),
+e.g. ARCA01 tower shafts and roof silhouettes. Whether C is a quality-dependent extra or a fallback is
+Research Required (the condition is only `DETAILS ≤ 1`).
+
+Invalid prims ([PV] fails → logged `CheckPrimValidity failed` and skipped): 48 in all data, dropped by the exporter.
+
+Chunk 0x22 tag 0x24 models in this format (one per level, 59 total; detected by `(u32 @+0x18 & 0xffffff) ==
+0x1ffff`, i.e. root node `{u16 0xffff, kind 1}`) [TL] are untextured spheres of radius ≈ 32 000 (ARCA01
+`0x3e494`) → sky domes (Inferred). [TL] stores them in `DAT_004d03d4[]` / sizes in `DAT_00639d60[]`.
+
+### 10.2 Actor format (chunk 0x22 tag 0x24, non-octree) — Verified (layout, data), un-posed
+
+[TL] relocates it in place [AW] and stores `model + 8` as the asset's data pointer.
+
+| off | type | field |
+|---|---|---|
+| 0x00 | u16 | 0 or 1 (2465 × 1, 352 × 0); not read. Research Required |
+| 0x02 | u16 | `nobj` objects (0 → 8-byte model `01 00 00 00 00 00 00 00`, no geometry: 259 models) |
+| 0x04 | u32 | offset of the primitive block (from model start; relocated to a pointer) |
+| 0x08 | `{u32 vtxOff, u32 nv}`[nobj] | per object: vertex table at `model + 8 + vtxOff` (relocated), `nv` 8-byte vertices |
+
+Primitive block [AW] (`FUN_00406cd0` draws, `FUN_00406eb0` marks texture ABR use):
+
+| off | type | field |
+|---|---|---|
+| 0x00 | u16 | `nC`: tris, 0x28-byte records at block + `offC` |
+| 0x02 | u16 | `nD`: quads, 0x28-byte records at block + `offD` |
+| 0x04 | u8 | `nA`: tris, 0x24-byte records at block + 0x0c |
+| 0x05 | u8 | `nB`: quads, 0x24-byte records at block + `offB` |
+| 0x06, 0x08, 0x0a | u16 | `offB`, `offC`, `offD` |
+
+Invariants (2558/2558 non-empty models [DATA]): `offB = 0xc + 0x24·nA`, `offC = offB + 0x24·nB`,
+`offD = offC + 0x28·nC`; the object vertex tables are contiguous and start right after the D records; the model
+ends exactly after the last vertex. Tri/quad dispatch: `DAT_0063bc28` = tri ([AT]), `DAT_0063bc40` = quad ([AQ]).
+
+Actor primitive (0x24 or 0x28 bytes) [AQ][AT][COL]: `+0` b0, `+1` b1, `+2` tex, `+4..+0x13` colours —
+identical meaning to the world prim; then an **inline** UV block `u0 v0` @0x14, clut @0x16, `u1 v1` @0x18,
+tpage @0x1a (ABR bits 5–6), `u2 v2` @0x1c, `u3 v3` @0x1e; indices @0x20: u8 ×4 when b1 bit 7 = 0 (0x24-byte
+records), u16 ×4 (`+0x20..+0x27`) when b1 bit 7 = 1 (0x28-byte records; bit 7 matches the group 100 %).
+b0 seen: `0x34/0x3c` opaque tri/quad, `0x36/0x3e` semi-transparent [DATA].
+
+Indices address the **concatenation of all objects' vertex tables** (max index < total in 2558/2558). At run
+time each object's vertices are transformed in order into the 16-byte screen buffer `DAT_004d0418` with that
+object's matrix [AV], so multi-object models are skinned per object (bone). The bone matrices come from the
+animation assets (chunk 0x22 tag 0x25, §11) — the exporter therefore writes multi-object models **un-posed**
+(objects overlap). Single-object models (1525 in all levels) export correctly: ARCA01 carrot `a1_s4_026af8`,
+coin `a1_s4_0271e0` (textures and UVs visually correct).
+
+Quirk: [AW] `FUN_00406eb0` loops `nobj` times over the same primitive block (its pointer is never advanced;
+checked in the disassembly at 0x406eb0) — harmless (texture-usage marking only).
+
+### 10.3 Sprite-sequence format (chunk 0x22 tag 0x3f, asset kind 0x100) — Layout verified, semantics Inferred
+
+Same 8-byte header + object table as §10.2 (always `nobj = 1`), but `8 + vtxOff == model size` (no vertex data)
+and the primitive block holds only `nD` 16-byte LiT-style `0x64` records starting at block + 0xc
+(`count` u16 @0 — first record holds the group size, then decreasing —, flags u8 @2, type `0x64` @3) [SP];
+record count == `nv` == `nD` in 714/714 [DATA]. [SP] reads flags bit 3 (semi-transparent, ABR from byte @6) and
+the texture id u16 @10. Inferred (tex ids are consecutive, e.g. 0x1f,0x20,0x21…): one record = one animation
+frame, `s16 x, y, z` @4 (offset), `u16 w, h` @12/@14 sprite size.
+
+### 10.4 Validation performed (TB)
+
+- `tb_world.py --check` over all 58 files: 123 world models (58/58 levels), 59 sky domes, 2817 actor-format
+  models, 714 sprite sequences; no out-of-range index, all layout invariants above hold, chunk 0x20 rotation is
+  identity everywhere.
+- World totals: 6 537 leaves, 178 201 vertices, 115 250 valid prims (92 503 quads, 22 747 tris; tree A 94 557,
+  B 1 374, C 19 319); 1 558 prims (1.35 %) reference texture ids that no chunk 0x28 loads (mostly b0 `0x3e`
+  semi-transparent) — Research Required (TEXTURES.md §8 has the LiT analogue).
+- Visual: textured top + front renders (`render_top.py`, vertex colours not applied) show the Camelot castle
+  (ARCA01: towers with conical roofs, banners, ivy walls, portcullis), the Aztec plaza with a stepped pyramid and
+  fret borders (AZCA01), a Transylvanian village with spired houses and a castle (TRCA01) and a snowy rock
+  valley with grass-topped cliffs and huts (VICA01). PNGs: `/mnt/1st4TB/BugsBunny/local/re/tb/<LEVEL>/{top,front}.png`.
 
 ## 11. Unverified / open
 
@@ -247,3 +400,11 @@ compatible (TEXTURES.md). The LiT primitive/record layouts above must **not** be
 - Collision data (§7); sprite record (§8).
 - GL emitters (`LAB_00414590`, `LAB_00414b40`) not decompiled; layouts verified through the software emitters
   and the shared descriptor tables.
+- TB: chunk 0x22 tag `0x25` animation data (13 905 assets; [TL] keeps `data[2] >> 1` → `+0xb`, u16 `data[4]` →
+  `+8`, `data[0xc]` → `+0xa`, pointer `data + 8` → `+0xc` of a 0x10-byte struct, asset kind 4) — needed to pose
+  §10.2 multi-object actors; tag `0x3e` blocks (kind 1, 351 assets).
+- TB octree: node `+0x00` u16, header words `+0x0c` (extra block: starts with a u32 count then records such as
+  `08 02 00 06 …` holding s16 coordinates — collision/trigger shapes?), `+0x10`, `+0x14`; prim `b1` bits 0–5;
+  tree C semantics; missing texture ids (§10.4).
+- TB collision: no collision structure identified yet; candidates are the octree boxes, the `extra` block and
+  world-prim `b1` low bits.

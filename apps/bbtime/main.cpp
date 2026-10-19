@@ -4,10 +4,12 @@
 #include "bb/render/renderer.h"
 #include "fixed_step.h"
 #include "level_hook.h"
+#include "music.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdlib>
 #include <filesystem>
@@ -36,9 +38,10 @@ struct Args {
     std::string level;
     Fidelity fidelity = Fidelity::Enhanced;
     int width = 1280, height = 720;
-    bool fullscreen = false, hidden = false;
+    bool fullscreen = false, hidden = false, mute = false;
     fs::path screenshot;
     int frames = 30;
+    std::optional<std::array<float, 5>> camera; // x y z yaw pitch (engine space, radians)
 };
 
 fs::path defaultDataRoot() {
@@ -50,8 +53,8 @@ fs::path defaultDataRoot() {
 
 constexpr const char* kUsage =
     "usage: bbtime [--data DIR] [--game lit|tb] [--level NAME] [--fidelity original|enhanced]\n"
-    "              [--width N] [--height N] [--fullscreen] [--hidden]\n"
-    "              [--screenshot FILE.png|FILE.ppm] [--frames N]\n"
+    "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute]\n"
+    "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -85,7 +88,19 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         else if (f == "--frames") ok = number(a.frames);
         else if (f == "--fullscreen") a.fullscreen = true;
         else if (f == "--hidden") a.hidden = true;
+        else if (f == "--mute") a.mute = true;
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
+        else if (f == "--camera") {
+            auto v = value();
+            std::array<float, 5> c{};
+            const char *p = v ? v->data() : nullptr, *end = v ? v->data() + v->size() : nullptr;
+            for (size_t k = 0; ok && k < c.size(); ++k) {
+                auto r = p ? std::from_chars(p, end, c[k]) : std::from_chars_result{nullptr, std::errc::invalid_argument};
+                ok = r.ec == std::errc{} && (k + 1 == c.size() ? r.ptr == end : r.ptr < end && *r.ptr == ',');
+                p = r.ptr + 1;
+            }
+            if (ok) a.camera = c;
+        }
         else if (f == "--help" || f == "-h") { std::println("{}", kUsage); std::exit(0); }
         else ok = false;
         if (!ok) {
@@ -165,6 +180,7 @@ struct App {
     bool running = true, overlay = true, fullscreen = false, vsync = true;
     bb::Scene scene;
     size_t sceneTris = 0;
+    float moveSpeed = 8.0f; // units per second, scaled to the scene in enterLevel()
     bb::render::Camera cam, prevCam;
     SDL_Gamepad* pad = nullptr;
     double frameTime = 1.0 / 60.0;
@@ -185,19 +201,35 @@ struct App {
             }
         }
         cam = {};
-        if (scene.placeholder || lo.x > hi.x) {
-            cam.pos = {0.0f, 3.0f, 10.0f};
-            cam.pitch = -0.12f;
-            s.fogStart = 30.0f;
-            s.fogEnd = 120.0f;
-        } else { // generic start for decoded levels until real spawn points are known
-            const float radius = glm::length(hi - lo) * 0.5f;
-            cam.pos = (lo + hi) * 0.5f + glm::vec3(0.0f, radius * 0.25f, radius * 0.75f);
+        if (lo.x > hi.x) lo = hi = glm::vec3(0.0f);
+        const glm::vec3 centre = (lo + hi) * 0.5f;
+        const float radius = std::max(glm::length(hi - lo) * 0.5f, 1.0f);
+        const auto inside = [&](const std::array<float, 3>& p) {
+            return glm::all(glm::greaterThanEqual(glm::vec3(p[0], p[1], p[2]), lo)) &&
+                   glm::all(glm::lessThanEqual(glm::vec3(p[0], p[1], p[2]), hi));
+        };
+        float fogEnd = radius * 2.5f;
+        if (scene.spawn && inside(*scene.spawn)) { // behind and above the player start, facing the player's direction
+            cam.yaw = scene.spawnYaw;
+            cam.pitch = -0.1f;
+            const glm::vec3 p(scene.spawn->at(0), scene.spawn->at(1), scene.spawn->at(2));
+            // ponytail: fixed offset (LiT units, Bugs is a few hundred tall); no collision, may clip into walls.
+            cam.pos = p + glm::vec3(0.0f, 300.0f, 0.0f) - glm::vec3(cam.forward().x, 0.0f, cam.forward().z) * 300.0f;
+        } else if (hi.z - lo.z < radius * 1e-3f) { // flat wall facing +Z (texture gallery): no fog
+            cam.pos = centre + glm::vec3(0.0f, 0.0f, radius * 1.1f);
+            fogEnd = radius * 8.0f;
+        } else {
+            cam.pos = centre + glm::vec3(0.0f, radius * 0.25f, radius * 0.75f);
             cam.pitch = -0.3f;
-            s.fogStart = radius * 0.5f;
-            s.fogEnd = radius * 2.5f;
         }
-        s.zFar = std::max(2000.0f, s.fogEnd * 2.0f);
+        // Draw distance: the original fades over the last 25 % of D = min(0xFFFF, b + (9*fogDist >> 1) * u_level)
+        // (RESEARCH.md §8.5); the per-level fogDist/u_level source is Research Required, so D scales with the level
+        // extent here (LiT levels span ~10k-40k units -> near ~10, far = D).
+        s.fogEnd = std::min(fogEnd, 65535.0f);
+        s.fogStart = s.fogEnd * 0.75f;
+        s.zNear = std::max(radius * 5e-4f, 0.05f);
+        s.zFar = s.fogEnd * 1.05f;
+        moveSpeed = std::max(8.0f, radius * 0.05f);
         prevCam = cam;
         screen = Screen::Level;
         SDL_SetWindowRelativeMouseMode(r.window(), true);
@@ -309,7 +341,7 @@ struct App {
         move.z += float(key[SDL_SCANCODE_W]) - float(key[SDL_SCANCODE_S]);
         move.x += float(key[SDL_SCANCODE_D]) - float(key[SDL_SCANCODE_A]);
         move.y += float(key[SDL_SCANCODE_SPACE] || key[SDL_SCANCODE_E]) - float(key[SDL_SCANCODE_LCTRL] || key[SDL_SCANCODE_Q]);
-        float speed = key[SDL_SCANCODE_LSHIFT] ? 32.0f : 8.0f;
+        float speed = key[SDL_SCANCODE_LSHIFT] ? moveSpeed * 4.0f : moveSpeed;
         if (pad) {
             auto axis = [&](SDL_GamepadAxis a) {
                 const float v = float(SDL_GetGamepadAxis(pad, a)) / 32767.0f;
@@ -395,7 +427,8 @@ struct App {
             c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             r.drawScene(c, s);
             if (scene.placeholder) {
-                const std::string_view msg = "PLACEHOLDER - not original data";
+                const std::string_view msg =
+                    scene.notes.empty() ? std::string_view("PLACEHOLDER - not original data") : std::string_view(scene.notes.front());
                 const int bs = std::clamp(int(W) / int(msg.size() * size_t(g) + 4), 1, sc * 2); // fits narrow windows
                 const float tw = float(msg.size() * size_t(g * bs));
                 r.drawRect((W - tw) * 0.5f - float(4 * bs), H - float(14 * bs), tw + float(8 * bs), float(12 * bs), kPanel);
@@ -423,6 +456,8 @@ struct App {
                                 game().shortName, scene.level, scene.meshes.size(), sceneTris, scene.textures.size(),
                                 s.fog ? "on" : "off", cam.pos.x, cam.pos.y, cam.pos.z,
                                 scene.placeholder ? "PLACEHOLDER SCENE" : "decoded data");
+        if (screen == Screen::Level)
+            for (const std::string& n : scene.notes) text += "\n" + n;
         int lines = 1, cols = 0, cur = 0;
         for (char ch : text) {
             if (ch == '\n') { ++lines; cur = 0; } else cols = std::max(cols, ++cur);
@@ -479,11 +514,18 @@ int main(int argc, char** argv) {
                     app.enterLevel(args->level);
                 }
             }
+            if (args->camera) {
+                const auto& c = *args->camera;
+                app.cam.pos = {c[0], c[1], c[2]};
+                app.cam.yaw = c[3];
+                app.cam.pitch = c[4];
+                app.prevCam = app.cam;
+            }
         }
 
         bb::FixedStep step;
         uint64_t last = SDL_GetTicksNS();
-        int frame = 0;
+        int frame = 0, musicIdx = app.gameIdx;
         while (app.running) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) app.event(e);
@@ -493,6 +535,10 @@ int main(int argc, char** argv) {
             app.frameTime += (dt - app.frameTime) * 0.05;
             for (int n = step.advance(dt); n > 0; --n) app.tick(float(step.dt));
             app.alpha = step.alpha();
+            if (app.screen == Screen::Main && app.mainSel < 2) musicIdx = app.mainSel; // highlighted game
+            else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
+            bbtime::menuMusic(args->data, app.screen == Screen::Level || args->mute
+                                              ? std::nullopt : std::optional(app.games[musicIdx].id));
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
                 const bool ok = app.r.screenshot(args->screenshot);

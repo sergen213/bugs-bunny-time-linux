@@ -1,4 +1,5 @@
 /build*/
+__pycache__/
 /out/
 # Proprietary game data must never enter the repo.
 *.bze
