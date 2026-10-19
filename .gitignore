@@ -1,0 +1,15 @@
+/build*/
+/out/
+# Proprietary game data must never enter the repo.
+*.bze
+*.BZE
+*.xa
+*.XA
+*.iso
+*.mdf
+*.exe
+*.dll
+*.gzf
+*.rep/
+/ghidra-projects/
+/local/
