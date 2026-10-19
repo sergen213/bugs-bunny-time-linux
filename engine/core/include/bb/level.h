@@ -1,13 +1,9 @@
-// Level BZE -> bb::Scene. Specs: docs/formats/{TEXTURES,MODELS}.md.
+// LiT level BZE -> bb::Scene. Specs: docs/formats/{TEXTURES,MODELS}.md. TB: bb/tb_level.h.
 #pragma once
 #include "bb/bze.h"
 #include "bb/scene.h"
 
-#include <cstdint>
-#include <span>
 #include <string>
-#include <utility>
-#include <vector>
 
 namespace bb {
 
@@ -16,11 +12,5 @@ namespace bb {
 // start (entity with tag 0x13 == 1). Missing texture ids are kept as untextured faces and counted in
 // Scene::stats. Throws FormatError on malformed data.
 Scene buildLitScene(const BzeFile& bze, const std::string& level);
-
-// TB section-1 texture list (chunk 0x28 tag 0x29): (section-3 offset, texture id = low 12 bits).
-std::vector<std::pair<uint32_t, uint32_t>> tbTextureRefs(std::span<const uint8_t> section1);
-
-// All TB level textures, named "<level>/tex/<id>". Undecodable entries are counted in stats->textureErrors.
-std::vector<Texture> decodeTbTextures(const BzeFile& bze, const std::string& level, SceneStats* stats = nullptr);
 
 } // namespace bb

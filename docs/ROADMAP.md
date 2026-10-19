@@ -24,19 +24,21 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 | Install detection / manifest (`bbimport`) | Tested | Tested |
 | BZE container + checksum | Tested (167/167) | Tested (58/58) |
 | LZSS | Tested (946/946 sections) | n/a (stored raw; `/comp` path only) |
-| Level script (section 1) | Tested (167/167 parse) | Research Required |
-| TIM textures | Implemented (python verified visually) | Implemented (python, 58/58) |
-| World geometry | Implemented (python verified visually) | Research Required |
-| Missing texture ids (33/79 levels) | Research Required | — |
-| Animation (0x25 blocks) | Research Required | Research Required |
-| Collision | Research Required | Research Required |
-| Player controller / camera / entities | Research Required | Research Required |
-| Bugs/Taz switching, co-op | — | Research Required |
-| `.xa` IMA ADPCM audio | Implemented (python) | Implemented (python) |
+| Level script (section 1) | Tested (167/167 parse) | Tested (58/58 parse, C++ + python) |
+| TIM textures | Tested (C++, 28,206 refs; 1 unsupported 24-bit image) | Tested (C++, 17,103 refs) |
+| World geometry → renderer | Tested (79 levels, 342k tris; visual check only) | Tested (58 levels, octree trees A+B; tree C = far LOD, not drawn) |
+| Rigid props | Implemented (placement rule inferred) | Implemented (placement rule inferred) |
+| Missing texture ids | Research Required (5,567 faces drawn untextured) | Research Required (1,731 faces) |
+| Animation (Sony TOD, rigid parts) | Designed (`docs/re/GAMEPLAY.md` §6, python poser) | Research Required |
+| Collision | Designed (heightfield chunk 0x36/tag 0x37, GAMEPLAY §4) | Research Required (polygon+octree floor) |
+| Player controller / camera / entities | Designed (state machine is level data; constants in GAMEPLAY §3/§5/§7) | Research Required (generic type-14 character) |
+| Bugs/Taz switching, co-op | — | Designed (R1 pointer swap, L1 call-friend, midpoint camera; GAMEPLAY §9) |
+| `.xa` IMA ADPCM music/speech | Tested (C++, 35 files) + menu music | Tested (C++, 446 files); menu track UNVERIFIED |
+| In-level SFX | Tested parse (3,055 AIFF PCM) | Tested parse (2,302 AIFF-wrapped ADPCM) |
 | Simulation tick | 30 Hz observed statically | 30 Hz observed statically |
-| GL renderer, Hor+, fidelity modes | Tested (placeholder scenes) | Tested (placeholder scenes) |
+| GL renderer, Hor+, fidelity modes | Tested on real levels | Tested on real levels |
 | Collection menu + real title art | Tested | Tested |
-| Save / config | config.pc decoded (Research), saves untested | Research Required |
+| Save / config | Designed (`Savegame%d.dat` 1-based, `Savedata.dat`; GAMEPLAY §8) — untested | Designed (layout in GAMEPLAY §8) — untested |
 | Vulkan / RT / launcher / updater | Designed | Designed |
 
 ## Known caveats

@@ -20,7 +20,7 @@ All integers little-endian.
 |---|---|---|
 | Container header | Verified (167/167 files) | Verified (58/58) |
 | LZSS section compression | Verified (946/946 sections decode) | N/A: sections stored raw (Verified, see below) |
-| Section-1 level script | Tested: 167/167 parse to the last byte with [BD] tables | Research Required: fails at offset 1 |
+| Section-1 level script | Tested: 167/167 parse to the last byte with [BD] tables | Tested: 58/58 parse to the last byte (strict `bb::parseTbScript`, `core.tb_levels`); grammar in `TB_LEVELS.md` |
 | Semantics of section 2..11 payloads | Research Required (other specs in `docs/formats/`) | Research Required |
 
 ## Header (0x800 bytes)
@@ -125,16 +125,16 @@ Result [Data]: 167/167 LiT level scripts parse, ending exactly at the decoded pa
 
 Structural bytes are the LiT ones minus 1: chunk start `2c`, chunk end `2d`, section end `2e` [GED]. Consistent
 [Data]: all 58 TB section-1 streams start `2c 3a` and end `2d 2e`; no pseudo-chunk (TB has no section 2).
-TB command bytes and per-type tag tables are unknown, so `parseLevelScript(…, TimeBusters)` stops at offset 1
-(`unknown chunk type 0x3a`) in 58/58 files. Tables must come from the TB loader, not guessed from LiT.
+TB commands and per-type tag tables come from the TB loader and are specified in `TB_LEVELS.md`; the strict C++
+walker is `bb::parseTbScript` (`bb/tb_level.h`). `parseLevelScript(…, TimeBusters)` stays LiT-only (it stops at
+offset 1, `unknown chunk type 0x3a`).
 
 ## Open questions
 
-1. TB section-1 commands and tag tables (from `bblit2.exe` loader; [GED]).
-2. TB section 11 meaning; TB budget word semantics beyond "memory budget".
-3. LZSS: in the 639 sections classified "stored = count−1", a garbage final item lying entirely inside
+1. TB section 11 meaning; TB budget word semantics beyond "memory budget".
+2. LZSS: in the 639 sections classified "stored = count−1", a garbage final item lying entirely inside
    actualSize's ≤3 alignment bytes and decoding as a valid pair cannot be told apart from data by bytes alone.
    Worst case is ≤26 spurious bytes at the very end of a section-3/4/5–10 payload; consumers use internal
    offsets, so this is believed harmless. Confirm when section 3/4 parsers exist.
-4. Exact LiT header word 0 meaning ("version" in [BD]); only value 1 seen.
-5. LiT 1.0 (md5 `59731f03…`) data was not available; the statistics above are for the v1.6 install only.
+3. Exact LiT header word 0 meaning ("version" in [BD]); only value 1 seen.
+4. LiT 1.0 (md5 `59731f03…`) data was not available; the statistics above are for the v1.6 install only.

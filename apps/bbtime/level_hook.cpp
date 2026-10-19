@@ -1,6 +1,7 @@
 #include "level_hook.h"
 
 #include "bb/level.h"
+#include "bb/tb_level.h"
 
 #include <algorithm>
 #include <array>
@@ -128,33 +129,6 @@ Scene placeholderScene(GameId game, const std::string& level) {
     return s;
 }
 
-// TB: real decoded textures laid out as a wall of quads (z = 0, facing +Z). A gallery, NOT a level.
-Scene tbGallery(const BzeFile& bze, const std::string& level) {
-    Scene s;
-    s.game = GameId::TimeBusters;
-    s.level = level;
-    s.placeholder = true;
-    s.textures = decodeTbTextures(bze, level, &s.stats);
-    const int n = int(s.textures.size()), cols = std::max(1, int(std::ceil(std::sqrt(float(n) * 16.0f / 9.0f))));
-    const int rows = (n + cols - 1) / cols;
-    for (int i = 0; i < n; ++i) {
-        const Texture& t = s.textures[size_t(i)];
-        const float k = 1.0f / float(std::max(t.width, t.height));  // longest side = 1 unit, cell pitch 1.2
-        const float w = float(t.width) * k, h = float(t.height) * k;
-        const float x = (float(i % cols) - float(cols - 1) * 0.5f) * 1.2f, y = (float(rows - 1 - i / cols) + 0.5f) * 1.2f;
-        Mesh m = mesh(t.name, i, t.hasAlpha ? Blend::AlphaTest : Blend::Opaque);
-        m.twoSided = true;
-        quad(m, {x - w / 2, y - h / 2, 0}, {x + w / 2, y - h / 2, 0}, {x + w / 2, y + h / 2, 0}, {x - w / 2, y + h / 2, 0}, 1,
-             RGBA{255, 255, 255, 255});
-        s.meshes.push_back(std::move(m));
-    }
-    const float span = float(std::max(cols, rows)) * 1.2f;
-    s.spawn = std::array<float, 3>{0.0f, float(rows) * 0.6f, span * 0.55f};
-    s.notes.push_back(std::format("TEXTURE GALLERY - not a level: {} of {} TB textures decoded", n, s.stats.textureRefs));
-    s.notes.push_back("TB geometry: Research Required (octree model format, MODELS.md 10)");
-    return s;
-}
-
 } // namespace
 
 Scene loadLevelScene(GameId game, const fs::path& dataRoot, const std::string& level) {
@@ -167,7 +141,7 @@ Scene loadLevelScene(GameId game, const fs::path& dataRoot, const std::string& l
     }
     try {
         const BzeFile bze = loadBze(file);
-        return lit ? buildLitScene(bze, level) : tbGallery(bze, level);
+        return lit ? buildLitScene(bze, level) : buildTbScene(bze, level);
     } catch (const std::exception& e) {
         Scene s = placeholderScene(game, level);
         s.notes.push_back(std::format("PLACEHOLDER - not original data: decode failed: {}", e.what()));

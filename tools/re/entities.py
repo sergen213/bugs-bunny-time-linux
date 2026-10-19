@@ -5,7 +5,7 @@ Entity chunks 0x07 (live), 0x08 (template), 0x0a (live) of section 1; tag -> fie
 FUN_0042e7a0 (docs/re/LOGIC.md §2). Mnemonics are read from the LOGIC.md condition/action tables.
 Usage:
     entities.py FILE.bze [--type N]   list entities (chunk, behaviour type, id, pos, flags, states, steps, items)
-    entities.py --stats DIR           per-level collectible counts (carrot / golden carrot / clock / health) + G[] bits
+    entities.py --stats DIR           per-level collectible counts (carrot / golden carrot / clock) + G[] flag bits
     entities.py --selftest
 """
 import collections
@@ -19,7 +19,7 @@ import bze  # noqa: E402
 import sec1  # noqa: E402
 
 LOGIC_MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../docs/re/LOGIC.md")
-GC, CLOCKS, CARROTS, HEALTH = 7, 5, 3, 1  # G[] indices (LOGIC.md §1)
+GC, CLOCKS, CARROTS = 7, 5, 3  # G[] indices (LOGIC.md §1)
 
 
 def mnemonics():
@@ -93,10 +93,10 @@ def item_str(it):
     return s
 
 
-def touches(it, idx):
-    """Does item's action change G[idx]? (inc/dec/add/sub/incgg/movgi/gvcrt)."""
+def awards(it, idx):
+    """Does item's action increase G[idx]? (A4 incg / A23 incgg / A37 addgi / A48 gvcrt)."""
     a, x, y = it["act"], it["X"], it["Y"]
-    if a in (4, 6, 19, 37, 40):
+    if a in (4, 37):
         return y == idx
     if a == 23:
         return idx in (x, y)
@@ -107,14 +107,13 @@ def classify(e, templates):
     """-> (kind, persistence bits [(X, Y)], level counter index or None)."""
     its = e["items"]
     kind = None
-    if any(touches(i, GC) for i in its):
+    if any(awards(i, GC) for i in its):
         kind = "golden_carrot"
-    elif any(touches(i, CLOCKS) for i in its):
+    elif any(awards(i, CLOCKS) for i in its):
         kind = "clock"
     elif any(i["act"] == 48 for i in its):
         kind = "carrot_fx"
-    elif any(i["act"] in (4, 19) and i["Y"] == HEALTH and i["act"] != 6 for i in its):
-        kind = "health"
+    # (no 'health' pickup kind: the only A4 incg G[1] / A19 movgi G[1] users are mini-game and hazard scripts)
     else:
         for i in its:  # spawns a template that awards a carrot (A48)
             t = templates.get(i["p2"]) if i["fl"] & 0x40100 and not i["fl"] & 0x20000000 else None
@@ -125,23 +124,42 @@ def classify(e, templates):
         return None, [], None
     bits = sorted({(i["X"], i["Y"]) for i in its if i["act"] == 12})  # orgi G[Y] |= X (collected flag)
     counter = None
-    for i in its:
-        if i["act"] == 23 and kind in ("golden_carrot", "clock"):
-            idx = GC if kind == "golden_carrot" else CLOCKS
-            if idx in (i["X"], i["Y"]):
+    if kind in ("golden_carrot", "clock"):  # per-level counter: other G[] bumped by A4 incg / A23 incgg
+        idx = GC if kind == "golden_carrot" else CLOCKS
+        for i in its:
+            if i["act"] == 23 and idx in (i["X"], i["Y"]):
                 counter = i["Y"] if i["X"] == idx else i["X"]
+            elif i["act"] == 4 and i["Y"] not in (idx, GC, CLOCKS) and i["m8"] & 0x8000:
+                counter = i["Y"]
     return kind, bits, counter
 
 
 def level_files(d):
     """Gameplay levels: L0x*/LBxx/LS01, skipping the duplicate '_8' builds."""
-    return sorted(f for f in os.listdir(d) if f.lower().endswith(".bze") and re.match(r"(L0\d|LB\d|LS\d)", f)
+    return sorted(f for f in os.listdir(d) if f.lower().endswith(".bze") and re.match(r"(l0\d|lb\d|ls\d)", f.lower())
                   and "_8" not in f)
+
+
+def ls01_maxima(path):
+    """LS01 (level select) item groups set G[0xb6]=GC counter idx, G[0xb7]=its max, G[0xb8]=clock idx, G[0xb9]=max
+    (A19 movgi); the HUD/pause screen show G[G[0xb6]]/G[0xb7] and G[G[0xb8]]/G[0xb9]. -> {(kind, idx): max}."""
+    mx = {}
+    for e in parse(path):
+        groups = collections.defaultdict(dict)
+        for i in e["items"]:
+            if i["act"] == 19 and 0xb6 <= i["Y"] <= 0xb9:
+                groups[i["g"]][i["Y"]] = i["X"]
+        for v in groups.values():
+            for kind, ci, mi in (("golden_carrot", 0xb6, 0xb7), ("clock", 0xb8, 0xb9)):
+                if ci in v:
+                    mx[(kind, v[ci])] = v.get(mi)
+    return mx
 
 
 def stats(d):
     tot = collections.Counter()
-    per_counter = collections.Counter()
+    per_counter = collections.defaultdict(set)  # (kind, counter) -> distinct (G index, bit) collected flags
+    all_bits = collections.defaultdict(set)
     for f in level_files(d):
         es = parse(os.path.join(d, f))
         templates = {e["id"]: e for e in es if e["chunk"] == 0x08}
@@ -153,29 +171,37 @@ def stats(d):
             kind, b, counter = classify(e, templates)
             if kind is None:
                 continue
-            where = "tmpl" if e["chunk"] == 0x08 else "live"
-            c[(kind, where)] += 1
+            c[(kind, "tmpl" if e["chunk"] == 0x08 else "live")] += 1
             for x, y in b:
                 bits[(kind, y)].add(x)
-            if counter is not None and where == "live":
-                per_counter[(kind, counter)] += 1
+                all_bits[kind].add((y, x))
+                if counter is not None:
+                    per_counter[(kind, counter)].add((y, x))
         tot.update(c)
         print(f"{f:14} " + " ".join(f"{k}/{w}={n}" for (k, w), n in sorted(c.items())))
         for (k, y), xs in sorted(bits.items()):
             print(f"{'':14}   {k} bits G[{y}] = {sorted(xs)}")
-    print("TOTAL " + " ".join(f"{k}/{w}={n}" for (k, w), n in sorted(tot.items())))
-    print("live golden carrots / clocks per level counter G[i]:")
-    for (k, i), n in sorted(per_counter.items()):
-        print(f"  {k} G[{i}] {n}")
+    print("TOTAL entities " + " ".join(f"{k}/{w}={n}" for (k, w), n in sorted(tot.items())))
+    print("TOTAL distinct collected-flag bits " + " ".join(f"{k}={len(v)}" for k, v in sorted(all_bits.items())))
+    mx = ls01_maxima(os.path.join(d, "LS01.bze"))
+    print("per-level counter G[i]: distinct flag bits in data vs LS01 max (golden carrot 333 / clock 124 totals)")
+    for key in sorted(set(per_counter) | set(mx)):
+        n = len(per_counter.get(key, ()))
+        print(f"  {key[0]:13} G[{key[1]:3}] data={n:3} LS01max={mx.get(key)}{'' if n == mx.get(key) else '  <-'}")
+    for kind in ("golden_carrot", "clock"):
+        print(f"  sum LS01 max {kind}: {sum(v or 0 for (k, _), v in mx.items() if k == kind)}")
 
 
 def dump(path, only_type=None):
     es = parse(path)
+    templates = {e["id"]: e for e in es if e["chunk"] == 0x08}
     for e in es:
         if only_type is not None and e["type"] != only_type:
             continue
+        kind, bits, counter = classify(e, templates) if e["type"] == 14 else (None, [], None)
         print(f"@{e['off']:#07x} chunk {e['chunk']:#04x} type {e['type']} id {e['id']} pos {e['pos']} "
-              f"f8={e['f8']:#x} fc={e['fc']:#x} hp={e['hp']} t1d={e['t1d']}")
+              f"f8={e['f8']:#x} fc={e['fc']:#x} hp={e['hp']} t1d={e['t1d']}"
+              + (f"  [{kind} flag-bits(X,G[Y])={bits} counter=G[{counter}]]" if kind else ""))
         for s in e["states"]:
             print(f"    state {s[0]}: steps {[x for x in s[1:] if x != 0xfff0]}")
         for s in e["steps"]:

@@ -104,11 +104,27 @@ struct Builder {
         if (in.u32(0) != 0x41) throw FormatError(std::format("model 0x{:x}: magic 0x{:x}", off, in.u32(0)));
         const uint32_t nobj = in.u32(8);
         in.need(12, size_t(nobj) * 28);
-        std::vector<std::array<float, 3>> objv;  // concatenated object vertex tables
+        // Polygon/cell index space. World models: concatenated object vertex tables (word 3 ignored, 0x40f150).
+        // Actor/prop models: vertex word 3 = slot (low 15 bits) in a shared buffer; bit 0x8000 = average with the
+        // value already in that slot (GameplayRE, 0x411350/0x411b10; non-blend slots are 0..N-1 in object order).
+        // The original averages after projection; averaging in model space here is an approximation (Inferred).
+        std::vector<std::array<float, 3>> objv;
         for (uint32_t o = 0; o < nobj; ++o) {
             const size_t e = 12 + size_t(o) * 28, vt = 12 + size_t(in.u32(e)), nv = in.u32(e + 4);
             in.need(vt, nv * 16);
-            for (size_t i = 0; i < nv; ++i) objv.push_back({in.f32(vt + i * 16), in.f32(vt + i * 16 + 4), in.f32(vt + i * 16 + 8)});
+            for (size_t i = 0; i < nv; ++i) {
+                const std::array<float, 3> p{in.f32(vt + i * 16), in.f32(vt + i * 16 + 4), in.f32(vt + i * 16 + 8)};
+                if (world) {
+                    objv.push_back(p);
+                    continue;
+                }
+                const uint32_t w = in.u32(vt + i * 16 + 12), slot = w & 0x7fff;
+                if (slot >= objv.size()) objv.resize(slot + 1, {0, 0, 0});
+                if (w & 0x8000)
+                    for (int k = 0; k < 3; ++k) objv[slot][size_t(k)] = (objv[slot][size_t(k)] + p[size_t(k)]) * 0.5f;
+                else
+                    objv[slot] = p;
+            }
         }
         std::vector<std::array<float, 3>> block;
         std::string cellName = gname;
@@ -314,41 +330,6 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
                                       s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));
     for (const std::string& e : texErrors) s.notes.push_back(e);
     return s;
-}
-
-std::vector<std::pair<uint32_t, uint32_t>> tbTextureRefs(std::span<const uint8_t> s1) {
-    // ponytail: TB tag tables are not known yet (BZE.md); locate the single texture chunk `2c 28 (29 <8>)* 2d`
-    // by pattern (present exactly once in all 58 TB levels). Replace with the TB level-script walker.
-    static constexpr uint8_t kPat[] = {0x2c, 0x28, 0x29};
-    const auto hit = std::ranges::search(s1, kPat);
-    std::vector<std::pair<uint32_t, uint32_t>> refs;
-    if (hit.empty()) return refs;
-    size_t p = size_t(hit.begin() - s1.begin()) + 2;
-    const In in{s1, "tb texture list"};
-    while (in.u8(p) == 0x29) {
-        refs.emplace_back(in.u32(p + 1), in.u32(p + 5) & 0xfff);
-        p += 9;
-    }
-    if (s1[p] != 0x2d) throw FormatError(std::format("tb texture list: expected chunk end 0x2d at 0x{:x}", p));
-    return refs;
-}
-
-std::vector<Texture> decodeTbTextures(const BzeFile& bze, const std::string& level, SceneStats* stats) {
-    if (bze.variant != BzeVariant::TimeBusters) throw FormatError("decodeTbTextures: not a Time Busters BZE");
-    const int i1 = bze.find(1), i3 = bze.find(3);
-    if (i1 < 0) throw FormatError("decodeTbTextures: no section 1");
-    const std::vector<uint8_t> s1 = bze.payload(size_t(i1));
-    const std::vector<uint8_t> s3 = i3 >= 0 ? bze.payload(size_t(i3)) : std::vector<uint8_t>{};
-    std::vector<Texture> out;
-    for (auto [off, id] : tbTextureRefs(s1)) {
-        if (stats) ++stats->textureRefs;
-        try {
-            out.push_back(decodeTim(s3, off, std::format("{}/tex/{}", level, id)));
-        } catch (const FormatError&) {
-            if (stats) ++stats->textureErrors;
-        }
-    }
-    return out;
 }
 
 } // namespace bb

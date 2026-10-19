@@ -15,8 +15,8 @@ Companion of [GAMEPLAY.md](GAMEPLAY.md) (actor struct, main loop). BugsDecomp (n
 
 ## 2. Item encoding
 
-8-byte logic item `{u8 cond, u8 A, u8 B, u8 act, u16 X, u16 Y}` at node `+0x10` (*observed*: every caller passes
-`node+0x10` to `TestLogicCond` 0x42a7d0 and `RunLogicAction` 0x42c6d0; handlers read A at `+1`, B at `+2`, X at `+4`,
+8-byte logic item `{u8 cond, u8 A, u8 B, u8 act, u16 X, u16 Y}` at node `+0x10` for 0x31 items and at `+0xe` for
+0x35 player rules (*observed*: callers pass `node+0x10` / `node+0xe` to `TestLogicCond` 0x42a7d0 and `RunLogicAction` 0x42c6d0; handlers read A at `+1`, B at `+2`, X at `+4`,
 Y at `+6`; some conditions read `AB` = u16 at `+1`). Code 0 for `cond` means "no condition", 0 for `act` means "no
 action" (callers skip the call). Out-of-range codes: conditions return false, actions do nothing (dispatch bounds
 99 / 129, *observed* in 0x42a7d0 / 0x42c6d0, tables `0x4ac550` / `0x4ac6e0`).
@@ -27,9 +27,9 @@ level arena `0x4b3a00`, limit `0x4b247c`; overflow = `jmp $` hang) — *observed
 | tag | payload | node size | list | node layout (payload offset → node offset) |
 |---|---|---|---|---|
 | `0x31` | 32 B | 0x24 | `actor+0xfc` | `[0..1]→+4 u16 group`, `[2..3]→+6 u16 next-state index`, `[4..7]→+8 u32 gate mask on flags14`, `[8..11]→+0xc u32 gate mask on flags18`, `[12..19]→+0x10 logic item`, `[20..23]→+0x18 u32 item flags`, `[24..27]→+0x1c u32 P1`, `[28..31]→+0x20 u32 P2` |
-| `0x35` | 40 B | 0x2c | `actor+0xfc` | `+4,+6` u16, `+8` s16, `+0xa` u16, `+0xc` u16, `+0xe/+0xf` u8, `[12..19]→+0x10 logic item`, `+0x18` u16, `+0x1c,+0x20,+0x24,+0x28` u32 |
+| `0x35` | 40 B | 0x2c | `actor+0xfc` (player transition rules) | `[0..1]→+4 u16 group`, `[2..3]→+6 buttonsAll`, `[4..5]→+8 buttonsAny`, `[6..7]→+0xc heldCmd`, `[8..9]→+0xa s16 next state (−13 = stay)`, **`[10..17]→+0xe logic item`**, `[18..19]→+0x16`, `[20..21]→+0x18 invert bits`, `[24..27]→+0x1c heldMask`, `[28..31]→+0x20 parentMask`, `[32..35]→+0x24 flags14Mask`, `[36..39]→+0x28 flags18Mask` (player calls the VM with `node+0xe`; GAMEPLAY.md §3) |
 | `0x30` | 32 B | 0x20 | `actor+0xf8` (script steps) | `+4 u16 step id`, `+6 u16 anim id`, `+8 s16 anim speed/blend`, `+0xa u16 event-group id`, `+0xc u32 step flags` (bit 2 = kill actor when the animation ends), `+0x10 u32`, `+0x14..+0x1c u16×5` (`+0x1e` used as byte offset into the `+0xfc` list) |
-| `0x34` | 24 B | 0x1c | `actor+0xf8` | `+4,+6,+8` u16, `+0xa` u16, `+0xc` u32, `+0x10` s32, `+0x14,+0x16,+0x18` u16 |
+| `0x34` | 24 B | 0x1c | `actor+0xf8` (player moves) | `[0..1]→+4 id`, `[2..3]→+6 anim id`, `[4..5]→+8 s16 anim mode`, `[8..11]→+0xc flagsA`, `[12..15]→+0x10 flagsB`, `[16..17]→+0xa link (transition group)`, `[18..19]→+0x14 speed`, `[20..21]→+0x16 jump H`, `[22..23]→+0x18 jump step` |
 | `0x32` | 12 B | 0x10 | `actor+0xf4` (script states) | `+4 u16 state id` (2 = preferred start, 1 = default start), `+6..+0xf` 5 × u16 step ids (`0xfff0` terminates) |
 
 **Cross-references are IDs in the file, offsets in memory** (*observed*, 0x42e600, run after each entity chunk for
@@ -43,7 +43,8 @@ state = state id 2 if present, else 1 (0x4455e0). A native loader should keep ID
 
 *Observed* — the same list is interpreted differently by different behaviours:
 
-1. **Script graph** (behaviour 2 `0x4455e0`, also 34 `0x446990`, 16 `0x4445e0`, 36 `0x444b50` variants): the actor
+1. **Script graph** (behaviour 2 `0x4455e0`; type 34 `0x446990` is a variant; type 14 `0x440120` uses an extended
+   dialect, GAMEPLAY.md §7.3): the actor
    is in script state `+0x180` (0x32 node) at step index `+0x17c`, current step `+0x184` (0x30 node). Each tick it
    plays the step's animation via `0x438970(actor, actor+0x144, animId, speed, work)` (returns 0x100 when done →
    next step; past the 5th step or `0xfff0` → restart the start state; step flag 4 → kill). If the step's event
@@ -66,7 +67,8 @@ state = state id 2 if present, else 1 (0x4455e0). A native loader should keep ID
    | 0x10 | stop scanning, no state change |
    | none of the above | switch to script state `item[+6]` (resolved offset into `+0xf4`), step 0 |
 
-2. **Gated list** (moving platforms 0x43f520 types 12/13/18/19/22–29, and others): for each item, if
+2. **Gated list** (moving platforms 0x43f520 types 12/13/18/19/22–29; directors type 16 `0x4445e0` / 36 `0x444b50`
+   run their list every tick with the same first-match rule): for each item, if
    `(node+8 == 0 || flags14 & node+8) && (node+0xc == 0 || flags18 & node+0xc)` and the condition holds → action;
    item flags 0x200/0x400 play sound `+0x1c`, 0x10000 kill self; the scan **stops after the first firing item**
    unless flag 0x8000.

@@ -7,6 +7,7 @@ add_library(bb_core STATIC
   src/manifest.cpp
   src/tim.cpp
   src/level.cpp
+  src/tb_level.cpp
 )
 target_include_directories(bb_core PUBLIC include)
 target_link_libraries(bb_core PRIVATE OpenSSL::Crypto)

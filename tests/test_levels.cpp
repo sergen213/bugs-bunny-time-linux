@@ -1,4 +1,4 @@
-// Real-data level decode: every LiT BZE builds a Scene; every TB BZE decodes its textures.
+// Real-data level decode: every LiT BZE builds a Scene (TB: test_tb_levels.cpp).
 // Needs BBTIME_DATA=<dir containing lit/ and tb/>; exits 77 (ctest SKIP) otherwise.
 #include "bb/level.h"
 
@@ -73,21 +73,6 @@ int main() {
     CHECK(files == 167 && withWorld == 79, "files {} world {}", files, withWorld);
     CHECK(texErrors == 2, "only the 24-bit TIM 217 in L03B and L03b_8 is undecodable: {}", texErrors);
     CHECK(faces >= 168963, "world faces from MODELS.md §9 (168963) plus props: {}", faces);
-
-    // TB: textures only (geometry format differs, MODELS.md §10). 58 files, 17103 TIM references.
-    size_t tbFiles = 0, tbTex = 0, tbRefs = 0, tbErr = 0;
-    for (const fs::path& p : bzes(root / "tb/Datas/BZE")) {
-        ++tbFiles;
-        try {
-            bb::SceneStats st;
-            tbTex += bb::decodeTbTextures(bb::loadBze(p), p.stem().string(), &st).size();
-            tbRefs += st.textureRefs, tbErr += st.textureErrors;
-        } catch (const std::exception& e) {
-            CHECK(false, "{}: {}", p.string(), e.what());
-        }
-    }
-    std::println("TB: {} files, {} texture refs, {} decoded, {} errors", tbFiles, tbRefs, tbTex, tbErr);
-    CHECK(tbFiles == 58 && tbRefs == 17103 && tbTex == tbRefs && tbErr == 0, "TB textures");
 
     // Corrupt input must throw, never crash (run under ASan/UBSan): flip bytes in L01a's section data.
     const std::vector<uint8_t> good = bb::readFile(root / "lit/Datas/bze/L01a.bze");

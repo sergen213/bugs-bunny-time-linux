@@ -299,7 +299,7 @@ World primitive, 28 bytes [GLQ][GLT][SWQ][COL][PV]:
 | off | type | field |
 |---|---|---|
 | 0x00 | u8 | `b0`: bit 3 = quad (4 indices) else tri; bit 4 = Gouraud (4 colours) else flat (colour 0 only); bit 1 = semi-transparent, ABR = `(uv[6] >> 5) & 3`, else opaque (mode 4); bits 2 and 5 must be set, bit 6 clear [PV] |
-| 0x01 | u8 | `b1`: bit 6 = no UVs (fixed per-vertex UVs below; also invalid together with b0 bit 1) ; bit 5 = flag `|1` at render `+0x67` (tris with it are invalid [PV]); bit 4 = flag `0x80` at render `+0x67`; bits 0–3 Research Required (values 0,1,4,5,8,9,12,13) |
+| 0x01 | u8 | `b1`: bit 6 = no UVs (fixed per-vertex UVs below; also invalid together with b0 bit 1) ; bit 5 = flag `|1` at render `+0x67`: a quad whose first triangle faces away is still drawn if its second triangle (i1, i2, i3) faces the camera (`FUN_0041eee0`; tris with it are invalid [PV]); bit 4 = flag `0x80` at render `+0x67`: back-face test skipped, i.e. two-sided (`FUN_0041eee0`/`FUN_0041f080`); bits 0–3 Research Required (values 0,1,4,5,8,9,12,13) |
 | 0x02 | u16 | texture id = low 12 bits (`& 0xfff`, the id of chunk 0x28 tag 0x29); high nibble is 7 in 138 341/138 341 [DATA], ignored |
 | 0x04 | u8 ×4 | colour 0: r, g, b, pad (pad = PS1 code byte, ignored, not always 0) |
 | 0x08, 0x0c, 0x10 | u8 ×4 | colours 1, 2, 3 (Gouraud only; flat prims use colour 0 for all vertices) |
@@ -317,10 +317,17 @@ implicit mapping, and with Z-order quads it gives a crossed mapping; it is used 
 **Quad order: PS1 Z order** (outline i0 → i1 → i3 → i2): the software path puts i3 in slot 2 and i2 in slot 3
 [SWQ]; in data 2 755/2 759 ARCA01 quads are convex only in Z order (4 degenerate) [DATA]. Visually verified.
 
-Trees (semantics Inferred from renders): A = main textured world; B (`altTree`) = alpha-tested overlays (ivy,
-foliage; b1 = `0x18/0x1c/0x2c/…`); C (`detailTree`) = untextured vertex-coloured shell (b1 bit 6, 4×4 texture),
-e.g. ARCA01 tower shafts and roof silhouettes. Whether C is a quality-dependent extra or a fallback is
-Research Required (the condition is only `DETAILS ≤ 1`).
+Trees: A = main textured world; B (`altTree`) = alpha-tested overlays (ivy, foliage; b1 = `0x18/0x1c/0x2c/…`)
+(A/B semantics Inferred from renders); C (`detailTree`) = untextured vertex-coloured shell (b1 bit 6, 4×4
+texture), a **far LOD** — Verified (code): the world draw `FUN_00406840` walks A over the near range
+`[0, near]`, B over `[0, far]`, and C only over `[near, far]` and only if `near ≠ far`; `FUN_00409840(p1, far)`
+sets near = p1, (p1+far)/2 or far for `DETAILS` (`DAT_00639b58`) 0/1/2, and [RB] builds C only for
+`DETAILS ≤ 1`. At `DETAILS` 2 C is never drawn (Inferred: the highest-detail setting). `bb::buildTbScene` draws A + B and only validates C.
+Drawn together with A, C covers textured walls (visual check, TRCA01).
+
+Sky domes are owned by class-9 entities (chunk 0x63, tag `0f` = the dome's asset id, 54/59; tag `10` position,
+e.g. TRCA01 (0, −15500, 5), yaw 180°): `FUN_0044d6f0` builds the entity's octree and forces its scale to 1.
+Whether the dome follows the camera at run time is Research Required.
 
 Invalid prims ([PV] fails → logged `CheckPrimValidity failed` and skipped): 48 in all data, dropped by the exporter.
 
@@ -405,6 +412,6 @@ frame, `s16 x, y, z` @4 (offset), `u16 w, h` @12/@14 sprite size.
   §10.2 multi-object actors; tag `0x3e` blocks (kind 1, 351 assets).
 - TB octree: node `+0x00` u16, header words `+0x0c` (extra block: starts with a u32 count then records such as
   `08 02 00 06 …` holding s16 coordinates — collision/trigger shapes?), `+0x10`, `+0x14`; prim `b1` bits 0–5;
-  tree C semantics; missing texture ids (§10.4).
+  missing texture ids (§10.4).
 - TB collision: no collision structure identified yet; candidates are the octree boxes, the `extra` block and
   world-prim `b1` low bits.

@@ -43,10 +43,13 @@ struct Mesh {
 struct SceneStats {
     uint32_t textureRefs = 0;      // texture list entries in the level
     uint32_t textureErrors = 0;    // entries that failed to decode (e.g. the one LiT 24-bit TIM)
-    uint32_t worldModels = 0;      // LiT chunk 0x20 models
+    uint32_t worldModels = 0;      // chunk 0x20 world models (both games)
     uint32_t cells = 0;            // LiT world cells (0x00/0x04 headers)
     uint32_t props = 0;            // placed static prop instances
     uint32_t skippedActors = 0;    // placed entities whose model is multi-object (skinned): not drawn
+    uint32_t skyDomes = 0;         // TB octree models in chunk 0x22 (sky domes, MODELS.md §10.1)
+    uint32_t invalidPrims = 0;     // TB octree primitives rejected by CheckPrimValidity (not drawn)
+    uint64_t worldFaces = 0;       // TB valid octree primitives (world + sky, all trees incl. the undrawn far LOD)
     uint64_t faces = 0, triangles = 0;
     uint64_t missingTextureFaces = 0;        // textured faces whose id has no decoded texture: drawn untextured
     std::vector<uint32_t> missingTextureIds; // sorted, unique
