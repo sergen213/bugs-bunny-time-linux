@@ -7,8 +7,8 @@
 
 namespace bbtime {
 
-// Call once per frame. `game` = whose menu track should play (nullopt = silence; the audio device is only
+// Call once per frame. gameRoot = that game's install root (contains Datas/). `game` = whose menu track should play (nullopt = silence; the audio device is only
 // opened the first time a track is requested, so passing nullopt always keeps --mute fully silent).
-void menuMusic(const std::filesystem::path& dataRoot, std::optional<bb::GameId> game);
+void menuMusic(const std::filesystem::path& gameRoot, std::optional<bb::GameId> game);
 
 } // namespace bbtime

@@ -18,6 +18,9 @@ enable_testing()
 add_subdirectory(engine/core)    # bb::core  — formats, BZE, LZSS, importer lib (no GPU deps)
 add_subdirectory(engine/audio)   # bb::audio — .xa IMA-ADPCM decode + OpenAL playback
 add_subdirectory(engine/render)  # bb::render — SDL3 + OpenGL renderer
+add_subdirectory(engine/game)    # bb::game — 30 Hz simulation: input, player, collision, camera, entities
+add_subdirectory(engine/render_vk) # bb::render_vk — Vulkan backend (same interface as bb_render)
+add_subdirectory(apps/launcher)  # Qt 6 launcher + signed updater
 add_subdirectory(apps/bbtime)    # collection executable (game-select menu)
 add_subdirectory(tools)          # CLI tools (bbimport, bzedump, ...)
 add_subdirectory(tests)

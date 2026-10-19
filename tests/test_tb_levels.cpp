@@ -69,9 +69,9 @@ int main() {
     if (!env || !*env) return failures ? 1 : 77;
     const fs::path dir = fs::path(env) / "tb/Datas/BZE";
 
-    size_t files = 0, spawns = 0, textures = 0, meshes = 0;
+    size_t files = 0, spawns = 0, textures = 0, meshes = 0, links = 0, sizeMismatch = 0;
     uint64_t world = 0, sky = 0, worldFaces = 0, invalid = 0, refs = 0, texErrors = 0, faces = 0, missing = 0, props = 0,
-             skipped = 0;
+             skipped = 0, linked = 0, worldMissing = 0, linkMeshes = 0;
     for (const fs::path& p : bzes(dir)) {
         ++files;
         try {
@@ -85,10 +85,26 @@ int main() {
             invalid += s.stats.invalidPrims, refs += s.stats.textureRefs, texErrors += s.stats.textureErrors;
             faces += s.stats.faces, missing += s.stats.missingTextureFaces, props += s.stats.props;
             skipped += s.stats.skippedActors, textures += s.textures.size(), meshes += s.meshes.size();
+            linked += s.stats.linkedFaces, worldMissing += s.stats.worldMissingTextureFaces, links += s.textureAnims.size();
+            CHECK(s.stats.worldMissingTextureFaces == 0, "{}: {} world faces resolve to nothing", p.string(),
+                  s.stats.worldMissingTextureFaces);
+            for (const bb::TextureAnim& a : s.textureAnims) {
+                CHECK(!a.frames.empty() && a.startFrame < a.frames.size() && a.holdTicks > 0, "{} link {}", p.string(), a.linkId);
+                for (int32_t f : a.frames) {
+                    CHECK(f >= 0 && size_t(f) < s.textures.size(), "{} link {}", p.string(), a.linkId);
+                    const bb::Texture &t = s.textures[size_t(f)], &t0 = s.textures[size_t(a.frames[0])];
+                    sizeMismatch += t.width != t0.width || t.height != t0.height;
+                }
+            }
+            if (p.stem() == "TRR01")  // river shimmer lines, link 214 (TEXTURE_GAP.md §2)
+                CHECK(std::ranges::any_of(s.textureAnims, [](const bb::TextureAnim& a) { return a.linkId == 214 && a.frames.size() > 1; }),
+                      "TRR01 link 214");
             uint64_t idx = 0;
             for (const bb::Mesh& m : s.meshes) {
                 idx += m.indices.size();
-                CHECK(m.texture < int32_t(s.textures.size()), "{} {}", p.string(), m.name);
+                CHECK(m.texture >= 0 && m.texture < int32_t(s.textures.size()), "{} {}", p.string(), m.name);
+                CHECK(m.textureAnim < int32_t(s.textureAnims.size()), "{} {}", p.string(), m.name);
+                linkMeshes += m.textureAnim >= 0;
                 for (uint32_t i : m.indices) CHECK(i < m.vertices.size(), "{} {}", p.string(), m.name);
                 for (const bb::Vertex& v : m.vertices)
                     CHECK(std::isfinite(v.pos[0]) && std::isfinite(v.pos[1]) && std::isfinite(v.pos[2]), "{}", m.name);
@@ -100,15 +116,20 @@ int main() {
             CHECK(false, "{}: {}", p.string(), e.what());
         }
     }
-    std::println("TB: {} files, {} world models, {} sky domes, {} octree faces, {} invalid prims, {} faces total, "
-                 "{} meshes, {} texture refs ({} errors, {} unique), {} missing-texture faces, {} props, {} skinned actors "
-                 "skipped, {} player starts",
-                 files, world, sky, worldFaces, invalid, faces, meshes, refs, texErrors, textures, missing, props, skipped, spawns);
+    std::println("TB: {} files, {} world models, {} sky domes, {} octree faces, {} invalid prims, {} faces drawn, "
+                 "{} meshes ({} animated), {} texture refs ({} errors, {} unique), {} texture links ({} frames differ in size "
+                 "from frame 0), {} linked faces, {} unresolved faces (not drawn; {} in world models), {} props, {} skinned "
+                 "actors skipped, {} player starts",
+                 files, world, sky, worldFaces, invalid, faces, meshes, linkMeshes, refs, texErrors, textures, links,
+                 sizeMismatch, linked, missing, worldMissing, props, skipped, spawns);
     // tb_world.py --check: world models 123, sky domes 59, world faces 115250 + sky faces 23043, invalid prims 48.
     CHECK(files == 58 && spawns == 58, "files {} spawns {}", files, spawns);
     CHECK(world == 123 && sky == 59, "world {} sky {}", world, sky);
     CHECK(worldFaces == 115250 + 23043 && invalid == 48, "octree faces {} invalid {}", worldFaces, invalid);
     CHECK(refs == 17103 && texErrors == 0, "texture refs {} errors {}", refs, texErrors);
+    // texgap.py tb --check: all 1558 world gap faces (all three octree trees) resolve through a link whose frames are
+    // loaded TIMs; the placed single-object props add 173 linked faces and the sky domes none (python cross-check).
+    CHECK(worldMissing == 0 && linked == 1558 + 173, "world unresolved {} linked {}", worldMissing, linked);
 
     const std::vector<uint8_t> good = bb::readFile(dir / "ARCA01.bze");
     std::mt19937 rng(4321);

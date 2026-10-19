@@ -124,17 +124,21 @@ GLuint makeTexture(uint32_t w, uint32_t h, const void* rgba, bool mips) {
     return t;
 }
 
-// 16x6 atlas of ASCII 32..127, drawn once with SDL's built-in 8x8 debug font (SDL_RenderDebugText)
-// into a software surface: no font data to embed, no SDL3_ttf.
-GLuint makeFontAtlas() {
+} // namespace
+
+// 16x6 atlas of ASCII 32..127, drawn with SDL's built-in 8x8 debug font (SDL_RenderDebugText) into a software
+// surface: no font data to embed, no SDL3_ttf. Empty texture on failure.
+Texture fontAtlas() {
     constexpr int G = SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE;
     static_assert(G == Renderer::kGlyph);
+    Texture t;
+    t.name = "font8x8";
     SDL_Surface* s = SDL_CreateSurface(16 * G, 6 * G, SDL_PIXELFORMAT_RGBA32);
     SDL_Renderer* r = s ? SDL_CreateSoftwareRenderer(s) : nullptr;
     if (!r) {
         std::println(stderr, "font atlas: {}", SDL_GetError());
         SDL_DestroySurface(s);
-        return 0;
+        return t;
     }
     SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
     SDL_RenderClear(r);
@@ -145,14 +149,14 @@ GLuint makeFontAtlas() {
     }
     SDL_RenderPresent(r);
     SDL_DestroyRenderer(r);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, s->pitch / 4);
-    GLuint t = makeTexture(uint32_t(s->w), uint32_t(s->h), s->pixels, false);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    t.width = uint32_t(s->w), t.height = uint32_t(s->h), t.hasAlpha = true;
+    t.rgba.resize(size_t(t.width) * t.height * 4);
+    for (uint32_t y = 0; y < t.height; ++y)
+        std::copy_n(static_cast<const uint8_t*>(s->pixels) + size_t(y) * size_t(s->pitch), size_t(t.width) * 4,
+                    t.rgba.data() + size_t(y) * t.width * 4);
     SDL_DestroySurface(s);
     return t;
 }
-
-} // namespace
 
 Renderer::~Renderer() {
     if (glContext_) {
@@ -227,7 +231,10 @@ std::string Renderer::init(const WindowConfig& cfg) {
 
     const uint8_t whitePx[4] = {255, 255, 255, 255};
     white_ = makeTexture(1, 1, whitePx, false);
-    font_ = makeFontAtlas();
+    {
+        const Texture f = fontAtlas();
+        font_ = f.rgba.empty() ? 0 : makeTexture(f.width, f.height, f.rgba.data(), false);
+    }
 
     glGenVertexArrays(1, &vao2D_);
     glGenBuffers(1, &vbo2D_);
@@ -253,16 +260,18 @@ void Renderer::freeScene() {
     glDeleteTextures(GLsizei(sceneTextures_.size()), sceneTextures_.data());
     sceneTextures_.clear();
     meshes_.clear();
-    glDeleteBuffers(1, &sceneVbo_);
-    glDeleteBuffers(1, &sceneIbo_);
-    glDeleteVertexArrays(1, &sceneVao_);
-    sceneVbo_ = sceneIbo_ = sceneVao_ = 0;
+    actorMeshes_.clear();
+    texAnims_.clear();
+    const GLuint bufs[] = {sceneVbo_, sceneIbo_, actorVbo_, actorIbo_}, vaos[] = {sceneVao_, actorVao_};
+    glDeleteBuffers(4, bufs);
+    glDeleteVertexArrays(2, vaos);
+    sceneVbo_ = sceneIbo_ = sceneVao_ = actorVbo_ = actorIbo_ = actorVao_ = 0;
 }
 
 // Fills the rgb of fully transparent texels from opaque neighbours (alpha stays 0), so bilinear filtering and
 // mipmaps do not pull black fringes into colour-keyed cutouts (PS1 0x0000 = transparent black).
 // ponytail: up to 16 dilation passes; textures with wider transparent areas keep black beyond that.
-static std::vector<uint8_t> bleedTransparent(const Texture& t) {
+std::vector<uint8_t> bleedTransparent(const Texture& t) {
     std::vector<uint8_t> px = t.rgba;
     const int w = int(t.width), h = int(t.height);
     std::vector<uint8_t> filled(size_t(w) * h);
@@ -302,10 +311,22 @@ void Renderer::uploadScene(const Scene& scene) {
                                  : t.hasAlpha ? makeTexture(t.width, t.height, bleedTransparent(t).data(), true)
                                               : makeTexture(t.width, t.height, t.rgba.data(), true));
     }
+    auto glTex = [&](int32_t i) { return i >= 0 && size_t(i) < sceneTextures_.size() && sceneTextures_[size_t(i)] ? sceneTextures_[size_t(i)] : white_; };
+    for (const TextureAnim& a : scene.textureAnims) {
+        GpuTexAnim& g = texAnims_.emplace_back(GpuTexAnim{{}, a.startFrame, std::max(a.holdTicks, 1u)});
+        for (int32_t f : a.frames) g.frames.push_back(glTex(f));
+    }
 
     std::vector<Vertex> verts;
     std::vector<uint32_t> idx;
-    for (const Mesh& m : scene.meshes) {
+    if (!sceneVao_) glGenVertexArrays(1, &sceneVao_);
+    appendMeshes(scene.meshes, sceneVao_, verts, idx, meshes_);
+    upload(sceneVao_, sceneVbo_, sceneIbo_, verts, idx, GL_STATIC_DRAW);
+}
+
+void Renderer::appendMeshes(std::span<const Mesh> in, uint32_t vao, std::vector<Vertex>& verts, std::vector<uint32_t>& idx,
+                            std::vector<GpuMesh>& out) const {
+    for (const Mesh& m : in) {
         if (m.vertices.empty() || m.indices.empty()) continue;
         glm::vec3 lo(m.vertices[0].pos[0], m.vertices[0].pos[1], m.vertices[0].pos[2]), hi = lo;
         for (const Vertex& v : m.vertices) {
@@ -313,27 +334,45 @@ void Renderer::uploadScene(const Scene& scene) {
             hi = glm::max(hi, glm::vec3(v.pos[0], v.pos[1], v.pos[2]));
         }
         const bool texOk = m.texture >= 0 && size_t(m.texture) < sceneTextures_.size() && sceneTextures_[size_t(m.texture)];
-        meshes_.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
-                           uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f});
+        const bool animOk = m.textureAnim >= 0 && size_t(m.textureAnim) < texAnims_.size() && !texAnims_[size_t(m.textureAnim)].frames.empty();
+        out.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
+                       uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1});
         verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
         idx.insert(idx.end(), m.indices.begin(), m.indices.end());
     }
+}
 
-    glGenVertexArrays(1, &sceneVao_);
-    glGenBuffers(1, &sceneVbo_);
-    glGenBuffers(1, &sceneIbo_);
-    glBindVertexArray(sceneVao_);
-    glBindBuffer(GL_ARRAY_BUFFER, sceneVbo_);
-    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(verts.size() * sizeof(Vertex)), verts.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sceneIbo_);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(idx.size() * sizeof(uint32_t)), idx.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, pos)));
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, uv)));
-    glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, rgba)));
+// (Re)fills vbo/ibo (created on first use) and binds them to vao with the Vertex layout.
+void Renderer::upload(uint32_t vao, uint32_t& vbo, uint32_t& ibo, const std::vector<Vertex>& verts,
+                      const std::vector<uint32_t>& idx, uint32_t usage) {
+    const bool fresh = !vbo;
+    if (fresh) {
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ibo);
+    }
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(verts.size() * sizeof(Vertex)), verts.data(), usage);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(idx.size() * sizeof(uint32_t)), idx.data(), usage);
+    if (fresh) {
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, pos)));
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, uv)));
+        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, rgba)));
+    }
     glBindVertexArray(0);
+}
+
+void Renderer::setActorMeshes(std::span<const Mesh> meshes) {
+    actorMeshes_.clear();
+    actorVerts_.clear();
+    actorIdx_.clear();
+    if (!actorVao_) glGenVertexArrays(1, &actorVao_);
+    appendMeshes(meshes, actorVao_, actorVerts_, actorIdx_, actorMeshes_);
+    upload(actorVao_, actorVbo_, actorIbo_, actorVerts_, actorIdx_, GL_STREAM_DRAW);  // orphans last frame's storage
 }
 
 uint32_t Renderer::createImage(const Texture& t) {
@@ -359,7 +398,7 @@ void Renderer::beginFrame(const Settings& s) {
 }
 
 void Renderer::drawScene(const Camera& cam, const Settings& s) {
-    if (meshes_.empty() || w_ <= 0 || h_ <= 0) return;
+    if ((meshes_.empty() && actorMeshes_.empty()) || w_ <= 0 || h_ <= 0) return;
     flush2D();
     const bool original = s.fidelity == Fidelity::Original;
     const Viewport vp = original && s.pillarbox ? fitAspect(w_, h_, 4.0f / 3.0f) : Viewport{0, 0, w_, h_};
@@ -379,7 +418,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glUniform1f(uColorScale_, colorScale_);
     glActiveTexture(GL_TEXTURE0);
     glBindSampler(0, original ? sampNearest_ : sampTrilinear_);
-    glBindVertexArray(sceneVao_);
+    uint32_t boundVao = 0;
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     // Front faces are CCW in engine space (scene.h); decoders emit that order. Double-sided primitives
@@ -388,9 +427,15 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glCullFace(GL_BACK);
 
     auto draw = [&](const GpuMesh& m) {
+        if (m.vao != boundVao) glBindVertexArray(boundVao = m.vao);
         if (m.twoSided) glDisable(GL_CULL_FACE);
         else glEnable(GL_CULL_FACE);
-        glBindTexture(GL_TEXTURE_2D, m.texture);
+        if (m.textureAnim >= 0) {
+            const GpuTexAnim& a = texAnims_[size_t(m.textureAnim)];
+            glBindTexture(GL_TEXTURE_2D, a.frames[(a.start + texTick_ / a.hold) % a.frames.size()]);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, m.texture);
+        }
         glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : -1.0f);
         glUniform1i(uAdditive_, m.blend == Blend::Additive || m.blend == Blend::Subtract);
         glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(m.indexCount), GL_UNSIGNED_INT,
@@ -402,14 +447,16 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
-        for (const GpuMesh& m : meshes_)
-            if (m.blend == pass) draw(m);
+        for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
+            for (const GpuMesh& m : *list)
+                if (m.blend == pass) draw(m);
 
     // Pass 3: translucent (alpha, additive, subtractive), back-to-front by mesh centre, no depth writes.
     // ponytail: per-mesh sort; per-triangle sort if intersecting translucent meshes show artefacts.
     std::vector<const GpuMesh*> translucent;
-    for (const GpuMesh& m : meshes_)
-        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest) translucent.push_back(&m);
+    for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
+        for (const GpuMesh& m : *list)
+            if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest) translucent.push_back(&m);
     std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
         const glm::vec3 d = m->center - cam.pos;
         return glm::dot(d, d);

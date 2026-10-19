@@ -95,7 +95,7 @@ In the data, 08 chunks carry no position (templates; their `27` = `(class id, 0)
 
 | tag | payload | effect (entity offsets) |
 |---|---|---|
-| `0b` | 4 | `FUN_00408410(lastSpriteAsset.data, u16@0)`; `+0x168 = u16@0`, `+0x16a = u16@2` |
+| `0b` | 4 | `FUN_00408410(lastSpriteAsset.data, u16@0)`; `+0x168 = u16@0`, `+0x16a = u16@2`: **texture link** id (TEXTURE_GAP.md; 204 entities, all chunk 07, class 2 or 20) |
 | `0c` | 4 | `+0x16c = u16@0`, `+0x16e = u16@2` |
 | `0f` | 2 | u16 asset id → `FUN_00460850` (match asset `+6`); appended to the entity's asset list `+0x98` (12-byte links); an asset of kind 0x100 becomes `lastSpriteAsset`. The game hangs if the id is unknown |
 | `10` | 12 | position: **s16 from bytes 0–1, 4–5, 8–9** (i32 fields, low halves) → `+0xfc/+0xfe/+0x100` († item `+0x10..`) |
@@ -117,7 +117,7 @@ In the data, 08 chunks carry no position (templates; their `27` = `(class id, 0)
 | `38` | 2 | `+0x33 = byte@0 + 0x10` |
 | `39` | 12 | `+0x6e` = u16@0, `+0x76` = @2, `+0x118` = u32@4, `+0x121` = byte@8, `+0x122` = byte@10 |
 | `40` | 20 | ignored (only aligns the logic heap) |
-| `41` | 6 | 3 × s16 → `+0x68/+0x6a/+0x6c` |
+| `41` | 6 | 3 × s16 → `+0x68/+0x6a/+0x6c`. Class-20 link flipbook `FUN_00453d00`: u16 `+0x68` = start frame, byte `+0x6c` = hold (frame advances every hold+1 ticks, never if 0) — 54/64 class-20 link entities carry it, e.g. `00 00 07 00 02 00` |
 | `45` | 2 | → `+0x36` |
 | `4d`..`60` | see §3.10 | logic program instructions `[LC]` |
 | `61` | 14 | 0x14-byte record appended to `+0x78` (count u16 at its `+2`): 7 × s16 adjusted by `+0x3e`, plus a squared radius at `+0x10` (Inferred: collision sub-volume) |

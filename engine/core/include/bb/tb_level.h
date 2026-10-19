@@ -41,7 +41,9 @@ TbScript parseTbScript(std::span<const uint8_t> section1, uint32_t languageSecti
 // only decoded, as at DETAILS 2), octree sky domes (chunk 0x22 tag 0x24, placed by the entity that lists them,
 // else at the origin: Inferred), single-object actor props in rest pose (placement Inferred, as LiT) and the
 // player start (entity id 2 = Bugs, identity Inferred). Multi-object actors are counted in stats.skippedActors,
-// not drawn. Throws FormatError.
+// not drawn. Face ids without a TIM resolve through texture links (entity tag 0x0b -> Scene::textureAnims,
+// Mesh::textureAnim; TEXTURE_GAP.md); ids that resolve to nothing are not drawn, as in the original.
+// Throws FormatError.
 Scene buildTbScene(const BzeFile& bze, const std::string& level);
 
 } // namespace bb

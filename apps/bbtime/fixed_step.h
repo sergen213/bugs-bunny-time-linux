@@ -5,7 +5,7 @@
 
 namespace bb {
 
-// UNVERIFIED: the original games' simulation tick rate has not been determined by RE yet.
+// 30 Hz fixed tick: observed statically in both exes (frame pacer, docs/re/GAMEPLAY.md §1.1).
 inline constexpr double kTickHz = 30.0;
 
 struct FixedStep {

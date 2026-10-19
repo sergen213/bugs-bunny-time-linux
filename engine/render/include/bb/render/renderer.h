@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +39,12 @@ struct Settings {
     float zNear = 0.1f, zFar = 2000.0f;
 };
 
+// CPU helpers shared with other backends.
+// Copy of t.rgba with fully transparent texels' rgb filled from opaque neighbours (alpha kept), see renderer.cpp.
+std::vector<uint8_t> bleedTransparent(const Texture& t);
+// 128x48 RGBA atlas, 16x6 glyphs (8x8) of ASCII 32..127, white on transparent. Empty on failure.
+Texture fontAtlas();
+
 class Renderer {
 public:
     Renderer() = default;
@@ -57,8 +64,14 @@ public:
     float maxAnisotropy() const { return maxAniso_; }
     int msaaSamples() const { return msaaSamples_; }
 
-    // Replaces the GPU copy of the scene (textures + one shared VBO/IBO).
+    // Replaces the GPU copy of the scene (textures + one shared VBO/IBO). Clears actor meshes.
     void uploadScene(const Scene& scene);
+    // Per-frame dynamic meshes (posed actors, bb/actor.h poseActor): engine space, Mesh::texture indexes the
+    // uploaded scene's textures. Streamed to the GPU; kept until the next call; drawn by drawScene in the same
+    // opaque / alpha-test / translucent passes as the scene.
+    void setActorMeshes(std::span<const Mesh> meshes);
+    // 30 Hz simulation tick selecting the current frame of Scene::textureAnims (Mesh::textureAnim).
+    void setTextureTick(uint32_t tick) { texTick_ = tick; }
 
     // 2D images (e.g. title-screen BMPs). Returns a GL texture name, 0 on invalid input.
     uint32_t createImage(const Texture& tex);
@@ -81,13 +94,18 @@ public:
     int drawCalls() const { return drawCalls_; }
 
 private:
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; };
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; };
+    struct GpuTexAnim { std::vector<uint32_t> frames; uint32_t start, hold; };
     struct V2 { float x, y, u, v; uint8_t rgba[4]; };
 
     void flush2D();
     void quad2D(uint32_t tex, uint32_t sampler, float x, float y, float w, float h,
                 float u0, float v0, float u1, float v1, const uint8_t rgba[4]);
     void freeScene();
+    void appendMeshes(std::span<const Mesh> in, uint32_t vao, std::vector<Vertex>& verts, std::vector<uint32_t>& idx,
+                      std::vector<GpuMesh>& out) const;
+    static void upload(uint32_t vao, uint32_t& vbo, uint32_t& ibo, const std::vector<Vertex>& verts,
+                       const std::vector<uint32_t>& idx, uint32_t usage);
 
     SDL_Window* window_ = nullptr;
     void* glContext_ = nullptr;
@@ -106,6 +124,12 @@ private:
     uint32_t sceneVao_ = 0, sceneVbo_ = 0, sceneIbo_ = 0;
     std::vector<uint32_t> sceneTextures_;
     std::vector<GpuMesh> meshes_;
+    std::vector<GpuTexAnim> texAnims_;
+    uint32_t texTick_ = 0;
+    uint32_t actorVao_ = 0, actorVbo_ = 0, actorIbo_ = 0;
+    std::vector<GpuMesh> actorMeshes_;
+    std::vector<Vertex> actorVerts_; // staging, reused per frame
+    std::vector<uint32_t> actorIdx_;
 
     uint32_t vao2D_ = 0, vbo2D_ = 0;
     std::vector<V2> batch_;

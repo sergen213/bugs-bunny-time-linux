@@ -28,18 +28,21 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 | TIM textures | Tested (C++, 28,206 refs; 1 unsupported 24-bit image) | Tested (C++, 17,103 refs) |
 | World geometry → renderer | Tested (79 levels, 342k tris; visual check only) | Tested (58 levels, octree trees A+B; tree C = far LOD, not drawn) |
 | Rigid props | Implemented (placement rule inferred) | Implemented (placement rule inferred) |
-| Missing texture ids | Research Required (5,567 faces drawn untextured) | Research Required (1,731 faces) |
-| Animation (Sony TOD, rigid parts) | Designed (`docs/re/GAMEPLAY.md` §6, python poser) | Research Required |
-| Collision | Designed (heightfield chunk 0x36/tag 0x37, GAMEPLAY §4) | Research Required (polygon+octree floor) |
-| Player controller / camera / entities | Designed (state machine is level data; constants in GAMEPLAY §3/§5/§7) | Research Required (generic type-14 character) |
-| Bugs/Taz switching, co-op | — | Designed (R1 pointer swap, L1 call-friend, midpoint camera; GAMEPLAY §9) |
+| Missing texture ids | Designed (rule verified: texture links, `formats/TEXTURE_GAP.md`); LiT loader not yet applying it | Tested (C++: 1,558/1,558 world faces resolve, animated) |
+| Animation (Sony TOD, rigid parts) | Tested (233,491 poses; matches python to 5e-4) | Designed (same posing, compressed packets; `re/GAMEPLAY_TB.md` §5) |
+| Collision | Tested (heightfield, `bb_game`; trace = approximation, GAMEPLAY_STATUS.md) | Designed (collision mesh + octree decoded in python; `re/GAMEPLAY_TB.md` §1) |
+| Player controller / camera / entities | Tested: player + camera + collectibles playable on L01a (GAMEPLAY_STATUS.md); enemies/platforms not ported | Designed (constants + move tables, `re/GAMEPLAY_TB.md` §2–3) |
+| Bugs/Taz switching, co-op | — | Designed (R1 swap, L1 call-friend, spring/midpoint camera; `re/GAMEPLAY_TB.md` §4) |
 | `.xa` IMA ADPCM music/speech | Tested (C++, 35 files) + menu music | Tested (C++, 446 files); menu track UNVERIFIED |
 | In-level SFX | Tested parse (3,055 AIFF PCM) | Tested parse (2,302 AIFF-wrapped ADPCM) |
-| Simulation tick | 30 Hz observed statically | 30 Hz observed statically |
+| Simulation tick | 30 Hz observed statically; Implemented (`bb_game`, render locked in Original Fidelity) | 30 Hz observed statically |
 | GL renderer, Hor+, fidelity modes | Tested on real levels | Tested on real levels |
 | Collection menu + real title art | Tested | Tested |
 | Save / config | Designed (`Savegame%d.dat` 1-based, `Savedata.dat`; GAMEPLAY §8) — untested | Designed (layout in GAMEPLAY §8) — untested |
-| Vulkan / RT / launcher / updater | Designed | Designed |
+| Vulkan renderer | Tested (validation-clean, GL/VK PSNR 66–76 dB) | Tested |
+| Ray tracing | Research Required (RADV support probed only) | Research Required |
+| Qt 6 launcher + import wizard | Tested (desktop smoke, both installs) | Tested |
+| Signed updater (Ed25519 + SHA-256, rollback) | Tested (local HTTPS); no release URL yet | — |
 
 ## Known caveats
 

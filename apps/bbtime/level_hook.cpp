@@ -131,17 +131,19 @@ Scene placeholderScene(GameId game, const std::string& level) {
 
 } // namespace
 
-Scene loadLevelScene(GameId game, const fs::path& dataRoot, const std::string& level) {
+Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& level, BzeFile* bzeOut) {
     const bool lit = game == GameId::LostInTime;
-    const fs::path file = findPath(dataRoot, {lit ? "lit" : "tb", "Datas", "bze", level + ".bze"});
+    const fs::path file = findPath(gameRoot, {"Datas", "bze", level + ".bze"});
     if (file.empty()) {
         Scene s = placeholderScene(game, level);
-        s.notes.push_back(std::format("PLACEHOLDER - not original data: {}.bze not found under {}", level, dataRoot.string()));
+        s.notes.push_back(std::format("PLACEHOLDER - not original data: {}.bze not found under {}", level, gameRoot.string()));
         return s;
     }
     try {
-        const BzeFile bze = loadBze(file);
-        return lit ? buildLitScene(bze, level) : buildTbScene(bze, level);
+        BzeFile bze = loadBze(file);
+        Scene s = lit ? buildLitScene(bze, level) : buildTbScene(bze, level);
+        if (bzeOut) *bzeOut = std::move(bze);
+        return s;
     } catch (const std::exception& e) {
         Scene s = placeholderScene(game, level);
         s.notes.push_back(std::format("PLACEHOLDER - not original data: decode failed: {}", e.what()));

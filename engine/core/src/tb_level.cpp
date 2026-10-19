@@ -107,23 +107,58 @@ using Vec3 = std::array<float, 3>;
 
 struct Builder {
     Scene& s;
-    std::map<uint32_t, int32_t> tex;  // texture id -> Scene::textures index
+    std::map<uint32_t, int32_t> tex;    // texture id -> Scene::textures index
+    std::map<uint32_t, int32_t> links;  // texture link id -> Scene::textureAnims index (TEXTURE_GAP.md)
     std::set<uint32_t> missing;
     std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf;
     uint32_t nextGroup = 0;
+    bool world = false;       // building a chunk-0x20 world model (stats split)
     uint64_t lodFaces = 0;    // tree C (far LOD) faces: decoded, not drawn
     std::vector<Vec3> verts;  // current leaf / object table, transformed
 
-    Mesh& mesh(uint32_t group, const std::string& gname, int32_t t, Blend b, bool twoSided) {
-        auto [it, fresh] = meshOf.try_emplace({group, t, b, twoSided}, s.meshes.size());
+    // Face texture id -> texture index (>= 0), texture link (-2 - anim index), or -1 = alias 0. The original resolves
+    // ids through the alias table DAT_004d038c and skips prims whose alias is 0 (TEXTURE_GAP.md §1); counted here.
+    int32_t resolve(uint32_t id) {
+        if (auto it = tex.find(id); it != tex.end()) return it->second;
+        if (auto it = links.find(id); it != links.end()) {
+            ++s.stats.linkedFaces;
+            return -2 - it->second;
+        }
+        ++s.stats.missingTextureFaces;
+        s.stats.worldMissingTextureFaces += world;
+        missing.insert(id);
+        return -1;
+    }
+
+    const Texture& fallback(int32_t key) const {
+        return s.textures[size_t(key >= 0 ? key : s.textureAnims[size_t(-2 - key)].frames[s.textureAnims[size_t(-2 - key)].startFrame])];
+    }
+
+    // `key` as returned by resolve(); a link mesh binds the link's start frame as its static fallback.
+    Mesh& mesh(uint32_t group, const std::string& gname, int32_t key, Blend b, bool twoSided) {
+        auto [it, fresh] = meshOf.try_emplace({group, key, b, twoSided}, s.meshes.size());
         if (fresh) {
             Mesh& m = s.meshes.emplace_back();
-            m.name = std::format("{}/tex{}{}", gname, t, twoSided ? "/2s" : "");
-            m.texture = t;
+            const int32_t anim = key >= 0 ? -1 : -2 - key;
+            m.name = anim < 0 ? std::format("{}/tex{}{}", gname, key, twoSided ? "/2s" : "")
+                              : std::format("{}/link{}{}", gname, s.textureAnims[size_t(anim)].linkId, twoSided ? "/2s" : "");
+            m.texture = int32_t(&fallback(key) - s.textures.data());
+            m.textureAnim = anim;
             m.blend = b;
             m.twoSided = twoSided;
         }
         return s.meshes[it->second];
+    }
+
+    bool hasAlpha(int32_t key) const {
+        if (key >= 0) return s.textures[size_t(key)].hasAlpha;
+        return std::ranges::any_of(s.textureAnims[size_t(-2 - key)].frames, [&](int32_t f) { return s.textures[size_t(f)].hasAlpha; });
+    }
+
+    void checkIndices(const uint32_t* idx, int n, const std::string& gname, size_t r) const {
+        for (int k = 0; k < n; ++k)
+            if (idx[k] >= verts.size())
+                throw FormatError(std::format("{}: vertex index {} >= {} in primitive at 0x{:x}", gname, idx[k], verts.size(), r));
     }
 
     // One primitive: record at r (b0 @0, b1 @1, tex @2, colours @4..), vertex indices idx[0..n), UV byte pairs
@@ -132,13 +167,9 @@ struct Builder {
     void prim(const In& in, size_t r, int n, const uint32_t* idx, const size_t* uvAt, size_t tpageAt, uint32_t group,
               uint32_t sortGroup, const std::string& gname) {
         const uint8_t b0 = in.u8(r), b1 = in.u8(r + 1);
-        const uint32_t id = in.u16(r + 2) & 0xfff;
-        int32_t ti = -1;
-        if (auto it = tex.find(id); it != tex.end()) ti = it->second;
-        else {
-            ++s.stats.missingTextureFaces;
-            missing.insert(id);
-        }
+        const int32_t key = resolve(in.u16(r + 2) & 0xfff);
+        checkIndices(idx, n, gname, r);
+        if (key == -1) return;  // alias 0: not drawn
         Blend blend = Blend::Opaque;
         uint8_t alpha = 255;
         if (b0 & 2) {  // semi-transparent: ABR from the tpage byte bits 5-6 (same mapping as LiT, scene.h)
@@ -148,17 +179,14 @@ struct Builder {
             case 2: blend = Blend::Subtract; break;
             case 3: blend = Blend::Additive, alpha = 64; break;
             }
-        } else if (ti >= 0 && s.textures[size_t(ti)].hasAlpha) blend = Blend::AlphaTest;
+        } else if (hasAlpha(key)) blend = Blend::AlphaTest;
         const bool translucent = blend != Blend::Opaque && blend != Blend::AlphaTest;
         // b1 bit 4 -> render flag 0x80: the screen-space back-face test is skipped (FUN_0041eee0).
-        Mesh& m = mesh(translucent ? sortGroup : group, gname, ti, blend, b1 & 0x10);
-        const float tw = ti >= 0 ? float(s.textures[size_t(ti)].width) : 1.0f;
-        const float th = ti >= 0 ? float(s.textures[size_t(ti)].height) : 1.0f;
+        Mesh& m = mesh(translucent ? sortGroup : group, gname, key, blend, b1 & 0x10);
+        const float tw = float(fallback(key).width), th = float(fallback(key).height);
         const bool gouraud = b0 & 0x10;  // else colour 0 for every vertex [COL]
         const uint32_t base = uint32_t(m.vertices.size());
         for (int k = 0; k < n; ++k) {
-            if (idx[k] >= verts.size())
-                throw FormatError(std::format("{}: vertex index {} >= {} in primitive at 0x{:x}", gname, idx[k], verts.size(), r));
             Vertex v{};
             std::copy(verts[idx[k]].begin(), verts[idx[k]].end(), v.pos);
             const uint8_t u = uvAt ? in.u8(uvAt[k]) : kNoUv[k][0], w = uvAt ? in.u8(uvAt[k] + 1) : kNoUv[k][1];
@@ -220,9 +248,11 @@ struct Builder {
                 }
                 ++s.stats.worldFaces;
                 if (draw) prim(in, r, n, idx, b1 & 0x40 ? nullptr : uv, tpage, group, sortGroup, gname);
-                else if (*std::max_element(idx, idx + n) >= nv)
-                    throw FormatError(std::format("{}: vertex index >= {} in primitive at 0x{:x}", gname, nv, r));
-                else ++lodFaces;
+                else {
+                    resolve(in.u16(r + 2) & 0xfff);  // counted like drawn faces (TEXTURE_GAP.md counts all trees)
+                    checkIndices(idx, n, gname, r);
+                    ++lodFaces;
+                }
             }
         };
         // Tree A always; tree B (alt) always; tree C (detail) is a far LOD that FUN_00406840 draws only beyond the
@@ -348,7 +378,7 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
     // Inferred: PS1 modulation (texel * colour / 128) as LiT; vertex colours centre near 128 in the data. The PC
     // GL path reads colour bytes as byte/255 [COL]; whether its texture stage doubles them is Research Required.
     s.colorScale = 255.0f / 128.0f;
-    Builder b{s, {}, {}, {}, 0, 0, {}};
+    Builder b{s, {}, {}, {}, {}, 0, false, 0, {}};
 
     std::vector<std::string> texErrors;
     for (const TbChunk& ch : script.chunks) {
@@ -366,18 +396,81 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
         }
     }
 
-    // Chunk 0x22 assets with a tag 0x24 model, by asset id (tag 0x27 u16 @2, key of entity tag 0x0f).
+    // Chunk 0x22 assets by asset id (tag 0x27: u16 class @0, u16 asset id @2 = key of entity tag 0x0f): tag 0x24
+    // models, and tag 0x3f sprite sequences (MODELS.md §10.3: nD 16-byte 0x64 records at block + 0xc, tex id @+10).
     struct Asset { std::span<const uint8_t> model; bool octree; bool placed = false; };
+    struct Sprite { uint16_t cls; std::vector<uint32_t> ids; };
     std::vector<Asset> models;
     std::map<uint16_t, size_t> assetModel;
+    std::map<uint16_t, Sprite> sprites;
     for (const TbChunk& ch : script.chunks) {
         if (ch.type != 0x22) continue;
+        const auto id = ch.tag(0x27);
+        if (const auto seq = ch.tag(0x3f); !seq.empty() && !id.empty()) {
+            const In in{region(section(ch.section), seq, ch.section), "sprite sequence"};
+            const size_t ph = in.u32(4), nd = in.u16(ph + 2);
+            Sprite& sp = sprites[le16(id, 2)] = {le16(id, 0), {}};
+            for (size_t i = 0; i < nd; ++i) {
+                if (in.u8(ph + 0xc + 16 * i + 3) != 0x64)
+                    throw FormatError(std::format("sprite sequence record {} at 0x{:x}: type is not 0x64", i, ph + 0xc + 16 * i));
+                sp.ids.push_back(in.u16(ph + 0xc + 16 * i + 10) & 0xfff);
+            }
+        }
         const auto mdl = ch.tag(0x24);
         if (mdl.empty()) continue;
         const auto m = region(section(ch.section), mdl, ch.section);
         models.push_back({m, isOctree(m)});
         s.stats.skyDomes += models.back().octree;
-        if (const auto id = ch.tag(0x27); !id.empty()) assetModel[le16(id, 2)] = models.size() - 1;
+        if (!id.empty()) assetModel[le16(id, 2)] = models.size() - 1;
+    }
+
+    // Texture links (TEXTURE_GAP.md): entity tag 0x0b {u16 link id, 0} makes the entity write its current sprite
+    // frame's texture id into alias[link id] at run time (FUN_00408410 at load, FUN_00465c80 per frame).
+    // Frames: type 20 (tag 0x13) = looping flipbook FUN_00453d00 over the first listed asset of class 0x17; start
+    // frame u16 +0x68, hold byte +0x6c, both from tag 0x41 (the only writer on link entities in the data); the frame
+    // advances when the hold counter runs out, i.e. every hold+1 ticks, never when hold = 0; wraps after the last
+    // record. Type 2 (script graph) and others: the latest kind-0x100 asset before tag 0x0b, frame order and timing
+    // driven by the logic VM — cycled in record order here, 2 ticks per frame (Inferred).
+    uint32_t linkFrameErrors = 0;
+    for (const TbChunk& ch : script.chunks) {
+        if (ch.type != 0x07 && ch.type != 0x08 && ch.type != 0x0a && ch.type != 0x63) continue;
+        const auto cls = ch.tag(0x13);
+        const int type = cls.empty() ? -1 : cls[0];
+        const Sprite* last = nullptr;
+        for (const TbTag& t : ch.tags) {
+            if (t.id == 0x0f) {
+                if (auto it = sprites.find(le16(t.data, 0)); it != sprites.end()) last = &it->second;
+                continue;
+            }
+            if (t.id != 0x0b || !last) continue;
+            const Sprite* src = last;
+            if (type == 20) {
+                src = nullptr;
+                for (const TbTag& a : ch.tags) {
+                    if (a.id != 0x0f) continue;
+                    if (auto it = sprites.find(le16(a.data, 0)); it != sprites.end() && it->second.cls == 0x17) {
+                        src = &it->second;
+                        break;
+                    }
+                }
+                if (!src) continue;  // the original dereferences a null asset here
+            }
+            TextureAnim an;
+            an.linkId = le16(t.data, 0);
+            for (uint32_t fid : src->ids)
+                if (auto it = b.tex.find(fid); it != b.tex.end()) an.frames.push_back(it->second);
+                else ++linkFrameErrors;
+            if (an.frames.empty()) continue;
+            if (const auto p = ch.tag(0x41); type == 20 && !p.empty()) {
+                an.startFrame = le16(p, 0) % an.frames.size();
+                an.holdTicks = p[4] ? p[4] + 1u : UINT32_MAX;
+            } else {
+                an.holdTicks = 2;
+                an.timingInferred = true;
+            }
+            if (auto [it, fresh] = b.links.try_emplace(an.linkId, int32_t(s.textureAnims.size())); fresh) s.textureAnims.push_back(std::move(an));
+            else s.textureAnims[size_t(it->second)] = std::move(an);  // several writers: the last entity wins (Inferred)
+        }
     }
 
     std::string players;
@@ -393,7 +486,9 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
             if (const auto sc = ch.tag(0x12); !sc.empty()) xf.s[0] = xf.s[1] = xf.s[2] = float(le16(sc, 0)) / 4096.0f;  // u16 X for all axes
             if (const auto t = ch.tag(0x10); !t.empty()) std::ranges::copy(lowHalves(t), xf.t);
             ++s.stats.worldModels;
+            b.world = true;
             b.octree(region(section(ch.section), mdl, ch.section), xf, std::format("world{}", s.stats.worldModels));
+            b.world = false;
             continue;
         }
         if (ch.type != 0x07 && ch.type != 0x0a && ch.type != 0x63) continue;  // placed instances (08 = templates)
@@ -449,9 +544,13 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
     if (!players.empty()) s.notes.push_back("Players (identity Inferred): " + players);
     if (s.stats.invalidPrims) s.notes.push_back(std::format("{} primitives fail CheckPrimValidity: skipped as in the game", s.stats.invalidPrims));
     if (b.lodFaces) s.notes.push_back(std::format("{} far-LOD faces (octree tree C, DETAILS < 2 only) decoded, not drawn", b.lodFaces));
+    if (!s.textureAnims.empty())
+        s.notes.push_back(std::format("{} texture links (animated, TEXTURE_GAP.md) drive {} faces{}", s.textureAnims.size(),
+                                      s.stats.linkedFaces,
+                                      linkFrameErrors ? std::format("; {} link frames have no TIM", linkFrameErrors) : ""));
     if (s.stats.missingTextureFaces)
-        s.notes.push_back(std::format("{} faces reference {} texture ids absent from this level: drawn untextured",
-                                      s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));
+        s.notes.push_back(std::format("{} faces reference {} texture ids that are neither TIMs nor links: not drawn (as the "
+                                      "original)", s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));
     for (const std::string& e : texErrors) s.notes.push_back(e);
     return s;
 }

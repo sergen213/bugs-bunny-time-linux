@@ -122,11 +122,9 @@ Textured primitives carry a **u16 texture id at byte +6** of the primitive recor
 `texture_id` from §1 (`DAT_004e5e80[id] = id` after upload [UP]; the emitters read `DAT_004e5e80[tex]`).
 Semi-transparency selection comes from the primitive (flag byte bit 3 + tpage byte bits 5–6, MODELS.md §5).
 
-**Missing ids (open):** in 33 of 79 LiT levels some world faces reference ids that are absent from that level's
-`0x29` list (e.g. L04C3: ids 9 and 11, 176 of 717 faces; L02A1: 16, 63; L03A: 336, 353). No other TIM source
-was found in sections 1/3/4/5–10 of L04C3. Candidates: textures left resident from a previously loaded level,
-runtime-generated/animated textures, or faces never drawn. **Research Required** (check `DAT_004e5e80` handling
-of unloaded ids at runtime). A reimplementation should render such faces untextured (vertex colour) and log.
+**Missing ids — Verified, see `TEXTURE_GAP.md`:** ids absent from the `0x29` list (33 of 79 LiT levels, e.g.
+L04C3 9/11 = conveyor planks/rollers) are texture links filled at run time by entity tag `0x0b` sprite-sequence
+frames through the alias table `DAT_004e5e80`; unlinked ids are not drawn.
 
 ## 6. Other section-3 / language-section content (for completeness)
 
@@ -154,4 +152,4 @@ of unloaded ids at runtime). A reimplementation should render such faces untextu
 - Variant-2 (subtractive) alpha formula (`ftol` argument not decoded).
 - Whether the uploaded mip chain is ever sampled (MIN_FILTER is plain `GL_LINEAR`).
 - TB id packing (low 12 bits) and the 4 size mismatches.
-- Missing texture ids (§5).
+- (Missing texture ids: resolved, `TEXTURE_GAP.md`.)

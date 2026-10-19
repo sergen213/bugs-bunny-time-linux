@@ -2,9 +2,14 @@
 // Bugs Bunny: Lost in Time and Bugs Bunny & Taz: Time Busters.
 #include "bb/render/bmp.h"
 #include "bb/render/renderer.h"
+#include "bb/render_vk/renderer.h"
 #include "fixed_step.h"
 #include "level_hook.h"
 #include "music.h"
+#include "play.h"
+#include "settings.h"
+
+#include "bb/actor.h"
 
 #include <SDL3/SDL.h>
 
@@ -14,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <map>
 #include <optional>
 #include <print>
 #include <string>
@@ -42,6 +48,13 @@ struct Args {
     fs::path screenshot;
     int frames = 30;
     std::optional<std::array<float, 5>> camera; // x y z yaw pitch (engine space, radians)
+    bool vulkan = false, vkValidation = false;
+    fs::path roots[2];  // per-game install roots (contain Datas/): [0] lit, [1] tb
+    bool vsync = true;
+    int msaa = 4;
+    float fov = 60.0f;
+    std::map<std::string, std::string> bindings;  // action -> SDL key names (settings.ini, launcher)
+    std::vector<bb::game::PadInput> autoplay;     // --autoplay: one pad input per tick, lockstep rendering
 };
 
 fs::path defaultDataRoot() {
@@ -55,11 +68,26 @@ constexpr const char* kUsage =
     "usage: bbtime [--data DIR] [--game lit|tb] [--level NAME] [--fidelity original|enhanced]\n"
     "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute]\n"
     "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
+    "              [--renderer gl|vk] [--vk-validation] [--autoplay KEYS*TICKS,...]\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
     Args a;
     a.data = defaultDataRoot();
+    // Precedence: built-in defaults < settings.ini (launcher, docs/LAUNCHER.md) < command line.
+    std::vector<std::string> warn;
+    const bbtime::Settings cfg = bbtime::loadSettings(bbtime::settingsPath(), &warn);
+    for (const auto& w : warn) std::println(stderr, "bbtime: {}: {}", bbtime::settingsPath().string(), w);
+    a.fidelity = cfg.fidelity == "original" ? Fidelity::Original : Fidelity::Enhanced;
+    a.width = cfg.width;
+    a.height = cfg.height;
+    a.fullscreen = cfg.fullscreen;
+    a.vsync = cfg.vsync;
+    a.msaa = cfg.msaa;
+    a.fov = cfg.fov;
+    a.vulkan = cfg.renderer == "vk";
+    a.bindings = cfg.bindings;
+    bool dataExplicit = std::getenv("BBTIME_DATA") && *std::getenv("BBTIME_DATA");
     for (int i = 1; i < argc; ++i) {
         const std::string_view f = argv[i];
         auto value = [&]() -> std::optional<std::string_view> {
@@ -71,7 +99,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             return v && std::from_chars(v->data(), v->data() + v->size(), out).ec == std::errc{} && out > 0;
         };
         bool ok = true;
-        if (f == "--data") { auto v = value(); ok = bool(v); if (v) a.data = *v; }
+        if (f == "--data") { auto v = value(); ok = bool(v); if (v) a.data = *v; dataExplicit = true; }
         else if (f == "--game") {
             auto v = value();
             ok = v && (*v == "lit" || *v == "tb");
@@ -89,6 +117,18 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         else if (f == "--fullscreen") a.fullscreen = true;
         else if (f == "--hidden") a.hidden = true;
         else if (f == "--mute") a.mute = true;
+        else if (f == "--renderer") {
+            auto v = value();
+            ok = v && (*v == "gl" || *v == "vk");
+            if (ok) a.vulkan = *v == "vk";
+        }
+        else if (f == "--vk-validation") a.vkValidation = true;
+        else if (f == "--autoplay") {
+            auto v = value();
+            auto script = v ? bbtime::parseAutoplay(*v) : std::nullopt;
+            ok = bool(script);
+            if (ok) a.autoplay = std::move(*script);
+        }
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
         else if (f == "--camera") {
             auto v = value();
@@ -108,6 +148,9 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             return std::nullopt;
         }
     }
+    // --data / $BBTIME_DATA > settings lit_root/tb_root > $XDG_DATA_HOME/bbtime/original/<lit|tb>.
+    a.roots[0] = !dataExplicit && !cfg.litRoot.empty() ? cfg.litRoot : a.data / "lit";
+    a.roots[1] = !dataExplicit && !cfg.tbRoot.empty() ? cfg.tbRoot : a.data / "tb";
     if (!a.level.empty() && !a.game) {
         std::println(stderr, "bbtime: --level needs --game");
         return std::nullopt;
@@ -134,7 +177,7 @@ fs::path findPath(fs::path base, std::initializer_list<std::string_view> parts) 
 
 struct Game {
     GameId id;
-    const char* key;   // subdirectory of the data root
+    const char* key;   // short id (lit / tb)
     const char* title;
     const char* shortName;
     fs::path root{}, backdropPath{};
@@ -144,8 +187,9 @@ struct Game {
     std::string status{};
 };
 
-void loadGame(Game& g, const fs::path& dataRoot, bb::render::Renderer& r) {
-    g.root = dataRoot / g.key;
+template <class R> // bb::render::Renderer (GL) or bb::render_vk::Renderer
+void loadGame(Game& g, const fs::path& root, R& r) {
+    g.root = root;
     // Title-screen backdrops (verified by eye): LiT Datas/ScrnBgEn.bmp 800x600x8, TB Datas/data/english.bmp 640x480x24.
     g.backdropPath = g.id == GameId::LostInTime ? findPath(g.root, {"Datas", "ScrnBgEn.bmp"})
                                                 : findPath(g.root, {"Datas", "data", "english.bmp"});
@@ -169,9 +213,10 @@ void loadGame(Game& g, const fs::path& dataRoot, bb::render::Renderer& r) {
 enum class Screen { Main, Options, Game, Level };
 enum class Action { Up, Down, Left, Right, Accept, Back };
 
+template <class R> // bb::render::Renderer (GL) or bb::render_vk::Renderer: same interface shape
 struct App {
     Args args;
-    bb::render::Renderer r;
+    R r;
     bb::render::Settings s;
     Game games[2] = {{.id = GameId::LostInTime, .key = "lit", .title = "Bugs Bunny: Lost in Time", .shortName = "LiT"},
                      {.id = GameId::TimeBusters, .key = "tb", .title = "Bugs Bunny & Taz: Time Busters", .shortName = "TB"}};
@@ -185,12 +230,33 @@ struct App {
     SDL_Gamepad* pad = nullptr;
     double frameTime = 1.0 / 60.0;
     float alpha = 0.0f;
+    uint32_t simTick = 0;                 // 30 Hz ticks since start (texture animation clock)
+    std::vector<bb::AnimState> actorAnim; // per Scene::actors (player excluded in play mode)
+    std::vector<bb::Mesh> actorMeshes;    // posed every frame
+    std::optional<bbtime::Play> play;     // LiT play mode (bb_game simulation)
+    std::string playStatus;               // why a LiT level stayed in viewer mode
+    bbtime::KeyMap keys;
+    size_t autoplayAt = 0;
 
     Game& game() { return games[gameIdx]; }
 
     void enterLevel(const std::string& level) {
-        scene = bb::loadLevelScene(game().id, args.data, level);
+        bb::BzeFile bze;
+        scene = bb::loadLevelScene(game().id, game().root, level, &bze);
         r.uploadScene(scene);
+        actorAnim.assign(scene.actors.size(), {});
+        play.reset();
+        playStatus.clear();
+        if (game().id == GameId::LostInTime && !scene.placeholder) {
+            const bb::ActorModel* model = nullptr;
+            for (const bb::ActorInstance& a : scene.actors)
+                if (a.player) model = &scene.actorModels[a.model];
+            try {
+                play.emplace(bb::game::LitWorld::load(bze, model));
+            } catch (const std::exception& e) {
+                playStatus = std::format("viewer only: {}", e.what());
+            }
+        }
         sceneTris = 0;
         glm::vec3 lo(1e30f), hi(-1e30f);
         for (const bb::Mesh& m : scene.meshes) {
@@ -230,10 +296,13 @@ struct App {
         s.zNear = std::max(radius * 5e-4f, 0.05f);
         s.zFar = s.fogEnd * 1.05f;
         moveSpeed = std::max(8.0f, radius * 0.05f);
+        if (play) cam = play->camera(1.0f, false);
         prevCam = cam;
         screen = Screen::Level;
-        SDL_SetWindowRelativeMouseMode(r.window(), true);
+        SDL_SetWindowRelativeMouseMode(r.window(), !play);
     }
+
+    bool freeCamera() const { return !play || play->freeFly; }
 
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
@@ -293,7 +362,7 @@ struct App {
             if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = nullptr; }
             break;
         case SDL_EVENT_MOUSE_MOTION:
-            if (screen == Screen::Level) {
+            if (screen == Screen::Level && freeCamera()) {
                 cam.yaw -= e.motion.xrel * 0.0025f;
                 cam.pitch = std::clamp(cam.pitch - e.motion.yrel * 0.0025f, -1.55f, 1.55f);
                 prevCam.yaw = cam.yaw;
@@ -301,6 +370,10 @@ struct App {
             }
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            if (screen == Screen::Level && play) { // every other button is a game button (play.cpp)
+                if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) menu(Action::Back);
+                break;
+            }
             switch (e.gbutton.button) {
             case SDL_GAMEPAD_BUTTON_DPAD_UP: if (screen != Screen::Level) menu(Action::Up); break;
             case SDL_GAMEPAD_BUTTON_DPAD_DOWN: if (screen != Screen::Level) menu(Action::Down); break;
@@ -318,8 +391,13 @@ struct App {
             else if (k == SDLK_F11) { fullscreen = !fullscreen; r.setFullscreen(fullscreen); }
             else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) menu(Action::Back);
             else if (screen == Screen::Level) {
-                if (k == SDLK_F) s.fog = !s.fog;
-                else if (k == SDLK_F1) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
+                if (k == SDLK_F2) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
+                else if (k == SDLK_F4) s.fog = !s.fog;
+                else if (k == SDLK_F1 && play) { // debug free-fly camera
+                    play->freeFly = !play->freeFly;
+                    if (play->freeFly) prevCam = cam = play->camera(alpha, s.fidelity == Fidelity::Enhanced);
+                    SDL_SetWindowRelativeMouseMode(r.window(), play->freeFly);
+                }
             }
             else if (k == SDLK_UP || k == SDLK_W) menu(Action::Up);
             else if (k == SDLK_DOWN || k == SDLK_S) menu(Action::Down);
@@ -332,10 +410,23 @@ struct App {
         }
     }
 
-    // One simulation tick at kTickHz: free-fly camera.
+    // One simulation tick at kTickHz (30 Hz, GAMEPLAY §1.1): actor animation, LiT play mode, free-fly camera.
     void tick(float dt) {
         prevCam = cam;
+        r.setTextureTick(++simTick);
         if (screen != Screen::Level) return;
+        for (size_t i = 0; i < scene.actors.size(); ++i) {
+            const bb::ActorInstance& a = scene.actors[i];
+            if (a.chunk == 8 || (play && a.player)) continue; // templates are not placed; Bugs is the simulation's
+            bb::animTick(scene.actorModels[a.model], actorAnim[i], a.anim, actorAnim[i].parts.empty() ? bb::AnimLoop : 0);
+        }
+        if (play) {
+            bb::game::PadInput in;
+            if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
+            else if (!play->freeFly) in = bbtime::readPad(keys, pad);
+            play->tick(in);
+            if (!play->freeFly) return;
+        }
         const bool* key = SDL_GetKeyboardState(nullptr);
         glm::vec3 move(0.0f); // x = right, y = up, z = forward
         move.z += float(key[SDL_SCANCODE_W]) - float(key[SDL_SCANCODE_S]);
@@ -368,10 +459,10 @@ struct App {
 
     // Vertical list in a panel; returns nothing, highlights `sel`.
     void list(float x, float y, const std::vector<std::string>& items, int sel, int first, int rows) {
-        const int sc = uiScale(), lh = (bb::render::Renderer::kGlyph + 4) * sc;
+        const int sc = uiScale(), lh = (R::kGlyph + 4) * sc;
         size_t widest = 0;
         for (const auto& it : items) widest = std::max(widest, it.size());
-        const float w = float((widest + 4) * size_t(bb::render::Renderer::kGlyph * sc));
+        const float w = float((widest + 4) * size_t(R::kGlyph * sc));
         const int shown = std::min(rows, int(items.size()) - first);
         r.drawRect(x, y, w, float(shown * lh + 2 * sc), kPanel);
         for (int i = 0; i < shown; ++i) {
@@ -384,7 +475,7 @@ struct App {
 
     void draw() {
         r.beginFrame(s);
-        const int sc = uiScale(), g = bb::render::Renderer::kGlyph;
+        const int sc = uiScale(), g = R::kGlyph;
         const float W = float(r.width()), H = float(r.height());
         const std::string_view hint = "Up/Down: move  Enter/A: select  Esc/B: back  F3: diagnostics  F11: fullscreen";
         switch (screen) {
@@ -421,11 +512,19 @@ struct App {
             break;
         }
         case Screen::Level: {
+            // Original Fidelity: no interpolation (the exe renders the tick's state); Enhanced: lerp between ticks.
+            const bool lerp = s.fidelity == Fidelity::Enhanced;
             bb::render::Camera c = cam;
-            c.pos = glm::mix(prevCam.pos, cam.pos, alpha);
-            c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
-            c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
+            if (!freeCamera()) {
+                c = play->camera(alpha, lerp);
+            } else {
+                c.pos = glm::mix(prevCam.pos, cam.pos, alpha);
+                c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
+                c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
+            }
+            poseActors(lerp);
             r.drawScene(c, s);
+            if (play) drawHud();
             if (scene.placeholder) {
                 const std::string_view msg =
                     scene.notes.empty() ? std::string_view("PLACEHOLDER - not original data") : std::string_view(scene.notes.front());
@@ -441,44 +540,86 @@ struct App {
         if (overlay) drawOverlay();
     }
 
+    // Live actors (not spawn templates); in play mode Bugs at the simulated position and collected pickups hidden.
+    void poseActors(bool lerp) {
+        actorMeshes.clear();
+        for (size_t i = 0; i < scene.actors.size(); ++i) {
+            const bb::ActorInstance& a = scene.actors[i];
+            if (a.chunk == 8) continue;
+            if (play && a.player) {
+                const auto v = play->view(alpha, lerp);
+                bb::poseActor(scene.actorModels[a.model], play->world.p.animState, {v.player.x, v.player.y, v.player.z},
+                              {0, v.yaw, v.lean}, a.scale, actorMeshes);
+                continue;
+            }
+            if (play && std::ranges::any_of(play->world.pickups, [&](const bb::game::Pickup& k) {
+                    return k.taken && k.scriptOffset == a.scriptOffset; }))
+                continue;
+            bb::poseActor(scene.actorModels[a.model], actorAnim[i], a.pos, a.rot, a.scale, actorMeshes);
+        }
+        r.setActorMeshes(actorMeshes);
+    }
+
+    // Simple text HUD (the original HUD actor 0x44acc0 draws carrots / health sprites: not ported).
+    void drawHud() {
+        const bb::game::LitWorld& w = play->world;
+        const int sc = uiScale();
+        const float W = float(r.width()), H = float(r.height());
+        const std::string t = std::format("HEALTH {}/{}  CARROTS {:2}  GOLDEN {}  CLOCKS {}", w.health(), w.G[2],
+                                          w.carrots(), w.goldenCarrots(), w.clocks());
+        const float tw = float(t.size() * size_t(R::kGlyph * sc * 2)), x = (W - tw) * 0.5f, y = H - float(28 * sc);
+        r.drawRect(x - float(6 * sc), y - float(4 * sc), tw + float(12 * sc), float(24 * sc), kPanel);
+        r.drawText(x, y, sc * 2, t, kYellow);
+        if (!w.playerModel()) // no decoded actor model for Bugs: say so instead of drawing nothing silently
+            r.drawText(x, y - float(14 * sc), sc, "PLACEHOLDER: Bugs model not decoded", kRed);
+        if (play->freeFly) r.drawText(x, y - float(26 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
+    }
+
     void drawOverlay() {
         const int sc = std::max(1, (r.height() + 300) / 600);
         const bool enh = s.fidelity == Fidelity::Enhanced;
         std::string text = std::format(
-            "GL {} | {}\nGL {}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
-            "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (UNVERIFIED)  alpha {:.2f}",
+            "{} | {}\n{}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
+            "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (GAMEPLAY 1.1)  alpha {:.2f}",
             r.glVendor(), r.glRenderer(), r.glVersion(), 1.0 / frameTime, frameTime * 1000.0, r.drawCalls(), r.width(),
             r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy()) : "nearest",
             enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", s.vfovDeg,
             !enh && s.pillarbox ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
+        if constexpr (requires { r.diagnostics(); }) text += std::format("\n{}", r.diagnostics());
         if (screen == Screen::Level)
             text += std::format("\n{} {}  meshes {}  tris {}  textures {}  fog {}\npos {:.1f} {:.1f} {:.1f}  {}",
                                 game().shortName, scene.level, scene.meshes.size(), sceneTris, scene.textures.size(),
                                 s.fog ? "on" : "off", cam.pos.x, cam.pos.y, cam.pos.z,
                                 scene.placeholder ? "PLACEHOLDER SCENE" : "decoded data");
+        if (screen == Screen::Level && play) {
+            const bb::game::LitWorld& w = play->world;
+            text += std::format("\nPLAY  tick {}  state {} seq {}  anim {}  flags14 {:08x}\nbugs {} {} {}  yaw {}  ground {}  zone {}"
+                                "\ncam eye {} {} {}  yaw {}  F1 free-fly  F2 fidelity  F4 fog",
+                                w.ticks, w.p.state, w.p.seq, w.p.anim, w.p.flags14, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.yaw,
+                                w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw);
+            if (!w.unsupported.empty()) {
+                text += "\nnot interpreted:";
+                for (const std::string& u : w.unsupported) text += " " + u;
+            }
+        }
+        if (screen == Screen::Level && !playStatus.empty()) text += "\n" + playStatus;
         if (screen == Screen::Level)
             for (const std::string& n : scene.notes) text += "\n" + n;
         int lines = 1, cols = 0, cur = 0;
         for (char ch : text) {
             if (ch == '\n') { ++lines; cur = 0; } else cols = std::max(cols, ++cur);
         }
-        const int g = bb::render::Renderer::kGlyph;
+        const int g = R::kGlyph;
         r.drawRect(0, 0, float((cols + 2) * g * sc), float(lines * (g + 2) * sc + 8 * sc), kPanel);
         r.drawText(float(g * sc), float(4 * sc), sc, text, kWhite);
     }
 };
 
-} // namespace
 
-int main(int argc, char** argv) {
-    auto args = parseArgs(argc, argv);
-    if (!args) return 2;
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
-        std::println(stderr, "SDL_Init: {}", SDL_GetError());
-        return 1;
-    }
+template <class R>
+int run(const std::optional<Args>& args) {
     {
-        App app;
+        App<R> app;
         app.args = *args;
         app.s.fidelity = args->fidelity;
         app.fullscreen = args->fullscreen;
@@ -487,16 +628,28 @@ int main(int argc, char** argv) {
         wc.height = args->height;
         wc.fullscreen = args->fullscreen;
         wc.hidden = args->hidden;
-        if (std::string err = app.r.init(wc); !err.empty()) {
+        wc.msaaSamples = args->msaa;
+        app.s.vfovDeg = args->fov;
+        app.s.msaa = args->msaa > 0;
+        app.vsync = args->vsync;
+        {
+            std::vector<std::string> warn;
+            app.keys = bbtime::makeKeyMap(args->bindings, &warn);
+            for (const auto& w : warn) std::println(stderr, "bbtime: {}", w);
+        }
+        std::string err;
+        if constexpr (requires { app.r.init(wc, true); }) err = app.r.init(wc, args->vkValidation);
+        else err = app.r.init(wc);
+        if (!err.empty()) {
             std::println(stderr, "bbtime: {}", err);
-            SDL_Quit();
             return 1;
         }
         app.r.setVsync(app.vsync);
         std::println("bbtime: {} | {} | {} | data {}", app.r.glVendor(), app.r.glRenderer(), app.r.glVersion(),
                      args->data.string());
-        for (Game& g : app.games) {
-            loadGame(g, args->data, app.r);
+        for (int gi = 0; gi < 2; ++gi) {
+            Game& g = app.games[gi];
+            loadGame(g, args->roots[gi], app.r);
             std::println("bbtime: {}: {}{}", g.shortName, g.status,
                          g.backdrop ? " | backdrop " + g.backdropPath.string() : std::string(" | no backdrop"));
         }
@@ -520,6 +673,7 @@ int main(int argc, char** argv) {
                 app.cam.yaw = c[3];
                 app.cam.pitch = c[4];
                 app.prevCam = app.cam;
+                if (app.play) app.play->freeFly = true; // explicit camera = debug free-fly view of play mode
             }
         }
 
@@ -533,11 +687,16 @@ int main(int argc, char** argv) {
             const double dt = double(now - last) * 1e-9;
             last = now;
             app.frameTime += (dt - app.frameTime) * 0.05;
-            for (int n = step.advance(dt); n > 0; --n) app.tick(float(step.dt));
-            app.alpha = step.alpha();
+            if (app.autoplayAt < args->autoplay.size() && app.screen == Screen::Level) { // lockstep: 1 tick per frame
+                app.tick(float(step.dt));
+                app.alpha = 1.0f;
+            } else {
+                for (int n = step.advance(dt); n > 0; --n) app.tick(float(step.dt));
+                app.alpha = step.alpha();
+            }
             if (app.screen == Screen::Main && app.mainSel < 2) musicIdx = app.mainSel; // highlighted game
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
-            bbtime::menuMusic(args->data, app.screen == Screen::Level || args->mute
+            bbtime::menuMusic(args->roots[musicIdx], app.screen == Screen::Level || args->mute
                                               ? std::nullopt : std::optional(app.games[musicIdx].id));
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
@@ -550,6 +709,19 @@ int main(int argc, char** argv) {
         if (app.pad) SDL_CloseGamepad(app.pad);
         for (Game& g : app.games) app.r.destroyImage(g.backdrop);
     }
-    SDL_Quit();
     return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    auto args = parseArgs(argc, argv);
+    if (!args) return 2;
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+        std::println(stderr, "SDL_Init: {}", SDL_GetError());
+        return 1;
+    }
+    const int rc = args->vulkan ? run<bb::render_vk::Renderer>(args) : run<bb::render::Renderer>(args);
+    SDL_Quit();
+    return rc;
 }

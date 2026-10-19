@@ -1,4 +1,5 @@
 #include "bb/level.h"
+#include "bb/actor.h"
 #include "bb/levelscript.h"
 #include "bb/tim.h"
 
@@ -81,8 +82,23 @@ struct Builder {
     std::map<uint32_t, int32_t> tex;  // texture id -> Scene::textures index
     std::set<uint32_t> missing;
     std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf;
+    ActorModel* actor = nullptr;            // set while building an actor model: meshes go to actor->meshes
+    std::vector<uint16_t>* slots = nullptr; // the current actor mesh's slot list
 
     Mesh& mesh(uint32_t group, const std::string& gname, int32_t t, Blend b, bool twoSided) {
+        if (actor) {  // group = object index
+            for (ActorMesh& am : actor->meshes)
+                if (am.object == group && am.mesh.texture == t && am.mesh.blend == b && am.mesh.twoSided == twoSided)
+                    return slots = &am.slots, am.mesh;
+            ActorMesh& am = actor->meshes.emplace_back();
+            am.object = group;
+            am.mesh.name = std::format("{}/obj{}/tex{}{}", gname, group, t, twoSided ? "/2s" : "");
+            am.mesh.texture = t;
+            am.mesh.blend = b;
+            am.mesh.twoSided = twoSided;
+            slots = &am.slots;
+            return am.mesh;
+        }
         auto [it, fresh] = meshOf.try_emplace({group, t, b, twoSided}, s.meshes.size());
         if (fresh) {
             Mesh& m = s.meshes.emplace_back();
@@ -109,6 +125,7 @@ struct Builder {
         // value already in that slot (GameplayRE, 0x411350/0x411b10; non-blend slots are 0..N-1 in object order).
         // The original averages after projection; averaging in model space here is an approximation (Inferred).
         std::vector<std::array<float, 3>> objv;
+        if (actor) actor->objects.assign(nobj, {});
         for (uint32_t o = 0; o < nobj; ++o) {
             const size_t e = 12 + size_t(o) * 28, vt = 12 + size_t(in.u32(e)), nv = in.u32(e + 4);
             in.need(vt, nv * 16);
@@ -119,6 +136,7 @@ struct Builder {
                     continue;
                 }
                 const uint32_t w = in.u32(vt + i * 16 + 12), slot = w & 0x7fff;
+                if (actor) actor->objects[o].push_back({{p[0], p[1], p[2]}, uint16_t(slot), bool(w & 0x8000)});
                 if (slot >= objv.size()) objv.resize(slot + 1, {0, 0, 0});
                 if (w & 0x8000)
                     for (int k = 0; k < 3; ++k) objv[slot][size_t(k)] = (objv[slot][size_t(k)] + p[size_t(k)]) * 0.5f;
@@ -126,9 +144,11 @@ struct Builder {
                     objv[slot] = p;
             }
         }
+        if (actor) actor->slotCount = uint32_t(objv.size());
         std::vector<std::array<float, 3>> block;
         std::string cellName = gname;
         for (uint32_t o = 0; o < nobj; ++o) {
+            if (actor) group = o;
             const size_t e = 12 + size_t(o) * 28;
             size_t p = 12 + size_t(in.u32(e + 16));
             int64_t nprim = in.u32(e + 20);
@@ -147,6 +167,7 @@ struct Builder {
                     continue;
                 }
                 if (t == 0x44) {  // vertex block: replaces the polygon vertex base (§6)
+                    if (actor) throw FormatError(std::format("actor model 0x{:x}: vertex block unsupported", off));
                     in.need(p + 4, size_t(cnt) * 12);
                     block.resize(cnt);
                     for (size_t i = 0; i < cnt; ++i) block[i] = {in.f32(p + 4 + i * 12), in.f32(p + 8 + i * 12), in.f32(p + 12 + i * 12)};
@@ -218,12 +239,14 @@ struct Builder {
             v.rgba[2] = in.u8(q + k.col[i] + 2);
             v.rgba[3] = alpha;
             m.vertices.push_back(v);
+            if (actor) slots->push_back(vi);
         }
         // Quads use PS1 "Z" order: outline v0 v1 v3 v2 -> triangles (0,1,2) + (1,3,2). In engine space the data's
         // visible side has that order clockwise (checked visually on L01a: with this order reversed, plateau tops
         // are visible from above and cliff faces from the canyon), so emit reversed to keep Mesh's CCW-front rule.
         m.indices.insert(m.indices.end(), {base, base + 2, base + 1});
         if (k.n == 4) m.indices.insert(m.indices.end(), {base + 1, base + 2, base + 3});
+        if (actor) return;
         ++s.stats.faces;
         s.stats.triangles += k.n - 2;
     }
@@ -264,15 +287,23 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
         }
     }
 
-    // Static prop assets: chunk 0x22, tag 0x27 (u16 asset id at +2) + tag 0x24/0x40 model.
-    std::map<uint16_t, std::pair<uint32_t, uint32_t>> assets;
+    // Chunk 0x22 assets: tag 0x27 {u16 role, u16 id} + tag 0x24/0x40 model or 0x25 TOD {u32 off, u32 size}.
+    struct Asset { uint16_t role = 0; uint8_t tag = 0; uint32_t off = 0, size = 0; };
+    std::map<uint16_t, Asset> all;
+    std::map<uint16_t, std::pair<uint32_t, uint32_t>> assets;  // models only (props)
     for (const ScriptItem& it : script.items) {
         if (it.kind != ScriptItem::Kind::Chunk || it.code != 0x22) continue;
         const auto id = tagData(it, 0x27);
+        if (id.empty()) continue;
+        const uint16_t aid = uint16_t(id[2] | id[3] << 8);
+        for (uint8_t tg : {0x24, 0x40, 0x25})
+            if (const auto d = tagData(it, tg); !d.empty()) all[aid] = {uint16_t(id[0] | id[1] << 8), tg, le32(d, 0), le32(d, 4)};
         auto mdl = tagData(it, 0x24);
         if (mdl.empty()) mdl = tagData(it, 0x40);
-        if (!id.empty() && !mdl.empty()) assets[uint16_t(id[2] | id[3] << 8)] = {le32(mdl, 0), le32(mdl, 4)};
+        if (!mdl.empty()) assets[aid] = {le32(mdl, 0), le32(mdl, 4)};
     }
+    std::map<std::vector<uint16_t>, uint32_t> modelOf;  // tag 0x0f list -> Scene::actorModels index
+    std::vector<uint16_t> idleOf;                       // per actor model: initial animation id
 
     uint32_t group = 0;
     for (const ScriptItem& it : script.items) {
@@ -295,10 +326,72 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
                 s.spawn = std::array<float, 3>{float(pos[0]), -float(pos[1]), -float(pos[2])};
                 s.spawnYaw = -yaw;  // PS1 Ry forward (sin, 0, cos) -> engine Camera yaw = -angle (Inferred)
             }
-            // An entity lists its assets in repeated tag 0x0f (mostly 0x25 animation blocks plus one static model).
-            // Placed here (Inferred): entities with exactly one static model that has a single object, drawn in
-            // rest pose; scale tag 0x12 per axis (20.12), rotation tag 0x11 Y only. Multi-object (skinned) actors
-            // need the 0x25 data: Research Required.
+            // An entity lists its assets in repeated tag 0x0f (TODs plus models), in list order (0x448950 appends).
+            std::vector<uint16_t> refs;
+            for (const ScriptTag& t : it.tags)
+                if (t.id == 0x0f) refs.push_back(uint16_t(t.data[0] | t.data[1] << 8));
+            // TOD actor (0x4393e0): first role-7 model + first role-4 skeleton of the list; flipbook actors (tag 0x16
+            // flags8 0x200000) play role-8 sprites instead and are not handled here.
+            const auto flags8 = tagData(it, 0x16);
+            const bool flipbook = !flags8.empty() && (le32(flags8, 0) & 0x200000);
+            auto first = [&](uint16_t role, bool tod) -> const uint16_t* {
+                for (const uint16_t& r : refs)
+                    if (auto a = all.find(r); a != all.end() && a->second.role == role && (a->second.tag == 0x25) == tod) return &r;
+                return nullptr;
+            };
+            const uint16_t *mref = first(7, false), *sref = first(4, true);
+            if (mref && sref && !flipbook) {
+                auto [mo, fresh] = modelOf.try_emplace(refs, uint32_t(s.actorModels.size()));
+                if (fresh) {
+                    ActorModel& am = s.actorModels.emplace_back();
+                    am.modelAsset = *mref, am.skeletonAsset = *sref;
+                    am.skeleton = parseTod(s4, all[*sref].off);
+                    for (uint16_t r : refs)
+                        if (const Asset& a = all[r]; a.tag == 0x25 && r != *sref) am.anims.push_back({a.role, parseTod(s4, a.off)});
+                    b.actor = &am;
+                    uint32_t objGroup = 0;
+                    b.model(s4, all[*mref].off, all[*mref].size, Xform{}, objGroup, false, std::format("actor{}", *mref));
+                    b.actor = nullptr;
+                    // Initial animation (Inferred; the real one comes from the behaviour's start state): the first
+                    // TOD in list order whose first frame shows any geometry (many lists start with a hide-all anim).
+                    idleOf.push_back(am.anims.empty() ? 0 : am.anims[0].id);
+                    for (const ActorAnim& an : am.anims) {
+                        AnimState st;
+                        animTick(am, st, an.id, AnimLoop);
+                        if (std::ranges::any_of(poseSlots(am, st), [](const auto& v) { return !std::isnan(v[0]); })) {
+                            idleOf.back() = an.id;
+                            break;
+                        }
+                    }
+                }
+                ActorInstance& ai = s.actors.emplace_back();
+                ai.model = mo->second;
+                ai.pos = pos;
+                if (it.rotation) ai.rot = *it.rotation;
+                if (it.scale) ai.scale = *it.scale;
+                // Start state (LOGIC.md §2, 0x4455e0): tag-0x32 state id 2, else 1 -> its first step id -> the
+                // tag-0x30 step / 0x34 player move with that id -> anim id (both payloads: u16 id, u16 anim).
+                // Player L01a: state 2 -> move 4 -> anim 35. Fallback: first visible TOD (Inferred).
+                ai.anim = idleOf[mo->second];
+                std::optional<uint16_t> step;
+                for (uint16_t want : {2, 1})
+                    for (const ScriptTag& t : it.tags)
+                        if (!step && t.id == 0x32 && t.data.size() >= 4 && (t.data[0] | t.data[1] << 8) == want)
+                            step = uint16_t(t.data[2] | t.data[3] << 8);
+                for (const ScriptTag& t : it.tags)
+                    if (step && (t.id == 0x30 || t.id == 0x34) && t.data.size() >= 4 && (t.data[0] | t.data[1] << 8) == *step) {
+                        const uint16_t anim = uint16_t(t.data[2] | t.data[3] << 8);
+                        if (findAnim(s.actorModels[mo->second], anim) >= 0) ai.anim = anim;
+                        break;
+                    }
+                ai.entityId = it.entityId.value_or(0);
+                ai.chunk = it.code;
+                ai.player = it.player;
+                ai.scriptOffset = it.offset;
+                continue;
+            }
+            // Otherwise placed as a static prop (Inferred): exactly one model with a single object, rest pose;
+            // scale tag 0x12 per axis (20.12), rotation tag 0x11 Y only.
             const std::pair<uint32_t, uint32_t>* model = nullptr;
             int statics = 0;
             for (const ScriptTag& t : it.tags)
@@ -323,8 +416,9 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     }
 
     s.stats.missingTextureIds.assign(b.missing.begin(), b.missing.end());
-    s.notes.push_back(std::format("{} world models, {} cells, {} rigid props (placement Inferred), {} skinned actors skipped "
-                                  "(Research Required)", s.stats.worldModels, s.stats.cells, s.stats.props, s.stats.skippedActors));
+    s.notes.push_back(std::format("{} world models, {} cells, {} rigid props (placement Inferred), {} TOD actors ({} models), "
+                                  "{} multi-object entities skipped", s.stats.worldModels, s.stats.cells, s.stats.props,
+                                  s.actors.size(), s.actorModels.size(), s.stats.skippedActors));
     if (s.stats.missingTextureFaces)
         s.notes.push_back(std::format("{} faces reference {} texture ids absent from this level: drawn untextured",
                                       s.stats.missingTextureFaces, s.stats.missingTextureIds.size()));

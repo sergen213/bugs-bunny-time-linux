@@ -67,13 +67,19 @@ Object entry (28 bytes):
 | 0x14 | u32 | `n_prim` (count of primitive *records*, see §4) |
 | 0x18 | s32 | `scale`, always 0 |
 
-Object vertex table: `n_vert` × 16 bytes = `float x, float y, float z, u32 pad(0)`. Values are integral
-(converted from PS1 s16). The renderer transforms them into a 16-byte screen-space buffer [OV].
+Object vertex table: `n_vert` × 16 bytes = `float x, float y, float z, u32 word3`. Values are integral
+(converted from PS1 s16). The renderer transforms them into a 16-byte screen-space buffer [OV]. World models
+ignore `word3` (0 in world data).
 
-Multi-object (actor) models: object vertex tables are **contiguous** and primitive vertex indices address the
-**concatenation** of all objects' vertex tables (e.g. L01a model `0xb854`: object 2 uses indices 24–26 with
-object 0 having 11 and object 1 having 7 vertices) [DATA]. Whether objects get separate matrices (skinning)
-is Research Required (tag `0x25` data likely animates them).
+Actor/prop models (correction, GAMEPLAY.md §6, `0x411350`): `word3 & 0x7fff` is the vertex's **slot** in a
+per-actor shared vertex buffer and primitive vertex indices address **slots**, not the concatenated tables.
+Bit `0x8000` marks a seam vertex: it is written by another part's object too and is **averaged** (×0.5, after
+projection in the original) with the value already in the slot. Non-blend slots are `0..N−1` in object order,
+blend slots always refer to one of them [DATA: all 4284 role-7 models; Bugs: 445 vertices → 313 slots]. So
+"plain concatenation" (e.g. L01a model `0xb854`: object 2 uses indices 24–26 with object 0 having 11 and object
+1 having 7 vertices) holds only for models without blend vertices. Each TMD object is posed by its own TOD part
+matrix (rigid per-part skeleton, GAMEPLAY.md §6; C++ `bb/actor.h`) — Verified (data + numeric match with
+`tools/re/anim.py`).
 
 ## 3. Coordinate system — Verified (data), Inferred (handedness)
 
@@ -183,8 +189,9 @@ pick one convention explicitly (PS1 /128 recommended; document the choice).
 
 ## 6. Vertex addressing — Verified
 
-- At object start, the object vertex table (concatenated over all objects, §2) is the current vertex base
-  for polygons **and** the base for cell/hull/portal indices (`DAT_007c6240`) [OV].
+- At object start, the object vertex table (concatenated over all objects for world models; the slot buffer
+  for actor models, §2) is the current vertex base for polygons **and** the base for cell/hull/portal indices
+  (`DAT_007c6240`) [OV]. No actor model contains a `0x44` record (the C++ loader rejects one).
 - Each `0x44` record replaces the polygon vertex base with its own `count` float3 vertices; polygon indices
   after it are **local to that block** until the next `0x44` (cell headers/hulls/portals keep using the object
   table) [BV][WR]. 0 out-of-range indices in all 79 LiT levels with this rule [DATA].
