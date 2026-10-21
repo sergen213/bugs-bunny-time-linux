@@ -356,7 +356,32 @@ TbScript parseTbScript(std::span<const uint8_t> d, uint32_t languageSection) {
     }
 }
 
-Scene buildTbScene(const BzeFile& bze, const std::string& level) {
+void tbAdjustColor(uint8_t* rgb, double brightness) {
+    const double r = rgb[0] * 0.00392156862745098, g = rgb[1] * 0.00392156862745098, b = rgb[2] * 0.00392156862745098;
+    // 0x408270: I = sum/3, S = 1 - 3·min/sum, H = acos(...) in degrees (360 - H when g < b); grey -> H = S = 0.
+    const double sum = r + g + b, mn = std::min({r, g, b});
+    double h = 0.0, sat = 0.0, in = std::min(sum * (1.0 / 3.0), 1.0);
+    if (!(r == g && g == b)) {
+        sat = std::min(1.0 - 3.0 / sum * mn, 1.0);
+        const double c = std::clamp((r - g * 0.5 - b * 0.5) / std::sqrt((r - g) * (r - g) + (r - b) * (g - b)), -1.0, 1.0);
+        h = std::acos(c) * 57.29577951;
+        if (g < b) h = 360.0 - h;
+    }
+    in = std::min(in * brightness, 1.0);  // 0x407d30: × 0x639c20 (hue + 0x639c10, saturation × 0x639c18: identity)
+    // 0x407fe0: back to RGB per 120° sector (its two degree-to-radian constants), each channel clamped to 0..1.
+    double o[3] = {0.0, 0.0, 0.0};
+    if (in != 0.0 && sat == 0.0) o[0] = o[1] = o[2] = in;
+    else if (in != 0.0) {
+        const double f = in * 3.0, lo = (1.0 - sat) * (1.0 / 3.0);
+        const auto hi = [&](double a, double k) { return (std::cos(a * k) * sat / std::cos((60.0 - a) * k) + 1.0) * (1.0 / 3.0); };
+        if (h > 240.0) { const double gb = lo, bb = hi(h - 240.0, 0.017453293); o[0] = (1.0 - gb - bb) * f, o[1] = gb * f, o[2] = bb * f; }
+        else if (h > 120.0) { const double rr = lo, gg = hi(h - 120.0, 0.017453293); o[0] = rr * f, o[1] = gg * f, o[2] = (1.0 - rr - gg) * f; }
+        else { const double bb = lo, rr = hi(h, 0.01745329238474369); o[0] = rr * f, o[1] = (1.0 - rr - bb) * f, o[2] = bb * f; }
+    }
+    for (int k = 0; k < 3; ++k) rgb[k] = uint8_t(std::clamp(o[k], 0.0, 1.0) * 255.0);
+}
+
+Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightness) {
     if (bze.variant != BzeVariant::TimeBusters) throw FormatError("buildTbScene: not a Time Busters BZE");
     const int i1 = bze.find(1);
     if (i1 < 0) throw FormatError("buildTbScene: no section 1");
@@ -379,7 +404,7 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
     // Inferred: PS1 modulation (texel * colour / 128) as LiT; vertex colours centre near 128 in the data (Enhanced).
     // The PC GL path does not double (byte/255; Original Fidelity uses 1.0): measured gain original/bbtime 1.01-1.03
     // on ARCA01 (RUNTIME_REFERENCE.md §7). Its texel tables 0x639de0/0x63ae80 (on: 0x639da4 = 1) are identity at
-    // runtime, so pcTexGamma stays 1.
+    // runtime, so pcTexGamma stays 1; the CLUT colours get the brightness pass below (tbAdjustColor).
     s.colorScale = 255.0f / 128.0f;
     Builder b{s, {}, {}, {}, {}, 0, false, 0, {}};
 
@@ -391,6 +416,15 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
             ++s.stats.textureRefs;
             try {
                 Texture tx = decodeTim(section(ch.section), off, std::format("{}/tex/{}", level, id));
+                if ((In{section(ch.section), "tim"}.u32(off + 4) & 7) < 2) {  // CLUT TIM: adjust each palette colour once
+                    std::map<uint32_t, std::array<uint8_t, 3>> done;
+                    for (size_t i = 0; i < tx.rgba.size(); i += 4) {
+                        uint8_t* p = &tx.rgba[i];
+                        auto [it, fresh] = done.try_emplace(uint32_t(p[0] | p[1] << 8 | p[2] << 16));
+                        if (fresh) it->second = {p[0], p[1], p[2]}, tbAdjustColor(it->second.data(), brightness);
+                        std::copy_n(it->second.begin(), 3, p);
+                    }
+                }
                 if (b.tex.try_emplace(id, int32_t(s.textures.size())).second) s.textures.push_back(std::move(tx));
             } catch (const FormatError& e) {
                 ++s.stats.textureErrors;

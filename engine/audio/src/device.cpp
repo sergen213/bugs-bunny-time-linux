@@ -70,7 +70,7 @@ void AudioDevice::playMusic(const std::filesystem::path& xa, bool loop) {
     loop_ = loop;
     for (unsigned b : musicBufs_) queue(b);
     alSourcef(musicSrc_, AL_GAIN, musicGain_);
-    alSourcePlay(musicSrc_);
+    if (!paused_) alSourcePlay(musicSrc_);
 }
 
 void AudioDevice::stopMusic() {
@@ -78,6 +78,14 @@ void AudioDevice::stopMusic() {
     alSourceStop(musicSrc_);
     alSourcei(musicSrc_, AL_BUFFER, 0);  // unqueues everything
     music_.reset();
+}
+
+void AudioDevice::pauseMusic(bool paused) {
+    if (!ctx_ || paused == paused_) return;
+    paused_ = paused;
+    if (!music_) return;
+    if (paused) alSourcePause(musicSrc_);
+    else alSourcePlay(musicSrc_);
 }
 
 void AudioDevice::setMusicVolume(float gain) {
@@ -169,7 +177,7 @@ void AudioDevice::update() {
     alGetSourcei(musicSrc_, AL_BUFFERS_QUEUED, &queued);
     alGetSourcei(musicSrc_, AL_SOURCE_STATE, &state);
     if (queued == 0) music_.reset();                    // non-looping track finished
-    else if (state != AL_PLAYING) alSourcePlay(musicSrc_);  // recover from an underrun (late pump)
+    else if (state != AL_PLAYING && !paused_) alSourcePlay(musicSrc_);  // recover from an underrun (late pump)
 }
 
 } // namespace bb

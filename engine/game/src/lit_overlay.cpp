@@ -47,6 +47,9 @@ constexpr uint8_t kAdvance[256] = {
 
 } // namespace
 
+uint8_t LitWorld::fontGlyph(uint8_t c) { return kGlyph[c]; }
+uint8_t LitWorld::fontAdvance(uint8_t c) { return kAdvance[c]; }
+
 uint32_t LitWorld::overlay(uint16_t script, LitActor* resume) {
     LitActor* a = resume;
     size_t pc = 0;

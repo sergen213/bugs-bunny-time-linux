@@ -124,10 +124,8 @@ std::optional<LitSaveGame> litFrontEnd(LitWorld& w, const fs::path& dir) {
     return started;
 }
 
-namespace {
-
 // Backs up an existing file to <name>.bak, then replaces it via a temporary (no torn file on a failed write).
-std::string replaceFile(const fs::path& path, std::span<const uint8_t> bytes) {
+std::string replaceSaveFile(const fs::path& path, std::span<const uint8_t> bytes) {
     std::error_code ec;
     if (fs::exists(path, ec)) {
         fs::copy_file(path, path.string() + ".bak", fs::copy_options::overwrite_existing, ec);
@@ -143,8 +141,6 @@ std::string replaceFile(const fs::path& path, std::span<const uint8_t> bytes) {
     return ec ? std::format("{}: {}", path.string(), ec.message()) : "";
 }
 
-}  // namespace
-
 std::string writeLitSave(const fs::path& dir, LitSaveGame& g) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -155,9 +151,9 @@ std::string writeLitSave(const fs::path& dir, LitSaveGame& g) {
         return e.what();  // keep a damaged summary untouched rather than overwrite it
     }
     g.seal();
-    if (std::string e = replaceFile(litSaveGamePath(dir, g.slot()), g.raw); !e.empty()) return e;
+    if (std::string e = replaceSaveFile(litSaveGamePath(dir, g.slot()), g.raw); !e.empty()) return e;
     d.record(g);
-    return replaceFile(litSaveDataPath(dir), d.raw);
+    return replaceSaveFile(litSaveDataPath(dir), d.raw);
 }
 
 std::string importLitSaves(const fs::path& from, const fs::path& dir) {
@@ -165,7 +161,7 @@ std::string importLitSaves(const fs::path& from, const fs::path& dir) {
     fs::create_directories(dir, ec);
     std::string imported, skipped;
     auto take = [&](const fs::path& src, std::span<const uint8_t> bytes) {
-        if (std::string e = replaceFile(dir / src.filename(), bytes); !e.empty()) skipped += " " + e;
+        if (std::string e = replaceSaveFile(dir / src.filename(), bytes); !e.empty()) skipped += " " + e;
         else imported += " " + src.filename().string();
     };
     for (int slot = 0; slot <= 6; ++slot) {

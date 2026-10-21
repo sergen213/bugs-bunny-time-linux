@@ -55,7 +55,7 @@ struct Font {
         if (FT_New_Face(lib, file.c_str(), 0, &face)) return false;
         const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(face, FT_SFNT_OS2));
         const int asc = os2 ? os2->usWinAscent : face->ascender, desc = os2 ? os2->usWinDescent : -face->descender;
-        const int ppem = lfHeight * face->units_per_EM / (asc + desc);
+        const int ppem = lfHeight < 0 ? -lfHeight : lfHeight * face->units_per_EM / (asc + desc);  // < 0: em height (GDI)
         ascent = int(std::lround(double(asc) * ppem / face->units_per_EM));
         cell = ascent + int(std::lround(double(desc) * ppem / face->units_per_EM));
         FT_Set_Pixel_Sizes(face, 0, FT_UInt(ppem));
@@ -78,7 +78,9 @@ struct Font {
             const FT_Bitmap& b = g->bitmap;
             for (unsigned r = 0; r < b.rows; ++r)
                 for (unsigned k = 0; k < b.width; ++k) {
-                    const unsigned a = b.buffer[r * size_t(b.pitch) + k] >= 240 ? 255 : b.buffer[r * size_t(b.pitch) + k];
+                    const uint8_t* row = b.buffer + r * size_t(b.pitch);  // MONO: an embedded bitmap strike (Wine's Tahoma)
+                    const unsigned v = b.pixel_mode == FT_PIXEL_MODE_MONO ? (row[k / 8] >> (7 - k % 8) & 1) * 255u : row[k];
+                    const unsigned a = v >= 240 ? 255 : v;
                     const int px = x + g->bitmap_left + int(k), py = base - g->bitmap_top + int(r);
                     if (!a || px < 0 || py < 0 || px >= kW || py >= kH) continue;
                     uint8_t* p = &t.rgba[(size_t(py) * kW + size_t(px)) * 4];
@@ -128,6 +130,18 @@ uint16_t padBit(std::string_view id) {
     return it == kBits.end() ? 0 : it->second;
 }
 
+// 0x41ab70: RESOLUTION_0..4 -> config.pc +0x10 (u16 w, u16 h).
+constexpr std::pair<int, int> kRes[5] = {{320, 240}, {512, 384}, {640, 480}, {800, 600}, {1024, 768}};
+
+// bblit2.exe string table 1 (caption) and 4 (text) of the WM_CLOSE box (0x42e480), one '~' segment per language
+// (config.pc +0x08), Latin-1 like menu.men.
+constexpr std::string_view kQuitCaption =
+    "Bugs Bunny & Taz - Time Busters ~ Bugs Bunny et Taz - La Spirale du Temps ~ Bugs Bunny & Taz - Im Wettlauf gegen "
+    "die Zeit ~ Bugs Bunny & Taz: La Espiral del Tiempo ~ Bugs Bunny & Taz - In Viaggio Nel Tempo ~ Pernalonga e Taz - "
+    "Time Busters ~ Bugs Bunny & Taz - Op avontuur door de tijd ~ ";
+constexpr std::string_view kQuitText = "Do you want to quit? ~ Veux-tu quitter ? ~ M\xf6" "chtest du abbrechen? ~ \xbf"
+                                       "Deseas salir? ~ Vuoi uscire? ~ Voc\xea quer sair? ~ Wil je stoppen? ~ ";
+
 } // namespace
 
 struct TbFront::Impl {
@@ -148,9 +162,20 @@ struct TbFront::Impl {
     bool dirty = true;
     bb::Texture canvas;
     bb::AiffSound bong;
+    // Video page = settings.ini width / height, tb_renderer, tb_details, tb_brightness (the config.pc fields).
+    int resW = 0, resH = 0, renderer = 2, details = 2;
+    float brightness = 1.0f;  // config.pc +0xe0 (0x639c20)
+    // WM_CLOSE (0x42e480): MessageBox(string 4, string 1, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST), Yes -> state 0.
+    bool quitBox = false, quitExit = false;  // open; Yes leaves the app (window close) instead of the front end
+    int quitFocus = 0, mx = -1, my = -1;     // focused button (0 Yes = default, 1 No); last mouse point
+    Font ui, uiIcon;                         // the box's font (Wine: Tahoma 8 pt = ppem 11) and its icon's '?'
+    // Attract idle (0x41c0f0, idle()): due at GetTickCount + 30000, re-armed by WM_KEYDOWN (0x6396e8) and button-down
+    // messages (0x6396a4), not by mouse moves.
+    uint64_t idleDue = 0;
+    bool demoLogged = false;
 
     ~Impl() {
-        big.close(), list.close();
+        big.close(), list.close(), ui.close(), uiIcon.close();
         if (ft) FT_Done_FreeType(ft);
     }
 
@@ -203,27 +228,24 @@ struct TbFront::Impl {
             }
         return {};
     }
-    // +0xa8 (checked). Language = the menu language; Video is fixed in bbtime (640x480 canvas, 3-D card, high
-    // details); the Controls pages' player / control-type checks follow the page shown (2 P1 keys, 5 P2, 6 joystick).
+    // +0xa8 (checked). Language = the menu language; Video = the settings (window size, renderer, detail level); the
+    // Controls pages' player / control-type checks follow the page shown (2 P1 keys, 5 P2, 6 joystick).
     bool checked(const TbMenuItem& it) const {
         int n = 0;
         const std::string f = family(it, &n);
         if (f == "LANGUAGE_") return n == language;
-        if (f == "RESOLUTION_") return n == 2;
-        if (f == "RENDERER_") return n == 0;
-        if (f == "DETAILS_") return n == 2;
+        if (f == "RESOLUTION_") return n < 5 && kRes[n] == std::pair{resW, resH};
+        if (f == "RENDERER_") return n == (renderer == 2 ? 0 : 1);  // 0x41ab70: RENDERER_0 checked -> 2, else 1
+        if (f == "DETAILS_") return n == details;
         if (it.name.starts_with("PLAYER1_CHECK")) return page != 5;
         if (it.name.starts_with("PLAYER2_CHECK")) return page == 5;
         if (it.name.starts_with("KEYB_CHECK")) return page != 6;
         if (it.name.starts_with("JOY_CHECK")) return page == 6;
         return it.selected;
     }
-    bool enabled(const TbMenuItem& it) const {
-        int n = 0;
-        const std::string f = family(it, &n);
-        if (f == "RESOLUTION_" || f == "RENDERER_" || f == "DETAILS_") return checked(it);  // not selectable here
-        return it.enabled;
-    }
+    // The exe also greys resolutions its display-mode probe (0x42f880, +0x24 & 0x100 / 0x200 per renderer) rejects;
+    // bbtime's window takes every listed size.
+    bool enabled(const TbMenuItem& it) const { return it.enabled; }
 
     std::string keyName(const std::string& id) const {
         if (id.starts_with("Joy_B")) {  // bbtime's fixed SDL gamepad layout (play.cpp), Xbox names
@@ -346,6 +368,77 @@ struct TbFront::Impl {
         for (size_t i = 3; i < canvas.rgba.size(); i += 4) canvas.rgba[i] = 255;
         blit(bmp(menu.pages[page].backdropFor(language)), 0, 0);  // 0x419430: page bitmap at 0,0
         forPage([&](int i) { drawItem(i, i == hot); });
+        if (quitBox) drawQuit();
+    }
+
+    // The WM_CLOSE box in the Windows 9x classic MessageBox look (caption = string 1). Client layout from the Wine
+    // oracle (local/wine/tbmenu/w8_quit_box_root.png: 173x82 client, icon at 11,9, text at 55, 52x26 buttons at
+    // y 48); Wine without a window manager draws no caption.
+    struct QuitLayout { Box win, cap, client, btn[2]; std::string caption, text; };
+    QuitLayout quitLayout() const {
+        QuitLayout q;
+        TbMenuItem t;  // the exe's per-language '~' segments, cut like menu.men texts
+        t.texte = kQuitCaption, q.caption = t.text(language);
+        t.texte = kQuitText, q.text = t.text(language);
+        const int cw = std::max({55 + ui.width(q.text) + 18, ui.width(q.caption) + 8, 2 * 52 + 17 + 2 * 26}), ch = 82;
+        q.win = {(kW - cw - 6) / 2, (kH - ch - 24) / 2, cw + 6, ch + 24};
+        q.cap = {q.win.x + 3, q.win.y + 3, cw, 18};
+        q.client = {q.win.x + 3, q.win.y + 21, cw, ch};
+        const int bx = q.client.x + (cw - (2 * 52 + 17)) / 2;
+        q.btn[0] = {bx, q.client.y + 48, 52, 26}, q.btn[1] = {bx + 52 + 17, q.client.y + 48, 52, 26};
+        return q;
+    }
+    void frame(const Box& b, Rgb tl, Rgb br) {  // 1-px 3-D edge
+        fill(b.x, b.y, b.x + b.w, b.y + 1, tl), fill(b.x, b.y, b.x + 1, b.y + b.h, tl);
+        fill(b.x, b.y + b.h - 1, b.x + b.w, b.y + b.h, br), fill(b.x + b.w - 1, b.y, b.x + b.w, b.y + b.h, br);
+    }
+    static Box inset(const Box& b, int d) { return {b.x + d, b.y + d, b.w - 2 * d, b.h - 2 * d}; }
+    void drawQuit() {
+        constexpr Rgb face{192, 192, 192}, light{223, 223, 223}, shadow{128, 128, 128}, black{0, 0, 0}, navy{0, 0, 128};
+        const QuitLayout q = quitLayout();
+        fill(q.win.x, q.win.y, q.win.x + q.win.w, q.win.y + q.win.h, face);
+        frame(q.win, light, black), frame(inset(q.win, 1), kWhite, shadow);
+        fill(q.cap.x, q.cap.y, q.cap.x + q.cap.w, q.cap.y + q.cap.h, navy);
+        ui.draw(canvas, q.cap.x + 3, q.cap.y + (q.cap.h - ui.cell) / 2, q.caption, kWhite);
+        const int cx = q.client.x + 27, cy = q.client.y + 25;  // IDI_QUESTION 32x32: white bubble, black rim, blue '?'
+        for (int y = -16; y < 16; ++y)
+            for (int x = -16; x < 16; ++x)
+                if (const int d = (2 * x + 1) * (2 * x + 1) + (2 * y + 1) * (2 * y + 1); d < 31 * 31)
+                    fill(cx + x, cy + y, cx + x + 1, cy + y + 1, d > 27 * 27 ? black : kWhite);
+        uiIcon.draw(canvas, cx - uiIcon.width("?") / 2, cy - uiIcon.cell / 2, "?", Rgb{0, 0, 255});
+        ui.draw(canvas, q.client.x + 55, q.client.y + 17, q.text, black);
+        for (int k = 0; k < 2; ++k) {
+            const Box& b = q.btn[k];
+            const Box e = k == quitFocus ? inset(b, 1) : b;  // the focused push button is the default one
+            if (k == quitFocus) frame(b, black, black);
+            frame(e, kWhite, black), frame(inset(e, 1), light, shadow);
+            const std::string_view s = k ? "No" : "Yes";
+            const int tx = b.x + (b.w - ui.width(s)) / 2, ty = b.y + (b.h - ui.cell) / 2;
+            ui.draw(canvas, tx, ty, s, black);
+            fill(tx, ty + ui.ascent + 1, tx + ui.width(s.substr(0, 1)), ty + ui.ascent + 2, black);  // "&Yes" / "&No"
+            if (k == quitFocus) {  // dotted focus rectangle
+                const Box f = inset(b, 4);
+                for (int x = f.x; x < f.x + f.w; x += 2) fill(x, f.y, x + 1, f.y + 1, black), fill(x, f.y + f.h - 1, x + 1, f.y + f.h, black);
+                for (int y = f.y; y < f.y + f.h; y += 2) fill(f.x, y, f.x + 1, y + 1, black), fill(f.x + f.w - 1, y, f.x + f.w, y + 1, black);
+            }
+        }
+    }
+    void askQuit(bool exitApp) { quitBox = true, quitExit = exitApp, quitFocus = 0, capture = -1, dirty = true; }
+    TbFrontAction quitAnswer(int k) {  // IDYES (6): state 0, the exe exits; IDNO: the menu stays
+        quitBox = false, dirty = true;
+        if (k != 0) return {};
+        return {.kind = quitExit ? TbFrontAction::Exit : TbFrontAction::Quit};
+    }
+
+    // 0x41c0f0 attract: 30 s after the last key / button press the loop opens ..\data\demo<n>.avi (n = 1, 2, ... one
+    // per pass, a missing file is skipped) and plays it (0x409df0) until the next key or click. The PC disc ships no
+    // demo files, so the exe just keeps probing and the menu stays as it is (oracle: w8_inotify_per_second.txt, idle
+    // shots unchanged); bbtime has no AVI decoder and treats a present file the same way.
+    void idle() {
+        if (demoLogged || SDL_GetTicks() < idleDue) return;
+        demoLogged = true;
+        std::println(stderr, "bbtime: TB menu idle 30 s: attract ..\\data\\demo1.avi {}",
+                     files.contains("demo1.avi") ? "present, not played (no AVI decoder)" : "absent, menu stays (as the exe)");
     }
 
     // 0x41bc40: the first item of the page (groups in order) under the mouse; a disabled key ends its group.
@@ -380,6 +473,15 @@ struct TbFront::Impl {
         if (p < 0 || p >= TbMenu::kPages || menu.pages[p].backdrop.empty()) return;
         page = p, hot = -1, hotRow = -1, capture = -1, dirty = true;
         if (p == 7) loadSlots(), listSel = -1, listTop = 0;
+        // 0x419df0 draws the slider through 0x41adc0, which stores 0.25 + 1.75 v on every draw, v = 0x639c20 / 2 from
+        // menu load (0x418bd0): showing the Video page turns 1.0 into 1.125 (R: peek 0x639c20, w8_capture.sh).
+        if (p == 3) brightness = 0.25f + 1.75f * contrast, saveVideo();
+    }
+    void saveVideo() {  // 0x41a6e0 writes config.pc on leaving the menu; bbtime: settings.ini at once
+        Settings st = loadSettings();
+        st.width = resW, st.height = resH, st.tbRenderer = renderer, st.tbDetails = details, st.tbBrightness = brightness;
+        if (const std::string err = saveSettings(st); !err.empty()) std::println(stderr, "bbtime: {}", err);
+        dirty = true;
     }
 
     void loadSlots() {  // 0x428e50 at menu start and on the Load page
@@ -388,12 +490,14 @@ struct TbFront::Impl {
         slots = parseTbSavedata(b);
     }
 
-    void step(const std::string& prefix, int dir) {  // 0x41b060 -> 0x41adc0: ±0.125 (brightness ±0.05), 0..1
+    // 0x41b060 -> 0x41adc0: ±0.125, 0..1. The 0.05 constant meant for brightness is never used (the step is
+    // compared with the 0x639c20 pointer; R: one '+' 1.125 -> 1.34375). Brightness = 0.25 + 1.75 v, no bong.
+    void step(const std::string& prefix, int dir) {
         float* v = slider(prefix);
         if (!v) return;
-        *v = std::clamp(*v + float(dir) * (prefix == "CONTRASTE" ? 0.05f : 0.125f), 0.0f, 1.0f);
+        *v = std::clamp(*v + float(dir) * 0.125f, 0.0f, 1.0f);
         dirty = true;
-        if (prefix == "CONTRASTE") return;  // bbtime has no brightness control (kept as menu state only)
+        if (prefix == "CONTRASTE") { brightness = 0.25f + 1.75f * contrast, saveVideo(); return; }
         Settings st = loadSettings();
         st.musicVolume = int(std::lround(music * 100.0f)), st.sfxVolume = int(std::lround(sfx * 100.0f));
         if (const std::string err = saveSettings(st); !err.empty()) std::println(stderr, "bbtime: {}", err);
@@ -418,6 +522,7 @@ struct TbFront::Impl {
         for (const size_t o : {0x14a, 0x101, 0xff, 0xfe, 0x102, 0x100, 0x103, 0x108, 0x107, 0x104, 0x105, 0x106, 0x13d}) a.gd[o] = 0;
         a.kind = TbFrontAction::Load;
         a.level = s.level;
+        a.slot = s.slot;  // 0x48840c: later in-game saves go back to this file
         a.players = a.gd[0xa4] & 0x10 ? 2 : 1;
         return a;
     }
@@ -454,7 +559,16 @@ struct TbFront::Impl {
         const TbMenuItem& it = item(i);
         switch (it.type) {
         case TbItemType::Check:  // 0x41ab70: radio by family; non-changeable checks only run their Function
-            if (int n = 0; enabled(it) && it.changeable && family(it, &n) == "LANGUAGE_") language = n, dirty = true;
+            if (int n = 0; enabled(it) && it.changeable) {
+                const std::string f = family(it, &n);
+                if (f == "LANGUAGE_") language = n, dirty = true;
+                else if (f == "RENDERER_") renderer = n == 0 ? 2 : 1, saveVideo();
+                else if (f == "DETAILS_") details = n, saveVideo();
+                else if (f == "RESOLUTION_" && n < 5) {  // config.pc +0x10 -> the window size (Hor+ as before)
+                    resW = kRes[n].first, resH = kRes[n].second, saveVideo();
+                    a = {.kind = TbFrontAction::Resize, .width = resW, .height = resH};
+                }
+            }
             break;
         case TbItemType::Key:  // 0x41b1f0: wait for the key (keyboard pages; the gamepad layout is fixed here)
             if (it.enabled && !it.keyId.empty() && !it.keyId.starts_with("Joy_")) capture = i, dirty = true;
@@ -527,7 +641,8 @@ TbFront::~TbFront() = default;
 std::string TbFront::open(const fs::path& tbRoot, const fs::path& saves, KeyMap (&keys)[2], bool mute) {
     Impl& m = *d;
     m.keys = keys, m.mute = mute, m.saves = saves;
-    m.page = 0, m.hot = -1, m.hotRow = -1, m.capture = -1, m.dirty = true;
+    m.page = 0, m.hot = -1, m.hotRow = -1, m.capture = -1, m.dirty = true, m.quitBox = false;
+    m.idleDue = SDL_GetTicks() + 30000, m.demoLogged = false;  // 0x41c0f0 arms the attract timer at menu start
     m.loadSlots();
     if (!m.files.empty()) return {};  // already loaded: language / volumes / keys persist for the session
     std::error_code ec;
@@ -553,20 +668,47 @@ std::string TbFront::open(const fs::path& tbRoot, const fs::path& saves, KeyMap 
     m.bong = loadWav(m.files["bong.wav"]);
     const Settings st = loadSettings();
     m.music = float(st.musicVolume) / 100.0f, m.sfx = float(st.sfxVolume) / 100.0f;
+    m.resW = st.width, m.resH = st.height, m.renderer = st.tbRenderer, m.details = st.tbDetails;
+    m.brightness = st.tbBrightness, m.contrast = st.tbBrightness * 0.5f;  // 0x418bd0: slider = 0x639c20 · 0.5
+    // MessageBox font: Wine's Tahoma (what the oracle draws), else a common sans; the menu's own TTF as last resort.
+    for (const fs::path& f : {fs::path("/usr/share/wine/fonts/tahoma.ttf"), fs::path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+                              fs::path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+                              fs::path("/usr/share/fonts/liberation/LiberationSans-Regular.ttf"),
+                              fs::path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"), m.files["bradybun.ttf"]}) {
+        m.ui.close(), m.uiIcon.close();
+        if (m.ui.open(m.ft, f, -11) && m.uiIcon.open(m.ft, f, -24)) break;
+    }
     return {};
 }
 
 void TbFront::mouse(int x, int y) {
-    if (d->capture < 0) d->hover(x, y);
+    d->mx = x, d->my = y;
+    if (d->capture < 0 && !d->quitBox) d->hover(x, y);
 }
-TbFrontAction TbFront::click() { return d->capture >= 0 ? TbFrontAction{} : d->activate(d->hot); }
-void TbFront::nav(int dx, int dy) { d->nav(dx, dy); }
-bool TbFront::capturing() const { return d->capture >= 0; }
+TbFrontAction TbFront::click(bool mouse) {
+    Impl& m = *d;
+    if (m.quitBox) {  // a click answers only on a button; Enter / ✕ answers the focused one
+        if (!mouse) return m.quitAnswer(m.quitFocus);
+        const Impl::QuitLayout q = m.quitLayout();
+        for (int k = 0; k < 2; ++k)
+            if (q.btn[k].in(m.mx, m.my)) return m.quitAnswer(k);
+        return {};
+    }
+    return m.capture >= 0 ? TbFrontAction{} : m.activate(m.hot);
+}
+void TbFront::nav(int dx, int dy) {
+    if (!d->quitBox) d->nav(dx, dy);
+    else if (dx || dy) d->quitFocus ^= 1, d->dirty = true;  // two buttons: any arrow moves the focus
+}
+bool TbFront::capturing() const { return d->capture >= 0 || d->quitBox; }
+void TbFront::askQuit(bool exitApp) { d->askQuit(exitApp); }
+void TbFront::input() { d->idleDue = SDL_GetTicks() + 30000, d->demoLogged = false; }
 
 TbFrontAction TbFront::back() {
     Impl& m = *d;
+    if (m.quitBox) return {};  // MB_YESNO has no cancel: Esc does nothing
     if (m.capture >= 0) { m.capture = -1, m.dirty = true; return {}; }
-    if (m.page == 0) return {.kind = TbFrontAction::Quit};
+    if (m.page == 0) { m.askQuit(false); return {}; }  // bbtime's Esc on page 0 = the window's close (WM_CLOSE)
     int target = -1;  // the page's Back image (Call(n))
     m.forPage([&](int i) {
         if (target < 0 && m.item(i).name.starts_with("BACK") && m.item(i).fn == TbFn::Call) target = m.item(i).fnArg;
@@ -575,26 +717,62 @@ TbFrontAction TbFront::back() {
     return {};
 }
 
+// Quit box: Y / N answer, Enter / Space the focused button, arrows / Tab move the focus.
 // 0x41ba20: the key replaces the item's binding; another action of the same player holding it loses it ("???").
-void TbFront::captureKey(SDL_Scancode sc) {
+TbFrontAction TbFront::captureKey(SDL_Scancode sc) {
     Impl& m = *d;
-    if (m.capture < 0) return;
+    if (m.quitBox) {
+        if (sc == SDL_SCANCODE_Y || sc == SDL_SCANCODE_N) return m.quitAnswer(sc == SDL_SCANCODE_N);
+        if (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER || sc == SDL_SCANCODE_SPACE) return m.quitAnswer(m.quitFocus);
+        if (sc == SDL_SCANCODE_TAB || (sc >= SDL_SCANCODE_RIGHT && sc <= SDL_SCANCODE_UP)) m.quitFocus ^= 1, m.dirty = true;
+        return {};
+    }
+    if (m.capture < 0) return {};
     const TbMenuItem& it = m.item(m.capture);
     m.capture = -1, m.dirty = true;
-    if (sc == SDL_SCANCODE_ESCAPE) return;
+    if (sc == SDL_SCANCODE_ESCAPE) return {};
     const uint16_t bit = padBit(it.keyId);
     auto& keys = m.keys[it.keyId.starts_with("P2_") ? 1 : 0].keys;
     std::erase_if(keys, [&](const auto& k) { return k.first == sc && k.second != bit; });
     const auto own = std::ranges::find_if(keys, [&](const auto& k) { return k.second == bit; });
     if (own != keys.end()) own->first = sc;
     else keys.emplace_back(sc, bit);
+    return {};
 }
 
 const bb::Texture* TbFront::frame() {
+    d->idle();
     if (!d->dirty) return nullptr;
     d->dirty = false;
     d->compose();
     return &d->canvas;
+}
+
+bb::Texture ttfText(const fs::path& ttf, std::string_view s, int lfHeight) {
+    bb::Texture t;
+    FT_Library lib = nullptr;
+    Font f;
+    if (FT_Init_FreeType(&lib)) return t;
+    if (f.open(lib, ttf, lfHeight)) {
+        t.width = uint32_t(std::max(1, f.width(s) + lfHeight / 4)), t.height = uint32_t(f.cell);  // + italic overhang
+        t.rgba.assign(size_t(t.width) * t.height * 4, 0);
+        int x = 0;
+        for (const char c : s) {
+            if (FT_Load_Char(f.face, uint8_t(c), FT_LOAD_DEFAULT | FT_LOAD_RENDER)) continue;
+            const FT_GlyphSlot g = f.face->glyph;
+            for (unsigned r = 0; r < g->bitmap.rows; ++r)
+                for (unsigned k = 0; k < g->bitmap.width; ++k) {
+                    const int px = x + g->bitmap_left + int(k), py = f.ascent - g->bitmap_top + int(r);
+                    if (px < 0 || py < 0 || px >= int(t.width) || py >= int(t.height)) continue;
+                    uint8_t* p = &t.rgba[(size_t(py) * t.width + size_t(px)) * 4];
+                    p[0] = p[1] = p[2] = 255, p[3] = std::max(p[3], g->bitmap.buffer[r * size_t(g->bitmap.pitch) + k]);
+                }
+            x += int((g->advance.x + 32) >> 6);
+        }
+    }
+    f.close();
+    FT_Done_FreeType(lib);
+    return t;
 }
 
 } // namespace bbtime

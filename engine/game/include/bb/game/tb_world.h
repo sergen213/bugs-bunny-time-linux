@@ -195,6 +195,7 @@ public:
     // with it): S51 X=0 fadeIn(1, 0x100), X=1 fadeOut(2, 0x100) (holds black); S52 flash fadeIn(0x41, 0x400). The
     // level change (0x401910) is fadeOut(2, 0x100) + 16 world ticks, after the load (0x4018a0) fadeIn(1, 200).
     Fade fade;
+    int8_t bars = 0;                         // GD+0x9f letterbox as drawn this tick (0x464c30): |bars|·h/120 px top and bottom
     void fadeIn(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0, fade.dark = 0x1000; }
     void fadeOut(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0x1000, fade.dark = 0; }
     void fadeTick();
@@ -259,6 +260,7 @@ private:
     // Mover 0x4450c0; appends the entities the swept shape touched (actor contacts 0x448ce0, shape overlap I).
     void move(TbActor& a, const std::array<int32_t, 3>& target, std::vector<TbActor*>& touched);
     void switchTick();
+    void pauseTick();                        // 0x4014c0 head: Start -> S[9] = 1 + pause menu template 0x1d
     void cameraTick();
     void cameraSnap(const TbActor& t);
     int16_t camYaw() const;
@@ -301,6 +303,7 @@ private:
     int16_t textQueuePrio_ = 32000;          // 0x4d5b28
     uint8_t blink_ = 0;                      // 0x4cf188: palette 9 = white for 16 runs, yellow for 14
     bool camNodeDone_ = false;
+    bool pauseLatch_ = false;                // 0x4d02d0: Start must be released after a resume
     void hudSetup();                         // 0x462430
     void hudTick();                          // 0x463170
     bool slideStep(Slide& s);                // 0x461840

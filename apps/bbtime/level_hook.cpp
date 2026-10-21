@@ -133,7 +133,7 @@ Scene placeholderScene(GameId game, const std::string& level) {
 
 } // namespace
 
-Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& level, BzeFile* bzeOut) {
+Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& level, BzeFile* bzeOut, double tbBrightness) {
     const bool lit = game == GameId::LostInTime;
     const fs::path file = findPath(gameRoot, {"Datas", "bze", level + ".bze"});
     if (file.empty()) {
@@ -143,7 +143,7 @@ Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& l
     }
     try {
         BzeFile bze = loadBze(file);
-        Scene s = lit ? buildLitScene(bze, level) : buildTbScene(bze, level);
+        Scene s = lit ? buildLitScene(bze, level) : buildTbScene(bze, level, tbBrightness);
         if (!lit) {  // skinned TB actors (Bugs, Taz, NPCs) posed by packed-TOD animation (GAMEPLAY_TB.md §5)
             const size_t props = s.actors.size();
             addTbActors(s, bze);

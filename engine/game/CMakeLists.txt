@@ -14,6 +14,7 @@ add_library(bb_game STATIC
   src/tb_entities.cpp
   src/tb_hud.cpp
   src/tb_menu.cpp
+  src/tb_save.cpp
   src/sfx.cpp
 )
 target_include_directories(bb_game PUBLIC include)
@@ -58,6 +59,12 @@ target_compile_options(test_tb_menu PRIVATE -UNDEBUG)
 # Real Datas/data/menu.men (BBTIME_DATA); the Savedata.dat round trip always runs; 77 = skipped.
 add_test(NAME game.tb_menu COMMAND test_tb_menu)
 set_tests_properties(game.tb_menu PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_tb_save tests/test_tb_save.cpp)
+target_link_libraries(test_tb_save PRIVATE bb_game)
+target_compile_options(test_tb_save PRIVATE -UNDEBUG)
+# Real part: Wine-produced saves in BBTIME_SAVES or $BBTIME_DATA/../local/saves/tb (skipped without them).
+add_test(NAME game.tb_save COMMAND test_tb_save)
 
 add_executable(test_sfx tests/test_sfx.cpp)
 target_link_libraries(test_sfx PRIVATE bb_game)

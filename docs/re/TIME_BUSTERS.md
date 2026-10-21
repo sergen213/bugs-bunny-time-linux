@@ -169,7 +169,10 @@ one tick late; busy-wait when more than half a tick early; resync after 30 ticks
 | 0x08 | passed to 0x414770 (registry `language` writer) — *inferred* language |
 | 0x10 / 0x12 | u16 width / height |
 | 0x14 | fullscreen flag |
-| 0x28 | float used as `x·0.75 + 0.25` in the gamma-table builder 0x407580 — *inferred* brightness |
+| 0x18 | detail level 0 low / 1 medium / 2 high (0x409840: near slice = p1, (p1+far)/2 or far; tree C built only ≤ 1, MODELS.md) |
+| 0x28 | double, `x·0.75 + 0.25` = gamma of table 0x639de0 (0x407580: `trunc(256·(i/256)^(1/g))`, identity at g = 0 or 1); default 1, never written by the menu |
+| 0xd0 / 0xd8 / 0xe0 | doubles: hue shift (0), saturation × (1), **brightness** = intensity × (1; the Video slider, 0x639c20) of the HSI pass 0x407d30 on every CLUT colour at texture load (0x42d140 / 0x42df70, `0x639da4` = 1 always): RGB/255 → HSI (0x408270) → I × 0x639c20, ≤ 1 → RGB (0x407fe0, clamped) → ×255 truncated |
+| 0xe8 / 0xf0 | double scale (1) / s8 offset (0) of table 0x63ae80 (0x407580, `clamp(i·scale + offset)`) |
 | 0x40–0x4B | joystick button map (u8 × 12, `Joy_B1…B12`) |
 | 0x4C–0x87 | P1 keys, u32 each: up 0x4C, down 0x50, right 0x54, left 0x58, L1 0x5C, L2 0x60, R1 0x64, R2 0x68, Triangle 0x6C, Rond 0x70, Croix 0x74, Carre 0x78, select 0x7C, start 0x80, View 0x84 |
 | 0x88–0xC3 | P2 keys, same order: up 0x88 … View 0xC0 |
@@ -201,12 +204,28 @@ Tested by eye against the oracle shots.
 **Boot.** 0x41c0f0 probes the display modes, installs the three TTFs (0x416710: `Keystrok`, `adelaidn`, `Bradybun`,
 copied to `\FONTS\` and `AddFontResourceA`), creates the fonts (0x416850), loads the menu (0x4182b0, else
 "Couldn't load the menu file properly, check out your data directory"), reads `..\bin\Savedata.dat` (0x428e50) and
-shows page 0. It never calls PlayMusic (GAMEPLAY_TB §6.3). After 30 s without input it plays the attract AVI
-(resource string 10 + n, `%s%d.avi`; not ported). The window procedure 0x42e480 drives it with the **mouse only**:
+shows page 0. It never calls PlayMusic (GAMEPLAY_TB §6.3). **Attract** (R): the loop arms `GetTickCount + 30000`;
+WM_KEYDOWN (`0x6396e8`) and WM_LBUTTONDOWN / DBLCLK / RBUTTONDOWN / MBUTTONDOWN (`0x6396a4`) re-arm it, mouse moves do
+not. Once due, every loop pass formats resource string 10 `..\data\demo%d.avi` with `++n` (n is never reset by a
+missing file) and opens it (0x4140e0); a found file is played by 0x409df0 / 0x40a220 / 0x40a4c0 until it ends (then the
+next n at once) or a key / click stops it and repaints the page (n = 0). The PC disc ships no `demo*.avi`
+(start1–3.bmp are the `Start%d.%s` boot logos, not used here), so after 30 s the exe only busy-probes the data
+directory and **nothing on screen changes** until input re-arms the timer: Wine oracle `local/wine/tbmenu/w8_capture.sh`,
+inotify on `Datas/data` (`w8_inotify_per_second.txt`: ~145 000 directory scans/s from 30 s after the last click,
+through a mouse move at 61 s, stopping at the click at 67 s), screenshots `w8_idle_{00,25,35,65}s.png` /
+`w8_idle_after_click_10s.png` pixel-identical. The window procedure 0x42e480 drives it with the **mouse only**:
 WM_MOUSEMOVE → hover 0x41bc40, WM_LBUTTONDOWN / DBLCLK → click 0x41bf90 (+ hover), WM_KEYDOWN → key capture 0x41ba20
-(Controls pages only), WM_CLOSE → "quit?" message box. There is no keyboard or joystick navigation (bbtime adds a
-focus on top: arrows / d-pad move to the nearest actionable item, Enter / ✕ clicks it, Esc / ○ = the page's Back
-image or Quit on page 0).
+(Controls pages only). **WM_CLOSE** (also WM_QUIT, Alt+F4 via SC_CLOSE) in state 2: `MessageBoxA(text = string 4,
+caption = string 1, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST)`, each string's '~' segment number config +0x08:
+EN "Do you want to quit?" / "Bugs Bunny & Taz - Time Busters", FR "Veux-tu quitter ?" / "Bugs Bunny et Taz - La
+Spirale du Temps", DE "Möchtest du abbrechen?" / "… - Im Wettlauf gegen die Zeit", ES "¿Deseas salir?" / "…: La
+Espiral del Tiempo", IT "Vuoi uscire?" / "… - In Viaggio Nel Tempo", PT (5) "Você quer sair?" / "Pernalonga e Taz -
+Time Busters", NL "Wil je stoppen?" / "… - Op avontuur door de tijd"; IDYES → state 0 (exit; config.pc is written
+on the way out, R: +0xe0 kept), IDNO → the menu stays. The page-0 Quit image (`Cancel`) exits directly, without the
+box. R: `w8_quit_box_root.png` (Wine, no window manager → no caption drawn; 173×82 client, Yes default/focused),
+`n` → `w8_quit_no.png` (menu unchanged), Return → window gone. There is no keyboard or joystick navigation (bbtime
+adds a focus on top: arrows / d-pad move to the nearest actionable item, Enter / ✕ clicks it, Esc / ○ = the page's
+Back image, or the quit box on page 0).
 
 **File.** Latin-1, CRLF, `//` comments, sections `[NAME]` (≤ 31 chars, split at every `[`). A value is found with
 `strstr(section, "Key=")` — the first occurrence anywhere in the section, case-sensitive (0x416ba0) — up to the line
@@ -224,7 +243,7 @@ end, trailing spaces dropped; numbers are `atoi`. Keys:
 | `Function` | `Done` / `Done2` → 0x41a6e0 with 1 / 2: write `config.pc`, registry language, `0x48b1bc` = players, state 5 (the game; R: CCINTRO → GRANNY, "2 Players" → GD+0xA4 bit 0x10, 0x12 in play). `Cancel` → 0x41a6e0 with 0 = quit. `Call(n)` → 0x41a860 page n (re-texts every item if the language changed). `LoadSaveGame` 0x41b520, `DeleteSaveGame` 0x41b810 |
 | `Enable` | +0xac (`FALSE` = 0; every shipped section sets it) |
 | ISCHECK: `Selected`, `Changeable`, `CheckType` | initial check, `FALSE` = click only runs Function (Controls player / control-type checks switch pages 2 ↔ 5 ↔ 6), box template `CHECKBOX_ITEM_<CheckType>` |
-| ISSLIDE: `FillX` `FillY` | fill origin. `<P>_SLIDER` / `<P>_MIN` / `<P>_MAX` bind by prefix (0x418bd0): MUSIC (0x639b74 = v·80), SFX (0x639b70 = v·128), VOICES, CONTRASTE (double 0x639c20 = 0.25 + 1.75 v) |
+| ISSLIDE: `FillX` `FillY` | fill origin. `<P>_SLIDER` / `<P>_MIN` / `<P>_MAX` bind by prefix (0x418bd0): MUSIC (0x639b74 = v·80), SFX (0x639b70 = v·128), VOICES, CONTRASTE (double 0x639c20 = config +0xe0 = 0.25 + 1.75 v; v starts at 0x639c20 · 0.5, and 0x41adc0 stores 0.25 + 1.75 v on every draw, so merely showing the Video page turns 1.0 into 1.125 — R: peek 1 → 1.125, one `+` 1.34375, two `−` 0.90625) |
 | ISKEY: `KeyId`, `LinkedKey`, `Flags` | `P1_`/`P2_` + up down left right Croix Carre Rond Triangle L1 R1 L2 R2 (+ select start View), `Joy_B1..12`; a linked item mirrors the key (First View = camera L2 + R2) |
 | `LANGUAGE_n` `RESOLUTION_n` `RENDERER_n` `DETAILS_n` | name prefixes binding a check to language / mode (320×240 … 1024×768) / renderer / detail level |
 
@@ -242,7 +261,7 @@ the RGB triples at 0x48b0d8 and immediates):
 | ISTEXT 0x4197a0 | blue (8,25,204), hovered (9,128,237); center = centred on x |
 | ISLABEL 0x419c30 | red / grey, aligned in the rect (center with With 0 = centred on x) |
 | ISCHECK 0x419950 | box (coche1 checked / coche2) at x − 16 − 7, y + h/2 − 8 + 3; text at x,y: blue / checked (49,174,241), hovered (9,128,237) / checked (175,238,253), disabled grey |
-| ISSLIDE 0x419df0 / 0x41adc0 | Texte red, centred 30 above; bar `Up` at x,y; fill (181,0,51) from FillX − 6 over With·v, FillY..+Height. `_MIN` / `_MAX` step ∓0.125 (brightness 0.05) and play `..\data\bong.wav` at the effects volume (0x41b060) |
+| ISSLIDE 0x419df0 / 0x41adc0 | Texte red, centred 30 above; bar `Up` at x,y; fill (181,0,51) from FillX − 6 over With·v, FillY..+Height. `_MIN` / `_MAX` step ∓0.125 for every slider (the 0.05 meant for brightness is chosen by comparing the step with the 0x639c20 pointer, never true; R above); SFX / VOICES / MUSIC play `..\data\bong.wav` at the effects volume (0x41b060), CONTRASTE does not |
 | ISKEY 0x41a2a0 | Texte orange (247,176,72) at x,y (top: centred 0x17 above); key name in the alignment: white, hovered (32,0,255), waiting (128,64,255), disabled (160,160,160); unbound `???` |
 | ISLISTBOX 0x419f40 | Savedata texts, 22-px rows at x + 10, small font: (9,128,237), hovered (49,174,241), selected (248,230,0), both (175,238,253); UP / DOWN images scroll it |
 
@@ -256,14 +275,25 @@ GD+0x14a, 0xfe–0x108, 0x13d, sets GD+0x93 = language, start level = the record
 Delete (0x428fb0) drops the record, renumbers the rest 0..n−1, rewrites Savedata (deleted when empty), deletes
 `Savegame<slot>.dat` and renames the later files down by one.
 
-**bbtime mapping.** Saves in `$XDG_DATA_HOME/bbtime/saves/tb/` (list, load, delete; TB has no in-game save in bbtime
-yet, so the list is empty unless original files are copied there). Sound sliders = the audio device's music / effects
+**bbtime mapping.** Saves in `$XDG_DATA_HOME/bbtime/saves/tb/` (list, load, delete; written in play by the pause
+menu's "save game", formats/SAVE_TB.md). Sound sliders = the audio device's music / effects
 volume and `settings.ini` `music_volume` / `sfx_volume`. Controls: P1 / P2 keys rebind the session's TB keyboard maps
 (a key taken from another action leaves it `???`); the joystick page shows bbtime's fixed SDL gamepad layout (A X B LB
-RB Y LT RT) and is not rebindable. Video: 640×480, 3D card and high details are shown checked and the other choices
-disabled (bbtime renders at the window size, no detail levels); brightness moves but has no effect. Language: menu
-texts and backdrop for the session. Original Fidelity keeps the front end silent; Enhanced plays the collection
-menu's TB track.
+RB Y LT RT) and is not rebindable. Video (`settings.ini`, LAUNCHER.md): a resolution sets the window size (`width` /
+`height`; Hor+ framing as everywhere, fullscreen keeps the display mode; every size is enabled — the exe also greys
+modes its probe 0x42f880 rejects); renderer and detail level are kept (`tb_renderer`, `tb_details`) and shown but
+bbtime always draws with its own renderer at the high detail level (no software path, far-LOD tree C not drawn);
+brightness is the exe's (`tb_brightness` = +0xe0, the showing-the-page drift included) and applies from the next TB
+level load as `bb::tbAdjustColor` on every CLUT colour (both renderers: texture data). R: ARCA01 at +0xe0 = 0.25 /
+1 / 2 (`w8_bright.sh`, `w8_arca01_b*.png`): mean ratio to 1.0 = 0.248 / 1.83, bbtime 0.249 / 1.822
+(`local/shots/w8tbfront/cmp_arca01_brightness.png`, top oracle, bottom bbtime GL; VK the same). Quit box: drawn by us
+in the Windows 9x classic look (caption bar, IDI_QUESTION, Yes / No with underlined mnemonics, dotted focus) with the
+oracle's client layout; Y / N, Enter / Space, arrows / Tab, click on a button, d-pad + ✕; Esc does nothing (no
+Cancel). Esc on page 0 opens it (Yes → the collection menu), a window close opens it too (Yes → bbtime exits; a
+second close while it is open quits). Attract: the 30 s timer and its re-arm rules as above (key, mouse button, pad
+button, `--autoplay` press); when due bbtime logs once that `demo1.avi` is absent (or present: no AVI decoder is
+linked, so it is skipped like a missing file) and the menu stays. Language: menu texts and backdrop for the session.
+Original Fidelity keeps the front end silent; Enhanced plays the collection menu's TB track.
 
 ## 9. Aspect ratio / FOV globals
 

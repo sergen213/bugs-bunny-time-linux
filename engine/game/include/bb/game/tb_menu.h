@@ -3,6 +3,7 @@
 // Format and behaviour: docs/re/TIME_BUSTERS.md §8.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -56,11 +57,14 @@ TbMenu parseTbMenu(std::string_view text);
 
 // Savedata.dat (0x428e50 / 0x428d70): u32 count, "1.00\0", count records of 0x54 bytes: u8 slot (the %d of
 // Savegame%d.dat, renumbered 0..n-1 on delete), char text[0x4b] "<date>, <time>, <percent>%", u32 level (GD+0) at
-// +0x4c, +0x50 the in-memory next pointer (written, never read).
+// +0x4c, +0x50 the in-memory next pointer (written, never read). docs/formats/SAVE_TB.md.
 struct TbSaveSlot {
     int slot = 0;
     std::string text;
     int level = 0;
+    // The record as read: the writer lays slot / text + NUL / level over it, so the bytes after the text keep what
+    // the original left there (0xcd heap fill of a new record, the tail of a longer old text). +0x50 is written 0.
+    std::array<uint8_t, 0x54> raw{};
 };
 std::vector<TbSaveSlot> parseTbSavedata(std::span<const uint8_t> bytes);  // empty if short / malformed
 std::vector<uint8_t> writeTbSavedata(std::span<const TbSaveSlot> slots);

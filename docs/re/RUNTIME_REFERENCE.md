@@ -213,8 +213,9 @@ XWayland; `tools/wine/compare.py ORIG BB OUT` writes `[original | bbtime | |diff
 Brightness rule (R + S): LiT `bugs.exe` GL renderer (`0x4ac094` = 2) multiplies by colour byte/255 (no doubling) and
 uploads CLUT texels `<< 3` through table `0x4b5b40` = trunc(256·(i/256)^(5/6)) (`0x422a40`, exponent `0x45ca08`;
 enabled `0x4ac034` = 1 at runtime; read live: 0,25,45,…,255) then identity table `0x4d5d40`. TB `bblit2.exe` has the
-same two-table stage (`0x639da4` = 1) but both tables (`0x639de0`, `0x63ae80`) are identity at runtime. bbtime Original
-Fidelity now uses colour scale 1.0 + `Scene::pcTexGamma` (LiT 5/6, TB 1); Enhanced keeps the PS1 ×255/128 look.
+same two-table stage (`0x639da4` = 1) but both tables (`0x639de0`, `0x63ae80`) are identity at runtime; its CLUT
+colours then go through the HSI brightness pass 0x407d30 (config +0xe0, 1 by default; wave 8: `bb::tbAdjustColor`, §16).
+bbtime Original Fidelity now uses colour scale 1.0 + `Scene::pcTexGamma` (LiT 5/6, TB 1); Enhanced keeps the PS1 ×255/128 look.
 FOV: Original Fidelity is fixed at 51.28° in both backends (`bb/render/camera.h`); camera eye +400: the code already
 matched (§6 item 2 was a doc-only error). §6 item 3: the play camera is initialised by the load-time update
 (`LitWorld::loadUpdate`, 0x430f80) and the type-36 camera director 0x444b50 + camera 0xc00 mode are ported; first
@@ -373,3 +374,28 @@ save3: slot 2 = 333 / 124).
 | Quit game | S[0x1c] = 3 → the Windows "Do you really want to quit? Yes / No" box (`o_quit.png`) | Consistent (bbtime returns to its collection menu by design) |
 | slot menu text | panel, lines "N. Empty" / "2. ° 333 ± 124", green cursor line, Load / New / Quit row | **Verified** (glyph positions coincide in `side_loadsel.png`) |
 | copyright plane | text spans x 5..634 at 640×480 | **Verified** after the fix: type-0 behaviour 0x43eee0 builds one rigid part (0x448980, model object, identity coordinate under the actor root) and never plays a TOD, so the plane's anim 163 root scale (6336, 4505) is not applied; only tag 0x12 (1.2, 1.2). bbtime had looped anim 163 (1.86× / 1.32× total) |
+
+## 15. LiT music (wave 8; Proton-GE with `AUDIO=1` into a PulseAudio null sink, `/b04`; formats/AUDIO_XA.md)
+
+Capture `local/wine/litmusic/capture.sh`: `trace.csv` polls `DAT_004b39d4` (wanted), `DAT_004abf94` (open track),
+`DAT_00553394` (stream playing), fade `0x4b3232`, speech `0x4b2277`, player zone `+0x26`, `0x4b3b76`, GD+0;
+`fds.log` lists the `track/*.xa` files the process holds open every 0.5 s; level 7 poked at ~15 s (GD+0, 0x4b39bc).
+
+| check | original (R) | verdict |
+|---|---|---|
+| L01A track | zone 2 → wanted 2, `TRACK2.xa` open, playing | **Verified** (`game.sfx` table + `musicTick`; app opens Track2.xa) |
+| level change | fade-out mode 2 → playing 0 the next sample; L01D1 loaded (counter 1): wanted 4, `TRACK4.xa` open and playing over the loading screen until the fade in (mode 1, ~3.0 s after the load) stops it; mode 0 at counter 37, playing again at 39 | **Verified** (`loadUpdate` → `musicTick`; app plays the loaded level's music during the hold) |
+| speech | L01D1 intro speech S[0x17] 2 → 4 (counter 111–359): playing 0, then restarts at 361 | **Verified** (music 0 while S[0x17]; bbtime's speech length is the audio-less path's clip time) |
+
+## 16. TB front end idle, quit box, brightness (wave 8; system Wine `RUNNER=wine`; TIME_BUSTERS.md §8.1)
+
+Scripts `local/wine/tbmenu/w8_capture.sh` (menu) and `w8_bright.sh` (ARCA01 `/skip_intro /b28`, E, camera from
+`cam.py` = `--camera -4928,369,8434,-0.75129,-0.04901`), both under `flock /tmp/bbtime-tb-oracle.lock`; config.pc
+restored afterwards.
+
+| check | original (R) | verdict |
+|---|---|---|
+| attract after 30 s idle (0x41c0f0, `demo%d.avi` absent) | inotify on `Datas/data`: none for 30 s after the last click, then ~145 000 directory scans/s (the per-pass `demo<n>.avi` probes) that a mouse move does not stop and a click does; screenshots at 0 / 25 / 35 / 65 s and 10 s after the click pixel-identical (`w8_inotify_per_second.txt`, `w8_idle_*.png`) | **Verified**: bbtime keeps the menu unchanged (`local/shots/w8tbfront/title_00s.png` = `idle_after30s.png`, taken at 31 s after the "idle 30 s" log line) |
+| WM_CLOSE (Alt+F4) | MessageBox "Do you want to quit?", Yes (default, focused) / No, question icon; `n` → menu unchanged; Return → exit (`w8_quit_box_root.png`, `w8_quit_no.png`) | **Verified** text / buttons / outcomes; look = Windows 9x classic by choice (Wine draws no caption without a WM): `local/shots/w8tbfront/cmp_quit_box_full.png` |
+| brightness slider | `0x639c20` 1 at the title, 1.125 once the Video page is shown, 1.34375 after `+`, 0.90625 after `−` `−` | **Verified** (`TbFront`: same values in `settings.ini` `tb_brightness`) |
+| brightness in a level | ARCA01 mean at +0xe0 = 0.25 / 1 / 2: (15.1 15.8 20.9) / (60.7 63.5 84.2) / (110.3 116.3 154.6), ratios 0.248 / 1.83 | **Verified**: bbtime GL (Xvfb llvmpipe, 600 frames) 0.249 / 1.822, mean abs diff 1.2 / 4.8 / 7.5 (`local/shots/w8tbfront/cmp_arca01_brightness.png`); VK at 2 the same mean ±0.5 |

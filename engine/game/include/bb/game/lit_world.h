@@ -192,7 +192,7 @@ struct OverlayGlyph {
     uint8_t ch = 0;     // script byte
     uint8_t glyph = 0;  // 1-based font glyph (table 0x4ae3a8[ch]): Scene::overlayFont[glyph - 1]
     int16_t x = 0;
-    int8_t y = 0;
+    int16_t y = 0;      // TB's s16 (paged text boxes lay out whole pages before their shift); LiT stays in s8
     uint8_t pal = 0;
 };
 
@@ -250,8 +250,9 @@ public:
     // the player behaviour, which resets the camera to the spawn (0x431160). Call after start() and any GAME_DATA
     // restore (the start director reads G), before the first tick(). It stands for counters 1 and 3 (tick t = counter
     // 2t + 3): the HUD actor shows every counter in the load pass and runs again in the counter-3 tick (Wine: the
-    // elements fly out from counter 121 = after the 60-tick hold counted from counter 1).
-    void loadUpdate() { cameraTick(); actorsTick(); cameraNodes(); hudTick(); hudTick(); }
+    // elements fly out from counter 121 = after the 60-tick hold counted from counter 1). Then 0x41d900 opens the
+    // zone's track (Wine: it plays over the rest of the loading screen until the fade in stops it).
+    void loadUpdate() { cameraTick(); actorsTick(); cameraNodes(); hudTick(); hudTick(); musicTick(); }
     const ActorModel* playerModel() const { return model_; }
 
     Heightfield hf;
@@ -292,6 +293,18 @@ public:
     // quitRequest (the exe's 0x45f2b0 = 0x14 "Do you really want to quit?" dialog; the app returns to its menu).
     uint32_t saveMask = 0;
     bool quitRequest = false;
+    // XA music (formats/AUDIO_XA.md "Music selection"): section-1 chunk 0x05 tag 0x06 {zone, track, track2} (0x41d8b0,
+    // max 40). musicTick = the per-tick effect of 0x41d900 (entry of the player's zone +0x26, picked when the zone
+    // changes), 0x41edb0 (a stopped stream reopens the entry's track2) and 0x41d630's silence while a fade 0x4b3232 or
+    // speech S[0x17] runs. music: ..\track\Track<music>.xa to stream now (0 = silence; a change reopens the file),
+    // musicNext: the track that follows when it ends (= music: loop); musicPaused: 0x41d5c0 (help / pause, resumed).
+    std::vector<std::array<uint8_t, 3>> musicZones;
+    uint8_t music = 0, musicNext = 0;
+    bool musicPaused = false;
+    void musicTick();
+    // Overlay font tables (lit_overlay.cpp): 0x4ae3a8 byte -> 1-based glyph (Scene::overlayFont), 0x4ae4a8 pen advance.
+    static uint8_t fontGlyph(uint8_t c);
+    static uint8_t fontAdvance(uint8_t c);
 
     int health() const { return G[1]; }
     int carrots() const { return G[3]; }
@@ -416,6 +429,9 @@ private:
     uint8_t speech_ = 0;             // 0x4b322e playing speech id (A81)
     uint32_t speechStart_ = 0, speechMs_ = 0;  // 0x4b1c68 start (tick) / 0x4b1c60 length (ms)
     void speechTick();               // 0x41e2b0 status S[0x17] (lit_world.cpp)
+    uint8_t musicTrack_ = 0;         // 0x4b39d4 the zone entry's track (0 at load / outside every entry's zone)
+    int musicEntry_ = -1;            // 0x54efc4 current entry (index into musicZones)
+    int32_t musicZone_ = 0xffff;     // 0x4b3b76 zone the entry was picked for (0xffff at level init)
     bool helpRequest_ = false;       // 0x4b1a2c F1 help request (consumed by tick step 7)
 
     // lit_hud.cpp: HUD actor 0x44acc0 (type 6). Shown values start at 0xff / -1 (0x4474b0).

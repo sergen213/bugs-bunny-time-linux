@@ -89,6 +89,9 @@ Settings parseSettings(std::string_view text, std::vector<std::string>* warnings
         else if (key == "vsync") ok = boolean(v, s.vsync);
         else if (key == "music_volume") ok = number(v, s.musicVolume, 0, 100);
         else if (key == "sfx_volume") ok = number(v, s.sfxVolume, 0, 100);
+        else if (key == "tb_brightness") ok = number(v, s.tbBrightness, 0.25f, 2.0f);
+        else if (key == "tb_renderer") ok = number(v, s.tbRenderer, 1, 2);
+        else if (key == "tb_details") ok = number(v, s.tbDetails, 0, 2);
         else if (key == "update_url") s.updateUrl = v;
         else if (key.starts_with("bind.")) {
             const std::string action = key.substr(5);
@@ -118,6 +121,9 @@ std::string formatSettings(const Settings& s) {
     kv("vsync", s.vsync ? "true" : "false");
     kv("music_volume", s.musicVolume);
     kv("sfx_volume", s.sfxVolume);
+    kv("tb_brightness", s.tbBrightness);
+    kv("tb_renderer", s.tbRenderer);
+    kv("tb_details", s.tbDetails);
     kv("update_url", s.updateUrl);
     for (const auto& [a, k] : s.bindings) kv("bind." + a, k);
     for (const auto& [k, v] : s.unknown) kv(k, v);

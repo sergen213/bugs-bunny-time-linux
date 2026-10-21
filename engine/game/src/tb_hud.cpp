@@ -73,6 +73,11 @@ uint16_t be16(const std::vector<uint8_t>& d, size_t p) { return p + 2 <= d.size(
 
 // ------------------------------------------------------------------------------------------------ fade
 void TbWorld::fadeTick() {  // 0x464ef0
+    // 0x464c30 (same frame, before 0x464ef0): cinematic letterbox GD+0x9f (s8) drawn as two black bars of
+    // |v|·h·2/240 px, then stepped by 2 per frame: positive (logic sets 2) grows to 16, negative (logic sets -16)
+    // shrinks back to 0, which ends the cut-scene state (pause, R1 / L1 and player control test GD+0x9f).
+    bars = int8_t(GD[0x9f]);
+    if (bars < 0 || (bars > 0 && bars < 0x10)) GD[0x9f] = uint8_t(GD[0x9f] + 2);
     Fade& f = fade;
     if (!f.mode) {
         f.dark = S[9] ? 0xe00 : 0;  // paused: dimmed (the 0x4d2764 menu case is not ported)
@@ -133,12 +138,23 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
     uint32_t status = 0x40;
     int minDigits = 0;
     std::string number;
-    bool menu = false, fitBox = false;
+    bool fitBox = false;
     std::optional<std::array<int16_t, 4>> box;
+    // Paged text box (op 0x1c): 0x466d50 locals 0x40..0x20 = {+4 line, +5 page being laid out, +6 shown page (S[0x38]),
+    // +7 more pages follow, +8 pen x from -half, +0xc pen y, +0x18 glyphs, +0x1a lines per page ('E' = log of +0x1d
+    // lines), +0x1b lines used, +0x1c 1 laid out by 0x4668f0 / 2 after op 3/4 (plain text, 0x466b20 still finishes)}.
+    struct {
+        uint8_t on = 0, line = 0, page = 0, shown = 0, more = 0, used = 0, extra = 0, lines = 1;
+        int32_t x = 0, y = 0;
+        int16_t count = 0;
+        size_t first = 0;  // its first glyph
+    } pb;
+    constexpr int32_t kHalf = 0xdc;  // +0x1e half width (+0x20 x offset stays 0)
     // Pen of the last emission (0x466d50 locals 0x68 / 0x64): set before each op's text even when it is skipped.
     int32_t penX = 0, penY = 0;
     const size_t runStart = glyphs.size();
-    size_t lineStart = runStart, lineCount = 0;
+    size_t lineStart = runStart;
+    int32_t lineCount = 0;  // local_a4: glyphs on the line (the box's word re-layout can leave it negative)
     auto shiftLine = [&](int a) {  // right / centre alignment of the current line by its width
         const int32_t w = a == 0 ? 0 : a == 1 ? int16_t(width) >> 1 : width;
         for (size_t i = lineStart; i < glyphs.size(); ++i) glyphs[i].x = int16_t(glyphs[i].x - w);
@@ -154,6 +170,7 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
         bounds(shiftLine(a));
         bottom += 0xd;
         width = 0, lineCount = 0, lineStart = glyphs.size();
+        pb.x = kHalf + 1;  // local_38 = half + 1: the box's next glyph starts a new line
     };
     auto emit = [&](std::string_view s, int32_t x, int32_t y, int16_t pl) {  // 0x466810
         const int32_t x0 = x;
@@ -161,7 +178,7 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
             const uint8_t b = uint8_t(ch);
             if (const uint8_t g = kGlyph[b]) {
                 const bool plain = std::ranges::contains(kUntinted, uint8_t(g - 1));
-                glyphs.push_back({b, g, int16_t(x), int8_t(std::clamp(y, -128, 127)), uint8_t(plain ? 5 : pl == 9 ? pal9 : pl)});
+                glyphs.push_back({b, g, int16_t(x), int16_t(y), uint8_t(plain ? 5 : pl == 9 ? pal9 : pl)});
                 ++lineCount;
                 x += kAdvance[b];  // advance x 0x639abc (1.0 at 640x480 and above)
             } else if (b == ' ') {
@@ -172,22 +189,95 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
         }
         return x - x0;
     };
+    auto boxEmit = [&](std::string_view s, int16_t pl) {  // 0x4668f0: word-wrapped, only the shown page emits
+        if (pb.more) return;
+        int32_t word = 0, space = -1;  // glyphs since the last space (shown page), index of that space
+        int32_t lim = pb.line == pb.lines - 1 ? kHalf - 0x1e : kHalf;  // the last line leaves room for the arrows
+        for (int32_t i = 0, guard = 0; i < int32_t(s.size()) && guard < 4096; ++i, ++guard) {
+            if (lim < pb.x) {  // wrap: the unfinished word is laid out again on the new line
+                lineCount = 0, lim = kHalf;
+                ++pb.line, ++pb.used;
+                pb.x = -kHalf, pb.y += 0xd;
+                i = space + 1;
+                if (pb.line >= pb.lines) pb.y = 0, pb.line = 0, ++pb.page;
+                if (pb.line == pb.lines - 1) lim -= 0x1e;
+                if (pb.shown <= pb.page) {
+                    glyphs.resize(glyphs.size() - size_t(word));
+                    pb.count = int16_t(pb.count - word), lineCount -= word;
+                    if (pb.used >= pb.lines) pb.used = uint8_t(pb.lines - 1);
+                    if (pb.shown < pb.page) {
+                        pb.more = 1;
+                        return;
+                    }
+                }
+            }
+            const uint8_t b = uint8_t(s[size_t(i)]);
+            if (const uint8_t g = kGlyph[b]) {
+                if (pb.page == pb.shown) {
+                    const bool plain = std::ranges::contains(kUntinted, uint8_t(g - 1));
+                    glyphs.push_back({b, g, int16_t(pb.x), int16_t(pb.y), uint8_t(plain ? 5 : pl == 9 ? pal9 : pl)});
+                    ++word, ++pb.count;
+                }
+                ++lineCount;
+                pb.x += kAdvance[b];
+            } else if (b == ' ' || b == '\t') {
+                word = 0, space = i, pb.x += b == ' ' ? 6 : 0x18;
+            } else if (b == '_') {  // unbreakable space
+                pb.x += 6;
+            }
+        }
+        if (pb.used >= pb.lines) pb.used = uint8_t(pb.lines - 1);
+    };
+    auto boxFinish = [&] {  // 0x466b20 at op 0x11: centre a one-line text, place the page, arrows, rect, paging
+        const int32_t lift = GD[0x9f] ? 10 : 0;
+        if (pb.lines == 'E') pb.used = pb.extra;
+        const size_t end = std::min(glyphs.size(), pb.first + size_t(std::max<int16_t>(pb.count, 0)));
+        int32_t half = kHalf;
+        if (pb.page == 0 && pb.line == 0) {
+            half = (pb.x + kHalf) >> 1;
+            for (size_t i = pb.first; i < end; ++i) glyphs[i].x = int16_t(glyphs[i].x + kHalf - half);
+        }
+        int32_t y0;
+        if (pb.shown < 1 && !pb.more) {
+            y0 = pb.extra == 0 ? 0x4b - pb.line * 0xd : 0x4b - pb.extra * 0xd;
+            if (pb.extra && pb.extra - 1 <= pb.line) y0 += (pb.extra - pb.line - 1) * 0xd;
+        } else {  // page arrows (0-based records 0x87 / 0x86 left, 0x85 / 0x84 right: the dim one at an end)
+            y0 = 0x58 - pb.lines * 0xd;
+            for (const auto& [rec, dx] : {std::pair{pb.shown == 0 ? 0x87 : 0x86, -0xf}, {pb.more ? 0x84 : 0x85, -5}}) {
+                const bool plain = std::ranges::contains(kUntinted, uint8_t(rec));
+                glyphs.push_back({0, uint8_t(rec + 1), int16_t(kHalf + dx), int16_t(0x4b - lift), uint8_t(plain ? 5 : pal9)});
+            }
+        }
+        for (size_t i = pb.first; i < end; ++i) glyphs[i].y = int16_t(glyphs[i].y + y0 - lift);
+        if (textBoxes.size() < 5)
+            textBoxes.push_back({int16_t(-half - 10), int16_t(y0 - lift + 3), int16_t(half * 2 + 0x14), int16_t((pb.used + 1) * 0xd)});
+        const uint16_t edge = pads[0].held & ~pads[0].prevRaw;  // GD+0xa & ~GD+0x10
+        if ((edge & 0x8000) && pb.shown > 0) --pb.shown;  // left: previous page
+        if ((edge & 0x2000) && pb.more) ++pb.shown;       // right: next page
+        S[0x38] = pb.shown;                               // 0x4d24d8
+    };
     // Ops 0x11 (timed: the last line also grows the box, bottom >= pen y + 16) / 0x18 (end: aligned only): this
     // run's off-screen glyphs dropped, then the box.
     auto finish = [&](int a, bool timed) {
         const int32_t w = shiftLine(a);
         int32_t bot = bottom;
         if (timed) bounds(w), bot = std::max(bottom, penY + 0x10);
-        glyphs.erase(std::remove_if(glyphs.begin() + std::ptrdiff_t(runStart), glyphs.end(),
-                                    [](const OverlayGlyph& g) { return g.x <= -0x120 || g.x >= 0x100; }),
-                     glyphs.end());
+        size_t kept = runStart;  // compact this run's on-screen glyphs (the box's first glyph moves with them)
+        const size_t first = pb.first;
+        for (size_t i = runStart; i < glyphs.size(); ++i) {
+            if (glyphs[i].x <= -0x120 || glyphs[i].x >= 0x100) {
+                if (i < first) --pb.first;
+                continue;
+            }
+            glyphs[kept++] = glyphs[i];
+        }
+        glyphs.resize(kept);
         if (box) {
             const auto& b = *box;
             textBoxes.push_back(fitBox ? std::array<int16_t, 4>{int16_t(minX - b[0]), int16_t(minY - b[1]),
                                                                int16_t(maxX - minX + b[0] + b[2]), int16_t(bot - minY + b[1] + b[3])}
                                        : b);
         }
-        if (menu) unsupported.insert("text menu 0x1c (0x4668f0)");
     };
     for (int guard = 0; guard < 4096 && p + 3 <= d.size(); ++guard) {
         const uint8_t op = d[p];
@@ -197,8 +287,8 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
         switch (op) {
         case 1: yBase += 0xd; finishLine(prevAlign); break;
         case 2: if (e) e->id = be16(d, q); q += 2; break;
-        case 3: xBase = int16_t(be16(d, q)), q += 2; finishLine(prevAlign); break;
-        case 4: yBase = int16_t(be16(d, q)), q += 2; finishLine(prevAlign); break;
+        case 3: xBase = int16_t(be16(d, q)), q += 2; pb.on += pb.on == 1; finishLine(prevAlign); break;
+        case 4: yBase = int16_t(be16(d, q)), q += 2; pb.on += pb.on == 1; finishLine(prevAlign); break;
         case 5: pal = int8_t(d[q]) == 0x45 ? 9 : int8_t(d[q]), q += 1; break;
         case 6: status = 0x40; break;
         case 7: case 8: case 9:
@@ -227,6 +317,7 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
             if (n) {
                 if (e) e->stateTicks = 0, e->textTime = n;
                 finish(align, true);
+                if (pb.on) boxFinish();
                 return 0;
             }
             if (e) e->textTime = 2;
@@ -248,7 +339,14 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
             q += 8;
             break;
         case 0x1a: case 0x1b: bitOp = op, bit = be16(d, q), q += 2; break;
-        case 0x1c: menu = true, q += 1; break;  // multi-page text box (0x4668f0 / 0x466b20): not ported
+        case 0x1c: {  // paged text box: n lines per page (0 -> 1, > '2' -> 'E' with n - '2' lines)
+            const uint8_t n = d[q];
+            q += 1;
+            pb.extra = n > '2' ? uint8_t(n - 0x32) : 0;
+            pb.lines = n == 0 ? 1 : n > '2' ? 'E' : n;
+            if (!pb.on) pb.on = 1, pb.shown = S[0x38], pb.x = -kHalf, pb.first = glyphs.size();
+            break;
+        }
         case 0x1d: minDigits = int8_t(d[q]), q += 1; break;
         default: break;  // 0 / 0x17 / 0x19 (second list layer, drawn with the first) / > 0x1d: text only
         }
@@ -265,14 +363,21 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
             if (set != (bitOp == 0x1a)) pl = -1;
         }
         penX = width + xBase + orgX, penY = yBase + orgY;
-        if (pl == -1 || orgX < -0x1ff || orgX > 0x1ff || penY < -0x83 || penY > 0x77 || menu) {
+        if (pl == -1 || orgX < -0x1ff || orgX > 0x1ff || penY < -0x83 || penY > 0x77) {
             number.clear();
         } else {
-            if (!number.empty()) width += emit(number, penX, penY, pl), number.clear();
             const size_t end = start + len;
-            if (q < end && end <= d.size()) {
-                width += emit(std::string_view(reinterpret_cast<const char*>(d.data() + q), end - q), width + xBase + orgX, penY, pl);
-                penX = width + xBase + orgX;
+            const std::string_view text = q < end && end <= d.size()
+                ? std::string_view(reinterpret_cast<const char*>(d.data() + q), end - q) : std::string_view();
+            if (pb.on == 1) {
+                if (!number.empty()) boxEmit(number, pl), number.clear();
+                boxEmit(text, pl);
+            } else {
+                if (!number.empty()) width += emit(number, penX, penY, pl), number.clear();
+                if (!text.empty()) {
+                    width += emit(text, width + xBase + orgX, penY, pl);
+                    penX = width + xBase + orgX;
+                }
             }
         }
         if (!len) break;
@@ -285,6 +390,7 @@ uint32_t TbWorld::textSpawn(uint16_t script, int16_t prio) {  // 0x4680b0 (new e
     TbActor* e = spawn(0x18, {}, 0);
     if (!e) return 0;
     e->textScript = uint16_t(script | 0x8000), e->textPrio = prio, e->textTime = 0;
+    if (S[9]) e->flags1 |= 0x40000000;  // spawned while paused: keeps ticking (0x460630)
     const uint32_t st = textRun(e, script, prio);
     if (prio > 0 && size_t(script) * 2 + 2 <= textBlock_.size()) {  // display time from the script's op 0x11
         e->stateTicks = 0;
@@ -301,7 +407,7 @@ uint32_t TbWorld::textSpawn(uint16_t script, int16_t prio) {  // 0x4680b0 (new e
 
 void TbWorld::textTick(TbActor& a) {  // 0x450d00
     if (a.textTime > 0 && a.stateTicks == uint16_t(a.textTime)) {
-        a.f20 |= 0x2000;  // no continuation page (+0x17c is only set by the unported multi-page op 0x1c)
+        a.f20 |= 0x2000;  // no continuation page (+0x17c: nothing in 0x466d50 sets it)
         return;
     }
     if (a.textScript & 0x8000) {  // the spawner drew it this tick

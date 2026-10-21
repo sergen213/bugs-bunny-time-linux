@@ -3,7 +3,9 @@
 // (dir containing tb/) for the real file; 77 = skipped.
 #include "bb/bze.h"
 #include "bb/game/tb_menu.h"
+#include "bb/tb_level.h"
 
+#include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +21,17 @@ int main() {
     const std::vector<TbSaveSlot> back = parseTbSavedata(raw);
     assert(back.size() == 2 && back[0].text == slots[0].text && back[1].slot == 1 && back[1].level == 51);
     assert(parseTbSavedata(std::span(raw).first(20)).empty());
+
+    // Video page brightness (0x407d30 HSI pass, expected values from the exe's double arithmetic): 1.0 still drops
+    // channels by the RGB/255 -> HSI -> ×255 truncation, 2.0 clamps, greys stay grey.
+    const auto adj = [](std::array<uint8_t, 3> c, double k) { bb::tbAdjustColor(c.data(), k); return c; };
+    assert((adj({248, 8, 8}, 1.0) == std::array<uint8_t, 3>{247, 8, 8}));
+    assert((adj({128, 128, 128}, 1.0) == std::array<uint8_t, 3>{128, 128, 128}));
+    assert((adj({248, 248, 248}, 1.0) == std::array<uint8_t, 3>{247, 247, 247}));
+    assert((adj({200, 100, 50}, 2.0) == std::array<uint8_t, 3>{255, 200, 100}));
+    assert((adj({200, 100, 50}, 0.25) == std::array<uint8_t, 3>{49, 25, 12}));
+    assert((adj({16, 64, 200}, 1.125) == std::array<uint8_t, 3>{17, 71, 225}));
+    assert((adj({0, 0, 0}, 2.0) == std::array<uint8_t, 3>{0, 0, 0}));
 
     const char* data = std::getenv("BBTIME_DATA");
     const fs::path file = data ? fs::path(data) / "tb/Datas/data/menu.men" : fs::path();

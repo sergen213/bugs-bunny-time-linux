@@ -36,6 +36,8 @@ out-of-range values are skipped with a `line N:` warning and the default stays. 
 | `fov` | 30–120 degrees vertical at 4:3, Hor+ wider (60) | `Settings::vfovDeg` |
 | `msaa` | 0, 2, 4, 8 (4) | `WindowConfig::msaaSamples` |
 | `music_volume`, `sfx_volume` | 0–100 (100) | audio |
+| `tb_brightness` | 0.25–2 (1) | TB texture brightness = `config.pc` +0xe0 of the TB Video page (`bb::tbAdjustColor`) |
+| `tb_renderer`, `tb_details` | 1–2 (2), 0–2 (2) | TB Video page renderer / detail choice, kept and shown only |
 | `bind.<action>` | comma-separated SDL key names | keyboard map |
 | `update_url` | https URL of `manifest.json` (empty) | launcher updater only |
 

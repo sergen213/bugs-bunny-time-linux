@@ -65,6 +65,10 @@ and rendering uses the camera computed at step 3a.
   reset `DAT_004b24a4 = 1`, then one load-time actor update `0x447d40` (initialises behaviours, camera reset
   `0x431160` via the player), audio restart, fade-in `0x44be90(1,0x100)`, two unrendered ticks (loop `iVar1 < 2`
   at 0x406a3a.. calling `0x4065e0` + `0x40a530`), then normal rendered play.
+* Audio restart = 0x41d620 / 0x41d5f0 / **0x41d900**: the loaded level's zone track opens at once. Runtime (L01A →
+  L01D1, RUNTIME_REFERENCE.md §15): the BZE loads ~0.5 s after the fade-out, `TRACK4.xa` then plays over the loading
+  screen and the fade in starts 3.0 s after the load (the 3000 ms minimum ends after the load here), stopping the
+  music until the fade ends (formats/AUDIO_XA.md "Music selection").
 * L01A start (R; runtime: RUNTIME_REFERENCE.md §3, `csv/lit_spawn.csv`, `csv/litworld_L01A_idle.csv`): player state
   2 at counter 3, **scripted walk-in** state 130 from counter 5 (+25 z/tick, z 8830 → 9655), state 1 at counter 71.
   Camera flags `0x4b3940` = 0x440 during the walk-in, 0x40 for 10 ticks, then 0 (§5).

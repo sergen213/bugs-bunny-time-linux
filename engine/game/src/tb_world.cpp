@@ -340,7 +340,7 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
     for (auto& [bid, items] : w.globalBlocks_) linkSkips(items);
     // Spawnable templates (V 0x10/0x800 targets) reachable from any logic: prototype entity (0x460b00 copies it
     // whole) with its model, rig and anims.
-    std::set<uint16_t> want{0x18}, done;  // 0x18: the overlay text entity S30 / R 0x22 spawn (0x4680b0)
+    std::set<uint16_t> want{0x18, 0x1d}, done;  // 0x18: overlay text (S30 / R 0x22, 0x4680b0); 0x1d: pause menu (0x4014c0)
     for (TbActor* a : w.order())
         for (const auto& [bid, b] : a->blocks) spawnTemplates(b, want);
     for (const auto& [bid, b] : w.globalBlocks_) spawnTemplates(b, want);
@@ -375,7 +375,14 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
                                       : std::array<int16_t, 2>{1, 1});
     // End of load (0x4347c0): Bugs / Taz health from GAME_DATA +0xa5 / +0xa6 (new game: 6, lives 3).
     if (gd) w.GD = *gd;
-    else w.GD[0xa0] = 3, w.GD[0xa5] = w.GD[0xa6] = 6;
+    else w.GD[0xa0] = 3, w.GD[0xa5] = w.GD[0xa6] = 6, w.GD[0x99] = 1;  // new game (0x401ad0 with slot -1)
+    // Pad records GD+8 / GD+0x30, +0x10..+0x27: button remap words (preset 0 = identity: ← → ↑ ↓ □ ○ △ ✕ L1 L2 R1
+    // R2), part of every save (R: local/saves/tb); a save written without them would leave the original deaf.
+    for (const size_t rec : {size_t(8), size_t(0x30)})
+        for (size_t k = 0; k < 12; ++k) {
+            static constexpr uint16_t kRemap[12] = {0x8000, 0x2000, 0x1000, 0x4000, 0x80, 0x20, 0x10, 0x40, 4, 1, 8, 2};
+            w.GD[rec + 0x10 + 2 * k] = uint8_t(kRemap[k]), w.GD[rec + 0x11 + 2 * k] = uint8_t(kRemap[k] >> 8);
+        }
     w.actors[0].hp = w.GD[0xa5], w.actors[1].hp = w.GD[0xa6];
     // §2.1: run speed S[0x66] (Bugs) / S[0x67] (Taz) = 25 in most level-logic setters (402/450, 150 setters);
     // preset in case the level's setter is never reached (M).
@@ -444,24 +451,29 @@ void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
     tbPadTick(pads[0], p1, edgeMask);
     if (A4 & 0x10) tbPadTick(pads[1], p2, edgeMask);
     else pads[1] = {};  // the P2 report is read only in 2-player mode (GAMEPLAY.md §2.3)
+    GD[0x94] = 3;       // 0x4615b0: both pad reads succeed (keyboard / SDL); the pause menu's "no controller" test
     dt = ticks == 0 ? 0 : 2;
     lastCallFriend = 0;
     camFocus = focus();  // 0x4011c0 latch before 0x45eee0: the camera follows the old focus this tick
     for (uint8_t& f : flash)  // 0x4011c0: hit flash counters run to 0x3c
         if ((f & 0xc0) && (f & 0x3c) < 0x3c) ++f;
     if (invuln > 0) --invuln;
-    cameraTick();
+    pauseTick();
+    if (!S[9]) cameraTick();  // 0x45eee0: the camera 0x439700 stands still while paused
     viewList();
     switchTick();
     // Entity loop 0x460630 over the view list: list order (players at their file position), spawns appended and
     // ticked in the same pass; +0x82 += 1 after each tick unless +0x28 & 0x20; an entity flagged +0x20 & 0x2000
     // is not ticked and is destroyed right after its slot (0x45ecd0).
+    // While paused (S[9]) only entities with flags1 0x40000000 tick (the pause menu, its texts); the others still
+    // die (0x460630).
     for (size_t i = 0; i < order().size(); ++i) {
         TbActor& a = *order()[i];
         if (!a.active) continue;
+        if (S[9] && !(a.flags1 & 0x40000000u)) continue;
         if (!(a.f20 & 0x2000)) {
             classTick(a);
-            if (!(a.f28 & 0x20)) ++a.stateTicks;
+            if (!(a.f28 & 0x20) || S[9]) ++a.stateTicks;
         }
     }
     // HUD: the class 6 entity 0x463170 (template 0x1f holder, spawned at the load: appended after the level's
@@ -493,6 +505,29 @@ void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
     fadeTick();  // 0x464ef0, once per rendered tick
 }
 
+// ------------------------------------------------------------------------------------------------ pause
+// 0x4014c0 head (before the world tick): Start (pad-0 raw 0x800; re-armed only once released after a resume, latch
+// 0x4d02d0) pauses outside cinematics (GD+0x9f) and demos (GD+0x8a): S[9] = 1
+// and the pause menu entity, template 0x1d (flags1 0x40000000; +0xc |= 0x400 for pad 0's press, else 0x800). Its
+// logic sets S[9] = 2 to resume. Not ported: music / voice pause 0x429180 / 0x42b5c0 and PlayMusic(-1) on resume.
+void TbWorld::pauseTick() {
+    const bool start = pads[0].raw & PadStart;
+    if (pauseLatch_) {
+        if (!start) pauseLatch_ = false;
+        return;
+    }
+    if (S[0]) return;
+    if (S[9] == 2) {
+        pauseLatch_ = true, S[9] = 0;
+        return;
+    }
+    // (The camera-node hold 0x4d515c & 0x300 also blocks it, but every render 0x465130 clears those bits, so they are
+    // only seen in load-mode frames; bbtime keeps the hold for RETRY's view and leaves it out here.)
+    if (S[9] || restart || !start || GD[0x9f] || GD[0x8a]) return;
+    S[9] = 1;
+    if (TbActor* m = spawn(0x1d, {}, 0)) m->flags1 |= (pads[0].pressed & PadStart) ? 0x400 : 0x800;
+}
+
 // ------------------------------------------------------------------------------------------------ switching
 void TbWorld::switchTick() {
     TbActor& f = actors[size_t(focus())];
@@ -502,13 +537,15 @@ void TbWorld::switchTick() {
         p.flags1 = (p.flags1 & ~0x400u) | 0x800;
     }
     airTicks = f.f20 & 0xa ? 0 : uint8_t(std::min(airTicks + 1, 3));
-    if (cooldown < 45) ++cooldown;
+    if (cooldown < 45 && !S[9]) ++cooldown;
     auto r1Rule = [&](uint16_t held) {
         const bool r1 = held & PadR1;
         if (r1 && !(A4 & 8) && !(p.f20 & 0x2000000) && !(S[3] & 0xc) && !GD[0x9f]) {
             A4 |= 8;
-            A4 ^= 4;
-            for (TbActor& a : actors) a.f28 |= 0x100;  // "switched" entity programs (not interpreted)
+            if (!S[9]) {  // paused: only latched
+                A4 ^= 4;
+                for (TbActor& a : actors) a.f28 |= 0x100;  // "switched" entity programs (not interpreted)
+            }
         } else if (!r1) {
             A4 &= ~8;
         }
@@ -539,7 +576,7 @@ bool TbWorld::callFriend(bool force) {
     TbActor& f = actors[size_t(focus())];
     TbActor& p = actors[size_t(1 - focus())];
     lastCallFriend = -1;
-    if (!force && (GD[0x9f] || (S[3] & 3) || airTicks > 2 || (f.f24 & 0x40) || (p.f20 & 0x2000000) || cooldown < 45)) {
+    if (!force && (S[9] || GD[0x9f] || (S[3] & 3) || airTicks > 2 || (f.f24 & 0x40) || (p.f20 & 0x2000000) || cooldown < 45)) {
         if (!(S[3] & 0x10) && !S[9] && !GD[0x9f]) playSound(f, 0x5f);  // refusal, muted while paused / in a dialog
         return false;
     }

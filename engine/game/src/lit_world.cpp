@@ -125,6 +125,9 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
                 if (size_t(off) + size > s3.size()) throw FormatError("LitWorld: chunk 0x49 text outside section 3");
                 w.overlayText.assign(s3.begin() + off, s3.begin() + off + size);
             }
+        } else if (it.code == 0x05) {  // music zones (0x42e7a0 case 5 -> 0x41d8b0; 0x28 entries at most)
+            for (const ScriptTag& t : it.tags)
+                if (t.id == 0x06 && t.data.size() >= 3 && w.musicZones.size() < 0x28) w.musicZones.push_back({t.data[0], t.data[1], t.data[2]});
         } else if (it.code == 0x3b) {
             if (const ScriptTag* t = tag(it, 0x2b)) w.levelEye_ = v3(t);  // §5 initial eye
             if (const ScriptTag* t = tag(it, 0x3c)) w.shadowMaxY = le<int16_t>(t->data, 0);  // 0x4b2378 (movsx)
@@ -335,8 +338,41 @@ void LitWorld::tick(const PadInput& in) {
             S[12] = 0;
         }
     }
+    musicTick();
     helpRequest_ = false;
     fadeTick();     // §1.1 step 9: the render pass advances the fade (0x44c4b0 / 0x44bef0)
+}
+
+// Music, once per tick after the pause states (0x4065e0 reaches 0x41d900 unless a pause state paused the stream with
+// 0x41d5c0; S[12] 2 resumes it with 0x41d5e0). 0x41d900: no entry for the player's zone -> stop (Track 0); a zone
+// change picks its entry unless both of its tracks equal the current one (tracks above 0x28 -> 0x27) and plays
+// `track`. 0x41edb0 (every tick, before): a stopped stream reopens the entry's track2. 0x41d630 stops instead of
+// playing while the fade 0x4b3232 or the speech status S[0x17] is set, so music restarts after fades and speech.
+// ponytail: 0x41d900 also needs the config music volume >= 50 (below = off); the app's volume slider covers it.
+void LitWorld::musicTick() {
+    musicPaused = S[0] == 0 && (S[12] == 1 || S[12] == 3);
+    if (musicPaused) return;
+    bool none = true;
+    if (S[0x17] == 0) {
+        const uint16_t zone = uint16_t(p.zone);
+        const auto it = std::ranges::find_if(musicZones, [&](const auto& e) { return e[0] == zone; });
+        if (it == musicZones.end()) {
+            musicTrack_ = 0;
+        } else {
+            none = false;
+            if (zone != musicZone_) {
+                musicZone_ = zone;
+                if (musicTrack_ != (*it)[1] || musicTrack_ != (*it)[2]) {
+                    for (uint8_t& t : std::span(it->data() + 1, 2)) t = t > 0x28 ? 0x27 : t;  // DAT_004abf78 = 0x28
+                    musicEntry_ = int(it - musicZones.begin());
+                    music = musicTrack_ = (*it)[1];
+                }
+            }
+        }
+    }
+    musicNext = musicEntry_ >= 0 ? musicZones[size_t(musicEntry_)][2] : 0;
+    if (none || fade.mode || S[0x17]) music = 0;
+    else if (!music) music = musicTrack_ = musicNext;  // 0x41edb0 reopens track2
 }
 
 // XA speech status S[0x17] (0x41e2b0, the path without an audio device, which the Wine oracle takes): A81 start 8 ->

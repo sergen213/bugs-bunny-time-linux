@@ -29,6 +29,11 @@ struct Settings {
     int msaa = 4;       // 0, 2, 4, 8
     bool vsync = true;
     int musicVolume = 100, sfxVolume = 100; // 0..100
+    // TB front end Video page (bblit2.exe config.pc, docs/re/TIME_BUSTERS.md §8.1): +0xe0 brightness (HSI intensity
+    // factor 0.25..2 on TB textures), +0x04 renderer (2 3-D card, 1 software) and +0x18 detail level (0 low .. 2
+    // high) are kept and shown; bbtime always draws with its own renderer at the high detail level.
+    float tbBrightness = 1.0f;
+    int tbRenderer = 2, tbDetails = 2;
     std::map<std::string, std::string> bindings; // action -> comma-separated SDL key names
     std::string updateUrl;                       // launcher only: signed release manifest URL (https)
     std::map<std::string, std::string> unknown;  // keys this build does not know, preserved verbatim

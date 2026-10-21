@@ -72,14 +72,34 @@ C++ `xa2wav` output is byte-identical to `tools/re/xa2wav.py` (5 s of LiT `TRACK
 
 ## Music selection
 
-**LiT — Verified (code + data).** `bugs.exe` 0x41d630 `PlayMusic(n)` opens `..\track\Track%d.xa` with `n`
-unchanged. `n` comes from a per-level zone table: section-1 chunk `0x05`, tag `0x06` = 3 bytes
-`{zone, track, track2}` (loader `case 5` in 0x42e7a0 → 0x41d8b0 appends, max 0x28 entries); 0x41d900 picks the
-entry whose zone equals `*(u16*)(DAT_004b324c+0x26)` (the player's current zone — Inferred) and plays `track`
-(no entry = stop); tracks above `DAT_004abf78` (= 0x28) are clamped to 39. Examples: `title.bze` {1,25,25},{2,25,25};
-`credits.bze` {1,25,25}; `LS01.bze` {1,2},{2,5},{3,9},{4,14},{5,16},{6,29}; `L01a` zones 2–6 → 2; `Merlin` → 31.
-`track2` is played by 0x41edb0 (same clamp) for the current zone entry; when it is chosen over `track` is not
-decoded — **Research Required** (all levels but `CC4B/CC4C` zone 6 {10, 11} use `track2 == track`).
+**LiT — Verified Against Original Behavior (code + data + Wine oracle).** `bugs.exe` 0x41d630 `PlayMusic(n)` opens
+`..\track\Track%d.xa` with `n` unchanged. `n` comes from a per-level zone table: section-1 chunk `0x05`, tag `0x06` =
+3 bytes `{zone, track, track2}` (loader `case 5` in 0x42e7a0: 0x41d890 clears, 0x41d8b0 appends, max 0x28 entries);
+0x41d900 picks the entry whose zone equals the player's zone `*(u16*)(DAT_004b324c+0x26)` and plays `track` (no
+entry = stop); tracks above `DAT_004abf78` (= 0x28) are clamped to 39. Examples: `title.bze` {1,25,25},{2,25,25};
+`credits.bze` {1,25,25}; `LS01.bze` {1,2},{2,5},{3,9},{4,14},{5,16},{6,29}; `L01a` zones 2–6 → 2; `L01d1` → 4;
+`Merlin` → 31. Every playable level has entries; the cut-scenes CC2A–CC3D have none and are silent in bbtime (were
+their chunk 0x05 absent rather than empty, the exe would keep the previous level's table — not checked).
+
+Runtime rules (O; `bb::game::LitWorld::musicTick`, `ctest -R game.sfx` `testMusic`):
+* 0x41d900 runs at load (0x430f80, after the load-time actor update) and every unpaused tick; it switches only when
+  the player's zone changes (`DAT_004b3b76`, 0xffff at level init), and not when the new entry's two tracks equal the
+  current one (`DAT_004b39d4`). A switch to the track already streaming keeps streaming (0x41d630 compares
+  `DAT_004abf94`).
+* 0x41d630 stops the stream instead of playing while a fade (`0x4b3232`) or speech (`S[0x17]` = `0x4b2277`) runs;
+  0x41edb0 (every tick, before 0x41d900) reopens the current entry's `track2` once the stream is stopped or ended —
+  so music restarts from its start after every fade and speech, and `track2` follows `track` (CC4B/CC4C zone 6:
+  10 then 11; elsewhere the track loops).
+* Pause / help (S[12] 1 or 3): 0x41d5c0 stops the DirectSound buffer keeping its position, 0x41d5e0 resumes.
+* The config music volume `DAT_009ca854` (0–100, ±5 steps) below 50 disables music; the buffer volume is
+  (v − 100) · 100 hundredths of a dB. bbtime keeps its own `music_volume` slider (not ported).
+
+Wine oracle (Proton-GE, `AUDIO=1` into a PulseAudio null sink; `local/wine/litmusic/capture.sh`, `trace.csv`,
+`fds.log`): `/b04` L01A holds `track/TRACK2.xa` open (`DAT_004abf94` = 2, playing); a poked level change to 7 (L01D1)
+stops it on the fade-out tick, loads L01D1 and opens `TRACK4.xa` immediately (plays over the rest of the 3000 ms
+loading screen), the fade in stops it (counters 13–37) and it restarts at counter 39; L01D1's intro speech
+(`S[0x17]` 2 → 4 → 0, counters 111–359) silences it again and it restarts at 361. bbtime matches these rules
+(the loading screen hold is timed from the load in the exe: load at +0.53 s after the fade, fade in 3.0 s later).
 
 **TB — partly.** `bblit2.exe` 0x4291e0 `PlayMusic(n)`: `-1` = resume current, `0` = stop, else opens
 `Track(n-1).xa`, and if that file is missing retries the hard-coded **`Track14.xa`** (0xe). `n` is set only by
@@ -89,10 +109,11 @@ zone table above) and reset to 0 at level load (0x407480). Logic opcodes are u16
 action id (interpreter 0x45d7a0). Byte scans of section 1 for such action-126 words found no consistent hits,
 so the logic blob location in TB levels is still **Research Required**.
 
-**Collection menu (`apps/bbtime/music.cpp`):** LiT → `TRACK25.xa` (the title-level track, verified above).
-TB has no title level on disk and its GDI front end (`..\data\menu.men`) issues no track change, so its menu
-theme is **UNVERIFIED**: `track14.xa`, the exe's own fallback track. The highlighted game's track loops in
-the main menu, the chosen game's in its level list; level screens are silent; `--mute` never opens a device.
+**Collection menu (`apps/bbtime/music.cpp`):** LiT → `TRACK25.xa` (the title-level track, verified above). TB has no
+title level on disk and its GDI front end (`..\data\menu.men`) issues no track change; the collection menu uses the
+Granny hub track `Track2.xa` (design choice). The highlighted game's track loops in the main menu, the chosen game's in
+its level list; LiT levels (TITLE included) follow `LitWorld::music`, TB levels action 126; `--mute` never opens a
+device.
 
 ## Sound effects and in-level speech (not `.xa`) — Implemented, Tested
 

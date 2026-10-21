@@ -179,11 +179,38 @@ void testRealBanks(const std::filesystem::path& data) {
     }
 }
 
+// XA music zones (formats/AUDIO_XA.md "Music selection"): L01a / LS01 / title tables, then L01a's track from the load
+// (oracle local/wine/litmusic/trace.csv: 0x430f80 opens it), over a fade (0x41d630 stops it while 0x4b3232 is set;
+// afterwards 0x41edb0 reopens it) and the help pause (0x41d5c0).
+void testMusic(const std::filesystem::path& data) {
+    using Z = std::vector<std::array<uint8_t, 3>>;
+    const auto dir = data / "lit/Datas/bze";
+    if (!std::filesystem::exists(dir / "L01a.bze")) return;
+    assert((LitWorld::load(loadBze(dir / "LS01.bze"), nullptr).musicZones == Z{{1, 2, 2}, {2, 5, 5}, {3, 9, 9}, {4, 14, 14}, {5, 16, 16}, {6, 29, 29}}));
+    assert((LitWorld::load(loadBze(dir / "title.bze"), nullptr).musicZones == Z{{1, 25, 25}, {2, 25, 25}}));
+    LitWorld w = LitWorld::load(loadBze(dir / "L01a.bze"), nullptr);
+    assert((w.musicZones == Z{{2, 2, 2}, {3, 2, 2}, {4, 2, 2}, {5, 2, 2}, {6, 2, 2}}));
+    w.loadUpdate();
+    assert(w.music == 2);
+    w.tick({});
+    assert(w.music == 2 && w.musicNext == 2 && !w.musicPaused);
+    w.fadeIn(1, 0x100);
+    int silent = 0;
+    for (int t = 0; t < 40; ++t, w.tick({})) silent += w.music == 0;
+    assert(silent == 17 && w.music == 2);  // 16 fade updates + the tick that ends it
+    w.tick({.help = true});
+    w.tick({});
+    assert(w.S[12] == 3 && w.musicPaused && w.music == 2);
+    w.tick({.help = true});
+    w.tick({});
+    assert(w.S[12] == 0 && !w.musicPaused && w.music == 2);
+}
+
 } // namespace
 
 int main() {
     testFormulas();
     testVoices();
-    if (const char* d = std::getenv("BBTIME_DATA")) testRealBanks(d);
+    if (const char* d = std::getenv("BBTIME_DATA")) testRealBanks(d), testMusic(d);
     std::puts("sfx ok");
 }

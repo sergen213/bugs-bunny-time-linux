@@ -43,7 +43,13 @@ TbScript parseTbScript(std::span<const uint8_t> section1, uint32_t languageSecti
 // player start (entity id 2 = Bugs, identity Inferred). Multi-object actors are counted in stats.skippedActors,
 // not drawn. Face ids without a TIM resolve through texture links (entity tag 0x0b -> Scene::textureAnims,
 // Mesh::textureAnim; TEXTURE_GAP.md); ids that resolve to nothing are not drawn, as in the original.
-// Throws FormatError.
-Scene buildTbScene(const BzeFile& bze, const std::string& level);
+// Throws FormatError. `brightness` = config.pc +0xe0 (tbAdjustColor).
+Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightness = 1.0);
+
+// Texture load 0x42d140 / 0x42df70 -> 0x407d30 (0x408270 / 0x407fe0): every CLUT colour (TIM modes 0 / 1; direct
+// colour TIMs are left alone) goes RGB/255 -> HSI, intensity × brightness (the Video page slider, 0.25 + 1.75 v,
+// 1 by default) clamped to 1, hue / saturation unchanged (config +0xd0 / +0xd8 = 0 / 1), back to RGB clamped to
+// 0..1, ×255 truncated, in the exe's double arithmetic (also at brightness 1, where most channels drop by 1).
+void tbAdjustColor(uint8_t* rgb, double brightness);
 
 } // namespace bb

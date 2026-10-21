@@ -176,8 +176,9 @@ std::vector<TbSaveSlot> parseTbSavedata(std::span<const uint8_t> b) {
     if (n > 1000 || b.size() < 9 + size_t(n) * 0x54) return out;
     for (uint32_t i = 0; i < n; ++i) {
         const std::span<const uint8_t> r = b.subspan(9 + size_t(i) * 0x54, 0x54);
-        const char* s = reinterpret_cast<const char*>(r.data() + 1);
-        out.push_back({.slot = r[0], .text = std::string(s, strnlen(s, 0x4b)), .level = int(u32(r, 0x4c))});
+        const char* c = reinterpret_cast<const char*>(r.data() + 1);
+        TbSaveSlot& s = out.emplace_back(TbSaveSlot{.slot = r[0], .text = std::string(c, strnlen(c, 0x4b)), .level = int(u32(r, 0x4c))});
+        std::ranges::copy(r, s.raw.begin());
     }
     return out;
 }
@@ -188,9 +189,12 @@ std::vector<uint8_t> writeTbSavedata(std::span<const TbSaveSlot> slots) {
     std::memcpy(b.data() + 4, "1.00", 5);
     for (size_t i = 0; i < slots.size(); ++i) {
         uint8_t* r = b.data() + 9 + i * 0x54;
+        std::ranges::copy(slots[i].raw, r);
         r[0] = uint8_t(slots[i].slot);
-        std::memcpy(r + 1, slots[i].text.data(), std::min<size_t>(slots[i].text.size(), 0x4a));
-        for (int k = 0; k < 4; ++k) r[0x4c + k] = uint8_t(uint32_t(slots[i].level) >> (8 * k));
+        const size_t n = std::min<size_t>(slots[i].text.size(), 0x4a);
+        std::memcpy(r + 1, slots[i].text.data(), n);
+        r[1 + n] = 0;
+        for (int k = 0; k < 4; ++k) r[0x4c + k] = uint8_t(uint32_t(slots[i].level) >> (8 * k)), r[0x50 + k] = 0;
     }
     return b;
 }

@@ -45,6 +45,10 @@ fs::path menuTrack(bb::GameId g, const fs::path& gameRoot) {
                                        : find(gameRoot, {"Datas", "TRACK", "track2.xa"});
 }
 
+fs::path litLevelTrack(const fs::path& gameRoot, int n) {
+    return n > 0 ? find(gameRoot, {"Datas", "track", std::format("Track{}.xa", n)}) : fs::path{};
+}
+
 fs::path tbLevelTrack(const fs::path& gameRoot, int n) {
     if (n <= 1) return {};
     fs::path t = find(gameRoot, {"Datas", "TRACK", std::format("Track{}.xa", n - 1)});
@@ -61,22 +65,30 @@ bb::AudioDevice* audioDevice() {
     return dev->ok() ? dev.get() : nullptr;
 }
 
-void playMusic(const fs::path& track) {
-    static fs::path current;
-    if (track != current) {
-        current = track;
-        if (dev) dev->stopMusic();
-        if (!track.empty())
-            if (bb::AudioDevice* d = audioDevice()) {
-                try {
-                    d->playMusic(track);
-                    std::println("bbtime: music {}", track.string());
-                } catch (const std::exception& e) {
-                    std::println(stderr, "bbtime: music {}: {}", track.string(), e.what());
-                }
+void playMusic(const fs::path& track, const fs::path& next, bool paused) {
+    static fs::path wanted, playing;  // the caller's track; the stream (wanted, or `next` after it ended)
+    auto start = [](const fs::path& t, bool loop) {
+        if (bb::AudioDevice* d = audioDevice()) {
+            try {
+                d->playMusic(t, loop);
+                std::println("bbtime: music {}", t.string());
+            } catch (const std::exception& e) {
+                std::println(stderr, "bbtime: music {}: {}", t.string(), e.what());
             }
+        }
+    };
+    if (track != wanted) {
+        wanted = playing = track;
+        if (dev) dev->stopMusic();
+        if (!track.empty()) start(track, next.empty() || next == track);
     }
-    if (dev) dev->update();
+    if (!dev) return;
+    dev->pauseMusic(paused);
+    dev->update();
+    if (!playing.empty() && !next.empty() && next != playing && !dev->musicPlaying()) {  // LiT 0x41edb0: track2 follows
+        playing = next;
+        start(next, true);
+    }
 }
 
 } // namespace bbtime

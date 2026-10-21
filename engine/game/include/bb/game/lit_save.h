@@ -65,5 +65,8 @@ std::string writeLitSave(const std::filesystem::path& dir, LitSaveGame& g);
 // Copies every valid Savegame0..6.dat and Savedata.dat from an original install's Datas/bin to dir (with .bak
 // backups of replaced files). Returns a one-line report; invalid files are skipped and named in it.
 std::string importLitSaves(const std::filesystem::path& from, const std::filesystem::path& dir);
+// Copies an existing file to <name>.bak, then replaces it via <name>.tmp (no torn file). Returns "" or an error.
+// Shared with the TB saves (tb_save.h).
+std::string replaceSaveFile(const std::filesystem::path& path, std::span<const uint8_t> bytes);
 
 }  // namespace bb::game

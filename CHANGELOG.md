@@ -3,6 +3,37 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.8.0 — 2026-10-21 (Wave 8: TB saves + dialog boxes, LiT level music, TB menu extras, new collection menu)
+
+- Time Busters saves in play: Start / Esc opens the original pause menu (save game, inventory, level hints,
+  options, quit), and "save game" writes `Savegame<N>.dat` + `Savedata.dat` in the original's exact byte format
+  (checked against saves made by the original under Wine), asking "use the same savegame file?" on later saves; the
+  front end's Load page lists them and loading continues the game. Old files are kept as `.bak`.
+- Time Busters dialog boxes: the paged speech / hint / caption boxes (e.g. "Welcome to Granwich!" over the GRANNY
+  fly-over, Granny's briefing, key hints) are drawn as in the original — word-wrapped, centred, dark rounded panel,
+  page arrows, ✕ / → paging — together with the cinematic black bars, which now also open and close so pausing,
+  switching and calling the partner work again after a cut-scene.
+- Lost in Time levels play their music: each level's zone table picks `Datas/track/Track<n>.xa` for Bugs' zone
+  (L01A Track 2, L01D1 Track 4, LS01 by zone, …), switching when he changes zone; music stops during fades and speech
+  and restarts afterwards, and the next level's track starts over the end of its loading screen (checked against the
+  original under Wine); the help screen pauses it. The title keeps Track 25.
+- New collection menu in the games' own style: both games side by side with their title art, named in their own font
+  (LiT's in-game font, TB's Brady Bunch), the highlighted one bright; Options, Quit, the level list and the button hints
+  wear the highlighted game's look (LiT: the title slot-menu panel and colours; TB: its configuration / load pages,
+  colours and Back hand). Works at any window size / aspect in GL and Vulkan. `--autoplay` now also drives the
+  collection menus (menu smoke screenshots).
+- Time Busters front end, Video page: the resolution choices resize the window, Renderer and Level of details are
+  remembered (`settings.ini` `tb_renderer` / `tb_details`; bbtime keeps drawing with its own renderer at high detail),
+  and Brightness now works like the original's: it brightens or darkens every Time Busters texture from the next level
+  (same colour maths as the exe, checked against the original at three slider values; `tb_brightness`). The slider
+  steps in eighths like the original (it was finer before) and, as in the original, merely opening the page nudges an
+  untouched brightness from 1 to 1.125.
+- Time Busters front end: Esc on the title page or closing the window asks the original's "Do you want to quit?"
+  (Yes / No, in the game's language) — Yes from Esc returns to the collection menu, Yes from a window close exits.
+  The title page's Quit icon still leaves at once, as in the original. After 30 s without a key or click the original
+  looks for attract videos (`demo1.avi`, …) that the PC disc does not include, so nothing happens; bbtime now does
+  the same (and reports it once in the log).
+
 ## 0.7.0 — 2026-10-21 (Wave 7: original menus, original sound mixing)
 
 - Both games clear the 3-D view and fade fog to black like the originals (was a hard-coded light blue: blue strip under

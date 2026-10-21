@@ -13,6 +13,7 @@
 #include "bb/actor.h"
 #include "bb/audio.h"
 #include "bb/game/lit_save.h"
+#include "bb/game/tb_save.h"
 
 #include <SDL3/SDL.h>
 
@@ -40,11 +41,8 @@ using bb::render::Fidelity;
 namespace {
 
 constexpr uint8_t kWhite[4] = {255, 255, 255, 255};
-constexpr uint8_t kGrey[4] = {170, 170, 170, 255};
-constexpr uint8_t kYellow[4] = {255, 220, 60, 255};
 constexpr uint8_t kRed[4] = {255, 60, 60, 255};
 constexpr uint8_t kPanel[4] = {0, 0, 0, 170};
-constexpr uint8_t kHighlight[4] = {40, 90, 200, 200};
 
 struct Args {
     fs::path data;
@@ -209,17 +207,47 @@ fs::path findPath(fs::path base, std::initializer_list<std::string_view> parts) 
     return base;
 }
 
+// A 2-D page image plus 1-px strips of its left / right columns, stretched over the side bars of wider windows.
+struct Page {
+    uint32_t img = 0, left = 0, right = 0;
+    int w = 0, h = 0;
+};
+
 struct Game {
     GameId id;
     const char* key;   // short id (lit / tb)
     const char* title;
     const char* shortName;
+    const char* name;  // in the collection menu, under the title art (which carries "Bugs Bunny")
     fs::path root{}, backdropPath{};
     std::vector<std::string> levels{}; // BZE stems found on disk
-    uint32_t backdrop = 0;
-    int bw = 0, bh = 0;
+    Page bg{}, options{}, list{};      // title backdrop; TB: config page pc03 / load page pc07 (menu.men pages 1 / 7)
+    struct Image { uint32_t img = 0; int w = 0, h = 0; };
+    std::vector<Image> font{};         // LiT: title.bze overlay font glyph TIMs (Scene::overlayFont order)
+    Image back{}, backHot{};           // TB: Back.bmp / BackD.bmp
+    fs::path ttf{};                    // TB: Datas/data/bradybun.ttf (menu.men font "brady bunch")
     std::string status{};
 };
+
+template <class R>
+Page makePage(R& r, const fs::path& file, std::string* err = nullptr) {
+    Page p;
+    auto t = file.empty() ? std::unexpected(std::string("missing")) : bb::render::loadBmp(file);
+    if (!t) {
+        if (err) *err += " | " + t.error();
+        return p;
+    }
+    p = {r.createImage(*t), 0, 0, int(t->width), int(t->height)};
+    bb::Texture e;
+    e.width = 1, e.height = t->height;
+    for (uint32_t* side : {&p.left, &p.right}) {
+        const size_t x = side == &p.left ? 0 : t->width - 1;
+        e.rgba.clear();
+        for (uint32_t y = 0; y < t->height; ++y) e.rgba.insert(e.rgba.end(), &t->rgba[(y * t->width + x) * 4], &t->rgba[(y * t->width + x) * 4 + 4]);
+        *side = r.createImage(e);
+    }
+    return p;
+}
 
 template <class R> // bb::render::Renderer (GL) or bb::render_vk::Renderer
 void loadGame(Game& g, const fs::path& root, R& r) {
@@ -234,14 +262,23 @@ void loadGame(Game& g, const fs::path& root, R& r) {
     std::ranges::sort(g.levels);
     g.status = bze.empty() ? std::format("no Datas/bze under {}", g.root.string())
                            : std::format("{} levels in {}", g.levels.size(), bze.string());
-    if (g.backdropPath.empty()) return;
-    if (auto t = bb::render::loadBmp(g.backdropPath)) {
-        g.backdrop = r.createImage(*t);
-        g.bw = int(t->width);
-        g.bh = int(t->height);
-    } else {
-        g.status += " | " + t.error();
+    g.bg = makePage(r, g.backdropPath, &g.status);
+    if (g.id == GameId::LostInTime) {  // the in-game font of the title screen's text (GAMEPLAY.md §7.6)
+        if (std::ranges::any_of(g.levels, [](const std::string& l) { return iequals(l, "TITLE"); }))
+            try {
+                const bb::Scene t = bb::loadLevelScene(g.id, g.root, "TITLE");
+                for (const int32_t i : t.overlayFont)
+                    g.font.push_back(i < 0 ? Game::Image{} : Game::Image{r.createImage(t.textures[size_t(i)]), int(t.textures[size_t(i)].width), int(t.textures[size_t(i)].height)});
+            } catch (const std::exception& e) {
+                g.status += std::format(" | title font: {}", e.what());
+            }
+        return;
     }
+    g.options = makePage(r, findPath(g.root, {"Datas", "data", "pc03.bmp"}));
+    g.list = makePage(r, findPath(g.root, {"Datas", "data", "pc07.bmp"}));
+    for (auto [img, file] : {std::pair{&g.back, "Back.bmp"}, std::pair{&g.backHot, "BackD.bmp"}})
+        if (auto t = bb::render::loadBmp(findPath(g.root, {"Datas", "data", file}))) *img = {r.createImage(*t), int(t->width), int(t->height)};
+    g.ttf = findPath(g.root, {"Datas", "data", "bradybun.ttf"});
 }
 
 enum class Screen { Main, Options, Game, Level, TbFront };
@@ -252,10 +289,12 @@ struct App {
     Args args;
     R r;
     bb::render::Settings s;
-    Game games[2] = {{.id = GameId::LostInTime, .key = "lit", .title = "Bugs Bunny: Lost in Time", .shortName = "LiT"},
-                     {.id = GameId::TimeBusters, .key = "tb", .title = "Bugs Bunny & Taz: Time Busters", .shortName = "TB"}};
+    Game games[2] = {{.id = GameId::LostInTime, .key = "lit", .title = "Bugs Bunny: Lost in Time", .shortName = "LiT", .name = "Lost in Time"},
+                     {.id = GameId::TimeBusters, .key = "tb", .title = "Bugs Bunny & Taz: Time Busters", .shortName = "TB", .name = "Time Busters"}};
     Screen screen = Screen::Main;
     int mainSel = 0, optSel = 0, gameIdx = 0, levelSel = 0;
+    int styleIdx = 0;                     // game whose look the collection menu wears (the last highlighted one)
+    std::map<std::pair<std::string, int>, Game::Image> ttfCache;  // TB menu text images by {text, cell px}
     bool running = true, overlay = true, fullscreen = false, vsync = true;
     bool helpKey = false;                 // LiT F1 pressed since the last tick (PadInput::help)
     bb::Scene scene;
@@ -276,6 +315,7 @@ struct App {
     size_t autoplay2At = 0;
     std::optional<std::array<uint8_t, 0x300>> tbCarry;  // TB GAME_DATA for the next enterLevel (reload 0x4014c0 keeps it)
     int tbLevel = -1;                     // current TB level-table index (GD+0), -1 = not in the table
+    int tbSaveSlot = -1;                  // exe 0x48840c: the Savegame%d.dat of this game (-1 = none yet)
     std::string playStatus;               // why a LiT level stayed in viewer mode
     // Original SFX mixer commands (bb::game::Sfx) -> OpenAL. The config SFX volume of the exes' formulas follows the
     // device's SFX volume (settings.ini sfx_volume / the TB Sound page): LiT 0..100, TB 0..127.
@@ -313,7 +353,7 @@ struct App {
     // globals: GAME_DATA carried over a level change (LiT G persists across levels, GAMEPLAY §1.2).
     void enterLevel(const std::string& level, const std::array<uint8_t, 256>* globals = nullptr) {
         bb::BzeFile bze;
-        scene = bb::loadLevelScene(game().id, game().root, level, &bze);
+        scene = bb::loadLevelScene(game().id, game().root, level, &bze, bbtime::loadSettings().tbBrightness);  // TB Video page
         freeFont();
         actorAnim.assign(scene.actors.size(), {});
         play.reset();
@@ -484,9 +524,14 @@ struct App {
     void tbFrontAction(const bbtime::TbFrontAction& a) {
         if (a.kind == bbtime::TbFrontAction::None) return;
         if (a.kind == bbtime::TbFrontAction::Quit) { screen = Screen::Main; return; }
+        if (a.kind == bbtime::TbFrontAction::Exit) { running = false; return; }
+        if (a.kind == bbtime::TbFrontAction::Resize) {  // Video page resolution = the window size (fullscreen: display)
+            if (!fullscreen) SDL_SetWindowSize(r.window(), a.width, a.height);
+            return;
+        }
         players = a.players;
-        if (a.kind == bbtime::TbFrontAction::Load) tbCarry = a.gd;
-        else tbCarry.reset();
+        if (a.kind == bbtime::TbFrontAction::Load) tbCarry = a.gd, tbSaveSlot = a.slot;
+        else tbCarry.reset(), tbSaveSlot = -1;  // new game: no savegame file yet (0x48840c = -1)
         std::string name(a.kind == bbtime::TbFrontAction::Load ? bb::game::TbWorld::levelName(a.level) : "CCINTRO");
         for (const std::string& l : game().levels)
             if (iequals(l, name)) name = l;
@@ -569,6 +614,7 @@ struct App {
         case Screen::TbFront:
             // Keyboard / pad Accept: nav(0, 0) focuses the first item when nothing is hovered (the mouse-only original
             // starts that way) and is a no-op otherwise.
+            tbFront->input();  // also --autoplay presses (key / button messages re-arm the attract timer)
             if (a == Action::Accept) tbFrontAction(tbFront->click()), tbFront->nav(0, 0);
             else if (a == Action::Back) tbFrontAction(tbFront->back());
             else tbFront->nav(a == Action::Left ? -1 : a == Action::Right ? 1 : 0, a == Action::Up ? -1 : a == Action::Down ? 1 : 0);
@@ -589,8 +635,14 @@ struct App {
     }
 
     void event(const SDL_Event& e) {
+        if (screen == Screen::TbFront && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                          e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN))
+            tbFront->input();  // 0x42e480: WM_KEYDOWN / WM_[LRM]BUTTONDOWN re-arm the 30 s attract timer, moves do not
         switch (e.type) {
-        case SDL_EVENT_QUIT: running = false; break;
+        case SDL_EVENT_QUIT:  // window close on the TB front end = WM_CLOSE: the quit box first (a second close quits)
+            if (screen == Screen::TbFront && !tbFront->capturing()) tbFront->askQuit(true);
+            else running = false;
+            break;
         case SDL_EVENT_GAMEPAD_ADDED:
             if (!pad) pad = SDL_OpenGamepad(e.gdevice.which);
             else if (!pad2) pad2 = SDL_OpenGamepad(e.gdevice.which);
@@ -602,7 +654,7 @@ struct App {
         case SDL_EVENT_MOUSE_BUTTON_DOWN:  // the TB front end is mouse-driven (0x42e480: WM_LBUTTONDOWN -> 0x41bf90)
             if (screen == Screen::TbFront && e.button.button == SDL_BUTTON_LEFT) {
                 tbMouse(e.button.x, e.button.y);
-                tbFrontAction(tbFront->click());
+                tbFrontAction(tbFront->click(true));
             }
             break;
         case SDL_EVENT_MOUSE_MOTION:
@@ -633,7 +685,7 @@ struct App {
             break;
         case SDL_EVENT_KEY_DOWN: {
             const SDL_Keycode k = e.key.key;
-            if (screen == Screen::TbFront && tbFront->capturing()) { tbFront->captureKey(e.key.scancode); break; }
+            if (screen == Screen::TbFront && tbFront->capturing()) { tbFrontAction(tbFront->captureKey(e.key.scancode)); break; }
             if (k == SDLK_F3) overlay = !overlay;
             else if (k == SDLK_F11) { fullscreen = !fullscreen; r.setFullscreen(fullscreen); }
             // LiT title (level 0) past its logo page: Esc is the game's C96 (back to the slot menu).
@@ -668,7 +720,7 @@ struct App {
     void tick(float dt) {
         prevCam = cam;
         r.setTextureTick(++simTick);
-        if (screen == Screen::TbFront && autoplayAt < args.autoplay.size()) {  // --autoplay smokes: button edges
+        if (screen != Screen::Level && autoplayAt < args.autoplay.size()) {  // --autoplay menu smokes: button edges
             const bb::game::PadInput in = args.autoplay[autoplayAt++];
             const uint32_t held = in.buttons | (in.esc ? 0x10000u : 0u), down = held & ~tbAutoPrev;
             tbAutoPrev = held;
@@ -746,6 +798,14 @@ struct App {
             else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
             tbPlay->tick(p1, p2);
             pumpSfx(tbPlay->world.sfx);
+            // 0x401b60 (next frame's head, no reload pending): the pause menu's save request S[0x29] = 6.
+            if (bb::game::TbWorld& w = tbPlay->world; w.S[0x29] && !w.restart) {
+                std::time_t t = std::time(nullptr);
+                std::tm now{};
+                localtime_r(&t, &now);
+                if (const std::string err = bb::game::tbSaveRequest(w, tbSaveSlot, bbtime::saveDir() / "tb", now); !err.empty())
+                    std::println(stderr, "bbtime: TB save failed: {}", err);
+            }
             // Reload 0x4014c0 (level GD+0, GAME_DATA kept) after 0x401910's fade-out: fadeOut(2, 0x100) on the request
             // tick, the world keeps ticking, and the load follows the tick that reaches level 0 (16 frames; trace
             // local/wine/tbnpc/hud/fade_trace.csv). enterLevel then fades in at speed 200.
@@ -788,27 +848,183 @@ struct App {
 
     int uiScale() const { return std::max(1, r.height() / 360); }
 
-    void backdrop(const Game& g, uint8_t dim) {
-        if (!g.backdrop) return;
-        const auto v = bb::render::fitAspect(r.width(), r.height(), float(g.bw) / float(g.bh));
-        const uint8_t tint[4] = {dim, dim, dim, 255};
-        r.drawImage(g.backdrop, float(v.x), float(v.y), float(v.w), float(v.h), s.fidelity == Fidelity::Enhanced, tint);
+    // ---- Collection menu in the highlighted game's own style, original assets only: its title backdrop, its font
+    // (LiT: the title screen's overlay font glyphs with the exe advances; TB: menu.men's Brady Bunch TTF) and its menu
+    // colours (LiT: the title slot-menu panel; TB: TIME_BUSTERS.md §8.1 text colours, config page pc03, load page pc07).
+    // Layout in the originals' 640x480 reference, centred and scaled by min(H, 3W/4): any size / aspect (Hor+).
+    // LiT overlay palettes 0 / 1 / 2: text, selected action (slot menu row), list cursor (slot line; w7litmenu/o_slots.png)
+    static constexpr uint8_t kLitText[4] = {255, 255, 255, 255}, kLitSel[4] = {255, 255, 0, 255}, kLitCur[4] = {0, 255, 0, 255},
+        kLitPanel[4] = {0, 0, 14, 235}, kLitGold[4] = {184, 144, 54, 255}, kLitGold2[4] = {158, 113, 43, 255},  // Wine shot
+        kTbRed[4] = {242, 31, 16, 255}, kTbList[4] = {9, 128, 237, 255}, kTbSel[4] = {248, 230, 0, 255},
+        kTbGrey[4] = {128, 128, 150, 255}, kTbKey[4] = {247, 176, 72, 255};
+    struct Ref {
+        float u, ox, oy;
+        float x(float v) const { return ox + v * u; }
+        float y(float v) const { return oy + v * u; }
+    };
+    Ref ref() const {
+        const float W = float(r.width()), H = float(r.height()), u = std::min(H, W * 0.75f) / 480.0f;
+        return {u, (W - 640.0f * u) * 0.5f, (H - 480.0f * u) * 0.5f};
     }
 
-    // Vertical list in a panel; returns nothing, highlights `sel`.
-    void list(float x, float y, const std::vector<std::string>& items, int sel, int first, int rows) {
-        const int sc = uiScale(), lh = (R::kGlyph + 4) * sc;
-        size_t widest = 0;
-        for (const auto& it : items) widest = std::max(widest, it.size());
-        const float w = float((widest + 4) * size_t(R::kGlyph * sc));
-        const int shown = std::min(rows, int(items.size()) - first);
-        r.drawRect(x, y, w, float(shown * lh + 2 * sc), kPanel);
-        for (int i = 0; i < shown; ++i) {
-            const int idx = first + i;
-            const float ly = y + float(i * lh + sc);
-            if (idx == sel) r.drawRect(x, ly, w, float(lh), kHighlight);
-            r.drawText(x + float(16 * sc), ly + float(2 * sc), sc, items[size_t(idx)], idx == sel ? kYellow : kWhite);
+    // A page over the window: aspect kept, the side bars filled with its own stretched edge columns.
+    void page(const Page& p, uint8_t dim) {
+        if (!p.img) return;
+        const auto v = bb::render::fitAspect(r.width(), r.height(), float(p.w) / float(p.h));
+        const uint8_t tint[4] = {dim, dim, dim, 255};
+        if (v.x > 0) {
+            r.drawImage(p.left, 0, float(v.y), float(v.x), float(v.h), true, tint);
+            r.drawImage(p.right, float(v.x + v.w), float(v.y), float(r.width() - v.x - v.w), float(v.h), true, tint);
         }
+        r.drawImage(p.img, float(v.x), float(v.y), float(v.w), float(v.h), s.fidelity == Fidelity::Enhanced, tint);
+    }
+
+    // Text in game gi's font, top-left (x, y), line height `size` px, align 0 left / 0.5 centred / 1 right; returns the
+    // width. The debug font stands in when the game's data is missing.
+    float text(int gi, float x, float y, float size, std::string_view str, const uint8_t col[4], float align = 0.0f) {
+        const Game& g = games[gi];
+        if (gi == 0 && !g.font.empty()) {
+            const float k = size / 16.0f;  // 16x16 glyph TIMs; advances 0x4ae4a8 in the same pixels, ' ' 6
+            auto adv = [&](char c) { return float(c == ' ' ? 6 : c == '_' ? 8 : bb::game::LitWorld::fontAdvance(uint8_t(c))) * k; };
+            float w = 0;
+            for (const char c : str) w += adv(c);
+            float px = std::round(x - w * align);
+            for (const char c : str) {
+                const uint8_t gl = bb::game::LitWorld::fontGlyph(uint8_t(c));
+                if (c == '_') r.drawRect(px, y + 12 * k, 7 * k, 2 * k, col);  // no '_' glyph (level names)
+                else if (gl && gl <= g.font.size() && g.font[gl - 1u].img)
+                    r.drawImage(g.font[gl - 1u].img, std::round(px), std::round(y), float(g.font[gl - 1u].w) * k,
+                                float(g.font[gl - 1u].h) * k, true, col);
+                px += adv(c);
+            }
+            return w;
+        }
+        if (gi == 1 && !g.ttf.empty()) {
+            Game::Image& t = ttfCache[{std::string(str), int(std::lround(size))}];
+            if (!t.img)
+                if (const bb::Texture tx = bbtime::ttfText(g.ttf, str, int(std::lround(size))); !tx.rgba.empty())
+                    t = {r.createImage(tx), int(tx.width), int(tx.height)};
+            if (t.img) r.drawImage(t.img, std::round(x - float(t.w) * align), std::round(y), float(t.w), float(t.h), true, col);
+            return float(t.w);
+        }
+        const int sc = std::max(1, int(size) / R::kGlyph);
+        const float w = float(str.size() * size_t(R::kGlyph * sc));
+        r.drawText(x - w * align, y, sc, str, col);
+        return w;
+    }
+
+    // LiT title slot-menu panel: near-black navy with two gold rules (colours from local/wine/shots/lit_title_menu.png).
+    void litPanel(float x, float y, float w, float h, float u) {
+        r.drawRect(x, y, w, h, kLitPanel);
+        const float t = std::max(1.0f, 1.5f * u);
+        for (const auto& [d, c] : {std::pair{0.0f, kLitGold}, std::pair{3.5f * u, kLitGold2}}) {
+            r.drawRect(x + d, y + d, w - 2 * d, t, c), r.drawRect(x + d, y + h - d - t, w - 2 * d, t, c);
+            r.drawRect(x + d, y + d, t, h - 2 * d, c), r.drawRect(x + w - d - t, y + d, t, h - 2 * d, c);
+        }
+    }
+
+    void hints(std::string_view h, float y = 458.0f) {
+        const Ref f = ref();
+        text(styleIdx, f.x(320), f.y(y), (styleIdx ? 20.0f : 11.0f) * f.u, h, styleIdx ? kTbGrey : kLitText, 0.5f);
+    }
+
+    void drawMain() {
+        if (mainSel < 2) styleIdx = mainSel;
+        const Ref f = ref();
+        if (styleIdx == 1 && games[1].options.img) page(games[1].options, 255);  // TB: the config pages' dark spiral
+        else page(games[styleIdx].bg, 34);
+        for (int gi = 0; gi < 2; ++gi) {  // each game: its title art, named in its own font; the highlighted one bright
+            const Game& gm = games[gi];
+            const bool hot = mainSel == gi;
+            const float w = (hot ? 290.0f : 250.0f) * f.u, h = w * 0.75f, x = f.x(gi ? 478.0f : 162.0f) - w * 0.5f,
+                        y = f.y(hot ? 70.0f : 88.0f), b = 3.0f * f.u;
+            const uint8_t dim = hot ? 255 : 110, tint[4] = {dim, dim, dim, 255};
+            if (hot) r.drawRect(x - b, y - b, w + 2 * b, h + 2 * b, gi ? kTbSel : kLitGold);  // LiT gold rule / TB hover yellow
+            if (gm.bg.img) r.drawImage(gm.bg.img, x, y, w, h, s.fidelity == Fidelity::Enhanced, tint);
+            else r.drawRect(x, y, w, h, kLitPanel);
+            const uint8_t* c = gi ? kTbRed : hot ? kLitSel : kLitText;
+            const uint8_t col[4] = {uint8_t(c[0] * dim / 255), uint8_t(c[1] * dim / 255), uint8_t(c[2] * dim / 255), 255};
+            text(gi, x + w * 0.5f, y + h + 10.0f * f.u, (gi ? 34.0f : 20.0f) * f.u, gm.name, col, 0.5f);
+            if (gm.levels.empty()) text(gi, x + w * 0.5f, y + h * 0.45f, (gi ? 24.0f : 14.0f) * f.u, "data not found", col, 0.5f);
+        }
+        const bool tb = styleIdx == 1;
+        for (int i = 0; i < 2; ++i)
+            text(styleIdx, f.x(320), f.y(366.0f + 36.0f * float(i)), (tb ? 30.0f : 18.0f) * f.u, i ? "Quit" : "Options",
+                 mainSel == 2 + i ? (tb ? kTbSel : kLitSel) : (tb ? kTbRed : kLitText), 0.5f);
+        hints("Enter/A: play   Right/X: level list   Esc/B: quit   F3: diagnostics   F11: fullscreen");
+    }
+
+    void drawOptions() {
+        const Ref f = ref();
+        const bool tb = styleIdx == 1;
+        auto onoff = [](bool b) { return b ? "On" : "Off"; };
+        const std::string rows[7][2] = {
+            {"Renderer mode", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"},
+            {"Vertical FOV", std::format("{:.0f} deg", s.vfovDeg)},
+            {"4:3 pillarbox", onoff(s.pillarbox)},
+            {"MSAA", std::format("{} (x{})", onoff(s.msaa), r.msaaSamples())},
+            {"VSync", onoff(vsync)},
+            {"Fullscreen", onoff(fullscreen)},
+            {"TB players", std::to_string(players)}};
+        const std::string_view notes[8] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
+                                           "Original Fidelity mode", "Enhanced mode", "", "F11 switches it anywhere",
+                                           players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend", ""};
+        if (tb) {  // config page pc03: labels in the key-label orange, values white (Controls page), Back image + red label
+            page(games[1].options, 255);
+            text(1, f.x(320), f.y(14), 30 * f.u, "Options", kTbRed, 0.5f);
+            for (int i = 0; i < 7; ++i) {
+                const bool sel = optSel == i;
+                text(1, f.x(60), f.y(70.0f + 34.0f * float(i)), 26 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
+                text(1, f.x(600), f.y(70.0f + 34.0f * float(i)), 26 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
+            }
+            text(1, f.x(320), f.y(318), 22 * f.u, notes[optSel], kTbGrey, 0.5f);
+            const Game::Image& b = optSel == 7 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
+            if (b.img) r.drawImage(b.img, f.x(35), f.y(375), float(b.w) * f.u, float(b.h) * f.u, s.fidelity == Fidelity::Enhanced);
+            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 7 ? kTbSel : kTbRed, 0.5f);
+        } else {  // the title slot-menu panel
+            page(games[0].bg, 60);
+            litPanel(f.x(70), f.y(56), 500 * f.u, 370 * f.u, f.u);
+            text(0, f.x(320), f.y(74), 24 * f.u, "Options", kLitSel, 0.5f);
+            for (int i = 0; i < 8; ++i) {
+                const uint8_t* c = optSel == i ? (i == 7 ? kLitSel : kLitCur) : kLitText;
+                const float y = f.y(120.0f + 30.0f * float(i));
+                if (i == 7) { text(0, f.x(320), y, 16 * f.u, "Back", c, 0.5f); break; }
+                text(0, f.x(96), y, 16 * f.u, rows[i][0], c);
+                text(0, f.x(544), y, 16 * f.u, rows[i][1], c, 1.0f);
+            }
+            text(0, f.x(320), f.y(386), 12 * f.u, notes[optSel], kLitText, 0.5f);
+        }
+        hints("Up/Down: move   Left/Right/Enter: change   Esc/B: back");
+    }
+
+    // Level list: TB on its load page pc07 (list box 124,96 353x222, 22-px rows, Back / Load icons baked in); LiT in
+    // the slot-menu panel over its title art.
+    void drawLevels() {
+        const Ref f = ref();
+        Game& gm = game();
+        styleIdx = gameIdx;
+        const bool tb = gameIdx == 1;
+        const int n = int(gm.levels.size()), rows = tb ? 10 : 13;
+        const int first = std::clamp(levelSel - rows / 2, 0, std::max(0, n - rows));
+        const std::string count = n ? std::format("{} levels", n) : gm.status;
+        if (tb) {
+            page(gm.list, 255);
+            text(1, f.x(320), f.y(20), 30 * f.u, "Select a level and click Load", kTbGrey, 0.5f);
+            for (int i = 0; i < rows && first + i < n; ++i)
+                text(1, f.x(134), f.y(96.0f + 22.0f * float(i)), 26 * f.u, gm.levels[size_t(first + i)], first + i == levelSel ? kTbSel : kTbList);
+            text(1, f.x(320), f.y(322), 20 * f.u, "Up/Down: level   Left/Right: 10 levels", kTbGrey, 0.5f);
+            text(1, f.x(73), f.y(439), 30 * f.u, "Back", kTbRed, 0.5f);  // under BACK_LOADGAME (35, 375) 77x64
+            text(1, f.x(578), f.y(444), 30 * f.u, "Load", kTbRed, 0.5f);  // under LOADGAME (539, 355) 78x89
+            text(1, f.x(320), f.y(440), 20 * f.u, count, n ? kTbGrey : kTbRed, 0.5f);
+            return;
+        }
+        page(gm.bg, 110);
+        litPanel(f.x(150), f.y(112), 340 * f.u, 318 * f.u, f.u);
+        text(0, f.x(320), f.y(126), 20 * f.u, "Levels", kLitSel, 0.5f);
+        for (int i = 0; i < rows && first + i < n; ++i)
+            text(0, f.x(320), f.y(156.0f + 20.0f * float(i)), 16 * f.u, gm.levels[size_t(first + i)], first + i == levelSel ? kLitCur : kLitText, 0.5f);
+        text(0, f.x(320), f.y(438), 11 * f.u, count, kLitText, 0.5f);
+        hints("Up/Down: level   Left/Right: 10 levels   Enter/A: play   Esc/B: back");
     }
 
     void draw() {
@@ -817,32 +1033,9 @@ struct App {
         r.beginFrame(s);
         const int sc = uiScale(), g = R::kGlyph;
         const float W = float(r.width()), H = float(r.height());
-        const std::string_view hint = screen == Screen::Main
-            ? "Up/Down: move  Enter/A: play (original menu)  Right/X: level list  Esc/B: back  F3: diagnostics"
-            : "Up/Down: move  Enter/A: select  Esc/B: back  F3: diagnostics  F11: fullscreen";
         switch (screen) {
-        case Screen::Main: {
-            backdrop(games[mainSel < 2 ? mainSel : 0], 200);
-            r.drawText(float(16 * sc), H * 0.45f - float(24 * sc), sc * 2, "BBTIME COLLECTION", kYellow);
-            list(float(16 * sc), H * 0.45f, {games[0].title, games[1].title, "Options", "Quit"}, mainSel, 0, 4);
-            break;
-        }
-        case Screen::Options: {
-            backdrop(games[0], 90);
-            auto onoff = [](bool b) { return b ? "On" : "Off"; };
-            r.drawText(float(16 * sc), H * 0.3f - float(24 * sc), sc * 2, "OPTIONS", kYellow);
-            list(float(16 * sc), H * 0.3f,
-                 {std::format("Renderer mode:  {}", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"),
-                  std::format("Vertical FOV:   {:.0f} deg (Hor+, Enhanced; Original 51.28)", s.vfovDeg),
-                  std::format("4:3 pillarbox:  {} (Original mode)", onoff(s.pillarbox)),
-                  std::format("MSAA:           {} (x{}, Enhanced mode)", onoff(s.msaa), r.msaaSamples()),
-                  std::format("VSync:          {}", onoff(vsync)),
-                  std::format("Fullscreen:     {}", onoff(fullscreen)),
-                  std::format("TB players:     {} ({})", players, players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend"),
-                  "Back"},
-                 optSel, 0, 8);
-            break;
-        }
+        case Screen::Main: drawMain(); break;
+        case Screen::Options: drawOptions(); break;
         case Screen::TbFront: {  // the 640x480 GDI page stretched over the 4:3 client, like the other 2-D screens
             if (const bb::Texture* t = tbFront->frame()) {
                 r.destroyImage(tbFrontImage);
@@ -852,18 +1045,7 @@ struct App {
             r.drawImage(tbFrontImage, float(v.x), float(v.y), float(v.w), float(v.h), s.fidelity == Fidelity::Enhanced);
             break;
         }
-        case Screen::Game: {
-            Game& gm = game();
-            backdrop(gm, 255);
-            const int rows = std::max(1, int(H * 0.6f) / ((g + 4) * sc));
-            const int n = int(gm.levels.size());
-            const int first = std::clamp(levelSel - rows / 2, 0, std::max(0, n - rows));
-            r.drawRect(0, H - float(26 * sc), W, float(26 * sc), kPanel);
-            r.drawText(float(8 * sc), H - float(22 * sc), sc, gm.title, kYellow);
-            r.drawText(float(8 * sc), H - float(11 * sc), sc, gm.status, n ? kGrey : kRed);
-            if (n) list(W - float(16 * g * sc) - float(16 * sc), H * 0.15f, gm.levels, levelSel, first, rows);
-            break;
-        }
+        case Screen::Game: drawLevels(); break;
         case Screen::Level: {
             if (litLoading || litEnter) {  // loading screen (0x423bd0: the TIM stretched over the 4:3 client) / not drawn
                 if (litLoading && litLoading->image) {
@@ -885,6 +1067,7 @@ struct App {
             poseActors(lerp, c);
             r.drawScene(c, s);
             if (play || tbPlay) {
+                if (tbPlay) drawTbBoxes();  // letterbox bars + text-box rects, under the glyphs (0x464c30 / 0x4662f0)
                 drawOverlayText(play ? play->world.glyphs : tbPlay->world.glyphs);  // game text: drawn with --no-hud too
                 if (tbPlay) drawTbSprites();  // the HUD sheet sprites (game HUD)
                 if (const auto f = play ? play->world.fadeOverlay() : tbPlay->world.fadeOverlay(); f[3])
@@ -903,8 +1086,6 @@ struct App {
             break;
         }
         }
-        if (screen != Screen::Level && screen != Screen::TbFront)
-            r.drawText(float(8 * sc), H - float(g * sc) - float(36 * sc), sc, hint, kGrey);
         if (overlay) drawOverlay();
     }
 
@@ -1033,6 +1214,33 @@ struct App {
             r.drawImage(fontImages[g.glyph - 1u], W * 0.5f + std::trunc(float(g.x) * sx), H * 0.5f + std::trunc(float(g.y) * sy),
                         float(tx.width) * ss, float(tx.height) * ss, s.fidelity == Fidelity::Enhanced,
                         g.pal < 5 ? kPal[g.pal] : kWhite);
+        }
+    }
+    // TB cinematic bars (0x464c30: GD+0x9f as |v|·h·2/240 px, black, top and bottom; R: 59 / 63 rows at v = 16 in
+    // the 640x480 oracle) and the text-box rects (0x4662f0: a semi-transparent 0.5·B + 0.5·F quad of 0x383838 with a
+    // Gouraud rim fading to 0x010101 over 11 x / 6 y units, in the 512x240 space; drawn here as 6 rings).
+    void drawTbBoxes() {
+        const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
+        if (const int b = std::abs(int(tbPlay->world.bars))) {
+            static constexpr uint8_t kBlack[4] = {0, 0, 0, 255};
+            const float h = float(b) * H / 120.0f;
+            r.drawRect(0, 0, W, h, kBlack), r.drawRect(0, H - h, W, h, kBlack);
+        }
+        for (const auto& t : tbPlay->world.textBoxes) {
+            const float x = W * 0.5f + float(t[0]) * sx, y = H * 0.5f + float(t[1]) * sy, w = float(t[2]) * sx, h = float(t[3]) * sy;
+            const uint8_t inner[4] = {56, 56, 56, 128};
+            r.drawRect(x, y, w, h, inner);
+            constexpr int kRings = 6;
+            for (int i = 0; i < kRings; ++i) {
+                const uint8_t c = uint8_t(56 - 55 * (2 * i + 1) / (2 * kRings));
+                const uint8_t col[4] = {c, c, c, 128};
+                const float a0 = 11.0f * sx * float(i) / kRings, a1 = 11.0f * sx * float(i + 1) / kRings;
+                const float b0 = 6.0f * sy * float(i) / kRings, b1 = 6.0f * sy * float(i + 1) / kRings;
+                r.drawRect(x - a1, y - b1, w + 2 * a1, b1 - b0, col);           // top
+                r.drawRect(x - a1, y + h + b0, w + 2 * a1, b1 - b0, col);       // bottom
+                r.drawRect(x - a1, y - b0, a1 - a0, h + 2 * b0, col);           // left
+                r.drawRect(x + w + a0, y - b0, a1 - a0, h + 2 * b0, col);       // right
+            }
         }
     }
     void freeFont() {
@@ -1176,7 +1384,7 @@ int run(const std::optional<Args>& args) {
             Game& g = app.games[gi];
             loadGame(g, args->roots[gi], app.r);
             std::println("bbtime: {}: {}{}", g.shortName, g.status,
-                         g.backdrop ? " | backdrop " + g.backdropPath.string() : std::string(" | no backdrop"));
+                         g.bg.img ? " | backdrop " + g.backdropPath.string() : std::string(" | no backdrop"));
         }
         if (!args->importSaves.empty()) {  // original Datas/bin, or an install root containing it
             fs::path from = findPath(args->importSaves, {"Datas", "bin"});
@@ -1238,8 +1446,7 @@ int run(const std::optional<Args>& args) {
             const double dt = double(now - last) * 1e-9;
             last = now;
             app.frameTime += (dt - app.frameTime) * 0.05;
-            if ((app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) &&
-                (app.screen == Screen::Level || app.screen == Screen::TbFront)) { // lockstep: 1 tick per frame
+            if (app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) {  // lockstep: 1 tick
                 app.tick(float(step.dt));
                 app.alpha = 1.0f;
             } else {
@@ -1248,7 +1455,8 @@ int run(const std::optional<Args>& args) {
             }
             if (app.screen == Screen::Main && app.mainSel < 2) musicIdx = app.mainSel; // highlighted game
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
-            fs::path track;  // menu: highlighted game's track; TB level: logic action 126 (GAMEPLAY_TB.md §6)
+            fs::path track, next;  // menu: highlighted game's track; levels: LitWorld::music (zone table) / TB action 126
+            bool paused = false;
             if (!args->mute) {
                 // The TB front end never calls PlayMusic (GAMEPLAY_TB §6.3): silent in Original Fidelity; Enhanced keeps
                 // the collection menu's TB track.
@@ -1256,9 +1464,13 @@ int run(const std::optional<Args>& args) {
                     if (app.s.fidelity == Fidelity::Enhanced) track = bbtime::menuTrack(GameId::TimeBusters, args->roots[1]);
                 } else if (app.screen != Screen::Level) track = bbtime::menuTrack(app.games[musicIdx].id, args->roots[musicIdx]);
                 else if (app.tbPlay) track = bbtime::tbLevelTrack(args->roots[1], app.tbPlay->world.music);
-                else if (app.play && app.litLevel == 0) track = bbtime::menuTrack(GameId::LostInTime, args->roots[0]);  // TITLE: TRACK25
+                else if (app.play && (!app.litLoading || app.litLoading->loaded)) {  // silent until the target loaded
+                    track = bbtime::litLevelTrack(args->roots[0], app.play->world.music);
+                    next = bbtime::litLevelTrack(args->roots[0], app.play->world.musicNext);
+                    paused = app.play->world.musicPaused;
+                }
             }
-            bbtime::playMusic(track);
+            bbtime::playMusic(track, next, paused);
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
                 const bool ok = app.r.screenshot(args->screenshot);
@@ -1269,7 +1481,13 @@ int run(const std::optional<Args>& args) {
         }
         if (app.pad) SDL_CloseGamepad(app.pad);
         if (app.pad2) SDL_CloseGamepad(app.pad2);
-        for (Game& g : app.games) app.r.destroyImage(g.backdrop);
+        for (Game& g : app.games) {
+            for (const Page* p : {&g.bg, &g.options, &g.list})
+                for (const uint32_t i : {p->img, p->left, p->right}) app.r.destroyImage(i);
+            for (const Game::Image& i : g.font) app.r.destroyImage(i.img);
+            app.r.destroyImage(g.back.img), app.r.destroyImage(g.backHot.img);
+        }
+        for (const auto& [k, i] : app.ttfCache) app.r.destroyImage(i.img);
         app.r.destroyImage(app.tbFrontImage);
         app.freeFont();
     }

@@ -104,6 +104,7 @@ public:
     void playMusic(const std::filesystem::path& xa, bool loop = true);
     void stopMusic();
     bool musicPlaying() const { return music_.has_value(); }
+    void pauseMusic(bool paused);     // hold / resume the stream at its position (no-op when unchanged)
     void setMusicVolume(float gain);  // 0..1
     void setSfxVolume(float gain);    // 0..1: playSfx gain; games read it as their config SFX volume (sfxVolume())
     float sfxVolume() const { return sfxGain_; }
@@ -121,7 +122,7 @@ private:
     unsigned musicSrc_ = 0;
     unsigned musicBufs_[kBuffers]{};
     std::optional<XaStream> music_;
-    bool loop_ = true;
+    bool loop_ = true, paused_ = false;
     float musicGain_ = 1.0f, sfxGain_ = 1.0f;
     std::vector<int16_t> scratch_;
     struct Voice { unsigned src, buf; };
