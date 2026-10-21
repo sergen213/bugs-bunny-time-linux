@@ -3,8 +3,11 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
-## Unreleased / Wave 6
+## 0.6.0 — 2026-10-20 (Wave 6, first public release)
 
+- Release: portable AppImage (`tools/release/build_appimage.sh`, built in an Ubuntu 24.04 container, glibc ≥ 2.39)
+  with the Qt launcher and the game, plus the signed update manifest for the game binary; published at
+  https://github.com/sergen213/bugs-bunny-time-linux.
 - Enhanced fidelity: overlay text glyphs scale with the window height (the original's 2× sprite cap left glyphs tiny
   and widely spaced at 4K); the debug overlay names LiT's Original Fidelity filter "linear".
 - Time Busters: the original in-play HUD (coin counter / lives / health sprites and spinning models, slide timing

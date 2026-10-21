@@ -210,7 +210,8 @@ struct Builder {
         const In in{m, "octree model"};
         const uint32_t uvTab = in.u32(8), group = nextGroup++;
         std::vector<bool> seen(m.size());
-        const auto walk = [&](this const auto& self, size_t node, size_t root, int depth, bool draw) -> void {
+        // Members through `b`: GCC 14 rejects any member access (implicit or this->) in a deducing-this lambda.
+        const auto walk = [&, &b = *this](this const auto& self, size_t node, size_t root, int depth, bool draw) -> void {
             if (depth > 16) throw FormatError(std::format("{}: octree deeper than 16 at 0x{:x}", gname, node));
             in.need(node, 0x14);
             if (seen[node]) throw FormatError(std::format("{}: octree node 0x{:x} reached twice", gname, node));
@@ -224,17 +225,17 @@ struct Builder {
             if (kind != 0) throw FormatError(std::format("{}: octree node 0x{:x} kind {}", gname, node, kind));
             const uint16_t nv = in.u16(node + 0x10), np = in.u16(node + 0x12);
             in.need(node + 0x14, size_t(nv) * 8 + size_t(np) * 28);
-            verts.resize(nv);
+            b.verts.resize(nv);
             for (size_t i = 0; i < nv; ++i) {
                 const size_t q = node + 0x14 + i * 8;
-                verts[i] = xf.apply(in.s16(q), in.s16(q + 2), in.s16(q + 4));
+                b.verts[i] = xf.apply(in.s16(q), in.s16(q + 2), in.s16(q + 4));
             }
-            const uint32_t sortGroup = nextGroup++;
+            const uint32_t sortGroup = b.nextGroup++;
             for (size_t i = 0; i < np; ++i) {
                 const size_t r = node + 0x14 + size_t(nv) * 8 + i * 28;
                 const uint8_t b0 = in.u8(r), b1 = in.u8(r + 1);
                 if (!primValid(b0, b1)) {
-                    ++s.stats.invalidPrims;
+                    ++b.s.stats.invalidPrims;
                     continue;
                 }
                 const int n = b0 & 8 ? 4 : 3;
@@ -246,12 +247,12 @@ struct Builder {
                     in.need(e, 12);
                     uv[0] = e, uv[1] = e + 4, uv[2] = e + 8, uv[3] = e + 10, tpage = e + 6;
                 }
-                ++s.stats.worldFaces;
-                if (draw) prim(in, r, n, idx, b1 & 0x40 ? nullptr : uv, tpage, group, sortGroup, gname);
+                ++b.s.stats.worldFaces;
+                if (draw) b.prim(in, r, n, idx, b1 & 0x40 ? nullptr : uv, tpage, group, sortGroup, gname);
                 else {
-                    resolve(in.u16(r + 2) & 0xfff);  // counted like drawn faces (TEXTURE_GAP.md counts all trees)
-                    checkIndices(idx, n, gname, r);
-                    ++lodFaces;
+                    b.resolve(in.u16(r + 2) & 0xfff);  // counted like drawn faces (TEXTURE_GAP.md counts all trees)
+                    b.checkIndices(idx, n, gname, r);
+                    ++b.lodFaces;
                 }
             }
         };

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=bbtime
+GenericName=Bugs Bunny: Lost in Time / Time Busters
+Comment=Native Linux engine for Bugs Bunny: Lost in Time and Bugs Bunny & Taz: Time Busters (original game files required)
+Exec=bbtime-launcher
+Icon=bbtime
+Categories=Game;
+Terminal=false

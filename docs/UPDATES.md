@@ -1,7 +1,7 @@
 # Signed updates
 
-Status: **Implemented**, **Tested** (`launcher.updater` against a local HTTPS server). No public release repository
-exists yet, so the launcher's `update_url` is empty by default; nothing has been published.
+Status: **Implemented**, **Tested** (`launcher.updater` against a local HTTPS server). Releases are published at
+https://github.com/sergen213/bugs-bunny-time-linux; the launcher's `update_url` stays empty by default (opt-in).
 
 ## Trust model
 
@@ -61,17 +61,19 @@ The launcher prefers `app/current/bbtime` when starting the game.
 ## Releasing
 
 ```sh
-python3 tools/release/make_manifest.py --version 0.2.0 \
-    --base-url https://github.com/OWNER/bbtime/releases/download/v0.2.0 \
-    --notes-file notes.md --exec bbtime --exec bbtime-launcher -o manifest.json build/apps/bbtime/bbtime \
-    build/apps/launcher/bbtime-launcher
-python3 tools/release/sign_manifest.py --key ~/.local/share/bbtime-release/update-ed25519.key manifest.json
-python3 tools/release/sign_manifest.py --verify manifest.json
-# upload the artifacts, manifest.json and manifest.json.sig to the release unchanged
+# bump `project(bbtime VERSION X.Y.Z …)` in CMakeLists.txt and the CHANGELOG heading, commit, then:
+tools/release/build_appimage.sh X.Y.Z   # → out/release-X.Y.Z/
+git tag vX.Y.Z && git push origin main vX.Y.Z
+gh release create vX.Y.Z -R sergen213/bugs-bunny-time-linux --notes-file NOTES.md out/release-X.Y.Z/*
 ```
 
-Users set `update_url = https://github.com/OWNER/bbtime/releases/latest/download/manifest.json`; the `.sig` is
-fetched from the same URL plus `.sig`. Tools need `python3` + `cryptography` (installed).
+The script builds in the `tools/release/appimage/Dockerfile` container (Ubuntu 24.04, g++-14, Qt 6.4), packs
+`bbtime-launcher` + `bbtime` into `bbtime-X.Y.Z-x86_64.AppImage` with linuxdeploy, and signs `manifest.json` with the
+private key. The manifest lists only `bbtime`: the launcher (also the AppImage's) prefers `app/current/bbtime`, so
+the game updates in place while the launcher updates by downloading a new AppImage.
+
+Users set `update_url = https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json`;
+the `.sig` is fetched from the same URL plus `.sig`. Tools need `python3` + `cryptography` (installed).
 
 ## Tests (`launcher.updater`)
 
