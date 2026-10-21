@@ -11,12 +11,15 @@
 
 #include "bb/actor.h"
 #include "bb/audio.h"
+#include "bb/game/lit_save.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -60,6 +63,8 @@ struct Args {
     std::vector<bb::game::PadInput> autoplay;     // --autoplay: one pad input per tick, lockstep rendering
     std::vector<bb::game::PadInput> autoplay2;    // --autoplay2: TB player 2 (with --players 2)
     int players = 1;                              // --players: TB 1-player (switching) or 2-player co-op
+    int slot = -1;                                // --slot: LiT save slot 1..6 (saveDir()/lit/Savegame<N>.dat)
+    fs::path importSaves;                         // --import-saves: original Datas/bin (or install root) to import
 };
 
 fs::path defaultDataRoot() {
@@ -75,6 +80,7 @@ constexpr const char* kUsage =
     "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
     "              [--renderer gl|vk] [--vk-validation] [--autoplay KEYS*TICKS,...]\n"
     "              [--players 1|2] [--autoplay2 KEYS*TICKS,...]  (TB co-op; autoplay2 = player 2)\n"
+    "              [--slot 1-6] [--import-saves DIR]  (LiT saves in $XDG_DATA_HOME/bbtime/saves/lit)\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -141,6 +147,8 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             ok = v && (*v == "1" || *v == "2");
             if (ok) a.players = *v == "2" ? 2 : 1;
         }
+        else if (f == "--slot") ok = number(a.slot) && a.slot <= 6;
+        else if (f == "--import-saves") { auto v = value(); ok = bool(v); if (v) a.importSaves = *v; }
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
         else if (f == "--camera") {
             auto v = value();
@@ -165,6 +173,10 @@ std::optional<Args> parseArgs(int argc, char** argv) {
     a.roots[1] = !dataExplicit && !cfg.tbRoot.empty() ? cfg.tbRoot : a.data / "tb";
     if (!a.level.empty() && !a.game) {
         std::println(stderr, "bbtime: --level needs --game");
+        return std::nullopt;
+    }
+    if (a.slot > 0 && a.game != GameId::LostInTime) {
+        std::println(stderr, "bbtime: --slot needs --game lit");
         return std::nullopt;
     }
     return a;
@@ -235,6 +247,7 @@ struct App {
     Screen screen = Screen::Main;
     int mainSel = 0, optSel = 0, gameIdx = 0, levelSel = 0;
     bool running = true, overlay = true, fullscreen = false, vsync = true;
+    bool helpKey = false;                 // LiT F1 pressed since the last tick (PadInput::help)
     bb::Scene scene;
     size_t sceneTris = 0;
     float moveSpeed = 8.0f; // units per second, scaled to the scene in enterLevel()
@@ -255,6 +268,12 @@ struct App {
     std::vector<bb::AiffSound> litSfx;    // LiT in-level sound bank (LitWorld::sfx indexes it)
     bbtime::KeyMap keys;
     size_t autoplayAt = 0;
+    // LiT GAME_DATA image of the active slot (--slot; Savegame<N>.dat or a new game): seeds G[] when a level is
+    // entered without carried globals, and keeps GD+0x08..+0x3f and the checksum chain for the next save.
+    std::optional<bb::game::LitSaveGame> litSave;
+    int litLevel = 0;                     // current LiT level id (GD+0), for saves
+    std::vector<uint32_t> fontImages;     // per Scene::overlayFont entry (0 = missing), built by drawOverlayText
+    Fidelity fontFidelity = Fidelity::Original;
 
     Game& game() { return games[gameIdx]; }
 
@@ -263,6 +282,7 @@ struct App {
         bb::BzeFile bze;
         scene = bb::loadLevelScene(game().id, game().root, level, &bze);
         r.uploadScene(scene);
+        freeFont();
         actorAnim.assign(scene.actors.size(), {});
         play.reset();
         tbPlay.reset();
@@ -286,6 +306,23 @@ struct App {
                     if (std::sscanf(s, "%d,%d,%d", &at.x, &at.y, &at.z) == 3) w.start(at, 0, -1);
                 }
                 if (globals) w.G = *globals;
+                else if (litSave) std::ranges::copy(litSave->G(), w.G.begin());
+                litLevel = 0;
+                for (int id = 0; !bb::game::LitWorld::levelName(id).empty(); ++id)
+                    if (iequals(bb::game::LitWorld::levelName(id), level)) { litLevel = id; break; }
+                // >D overlay key names: the first key bound to each config kbdMap action, in the exe's DIK spelling
+                // for the default keys (letters as is, arrows / Tab / Return as KEY_*).
+                static constexpr const char* kKeyActions[8] = {"kick", "crouch", "look", "jump", "roll", "camera_right", "action", "camera_left"};
+                for (size_t n = 0; n < 8; ++n)
+                    if (auto b = args.bindings.find(kKeyActions[n]); b != args.bindings.end() && !b->second.empty()) {
+                        std::string k = b->second.substr(0, b->second.find(','));
+                        std::ranges::transform(k, k.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+                        static const std::map<std::string, std::string> kDik = {
+                            {"UP", "KEY_UPARROW"}, {"DOWN", "KEY_DOWNARROW"}, {"LEFT", "KEY_LEFTARROW"},
+                            {"RIGHT", "KEY_RIGHTARROW"}, {"TAB", "KEY_TAB"}, {"RETURN", "KEY_ENTER"}, {"SPACE", "KEY_SPACE"}};
+                        w.keyNames[n] = k.size() == 1 ? k : kDik.contains(k) ? kDik.at(k) : "KEY_" + k;
+                    }
+                w.joystick = pad != nullptr;  // config use-joystick: on with a connected gamepad (">DJ" adds "/Button<n>")
                 w.loadUpdate();  // as 0x430f80: player + camera initialised before the first rendered frame
                 play.emplace(std::move(w));
             } catch (const std::exception& e) {
@@ -351,6 +388,23 @@ struct App {
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
         screen = Screen::Game;
+    }
+
+    // S[0x0a] request from level logic, as 0x407190 each tick. 6 = save (the "Do you want to save your game?" yes,
+    // item S[18] == 1): 0x4074f0 writes Savegame<G[0x9f]>.dat + Savedata.dat, S[8] = 0x0a ok / 0x14 failed (failure
+    // also S[0x1b] = 7). 4/5 (new game / load) come only from the title level's menu, which runs as --slot here.
+    void litRequest(uint8_t& req) {
+        if (req == 6) {
+            bb::game::LitSaveGame g = litSave.value_or(bb::game::LitSaveGame::newGame(0));
+            g.setLevel(litLevel);
+            std::ranges::copy(play->world.G, g.G().begin());
+            const std::string err = bb::game::writeLitSave(bbtime::saveDir() / "lit", g);
+            play->world.S[8] = err.empty() ? 0x0a : 0x14;
+            if (err.empty()) litSave = g;
+            else play->world.S[0x1b] = 7;
+            std::println("bbtime: save slot {} level {}: {}", g.slot(), litLevel, err.empty() ? "ok" : err);
+        }
+        req = 0;
     }
 
     void menu(Action a) {
@@ -440,7 +494,8 @@ struct App {
             else if (screen == Screen::Level) {
                 if (k == SDLK_F2) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
                 else if (k == SDLK_F4) s.fog = !s.fog;
-                else if (k == SDLK_F1 && play) { // debug free-fly camera
+                else if (k == SDLK_F1 && play) helpKey = true;  // the original's F1: help screen (LitWorld::tick)
+                else if (k == SDLK_F5 && play) { // debug free-fly camera
                     play->freeFly = !play->freeFly;
                     if (play->freeFly) prevCam = cam = play->camera(alpha, s.fidelity == Fidelity::Enhanced);
                     SDL_SetWindowRelativeMouseMode(r.window(), play->freeFly);
@@ -475,10 +530,12 @@ struct App {
             bb::game::PadInput in;
             if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
             else if (!play->freeFly) in = bbtime::readPad(keys, pad);
+            in.help = in.help || std::exchange(helpKey, false);
             play->tick(in);
             if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice())
                 for (uint16_t b : play->world.sfx)
                     if (b < litSfx.size() && !litSfx[b].pcm.empty()) dev->playSfx(litSfx[b]);
+            if (uint8_t& req = play->world.S[0x0a]; req) litRequest(req);
             if (const int next = play->world.nextLevel; next >= 0) {  // level change request (GAMEPLAY §1.2)
                 const auto globals = play->world.G;                   // GAME_DATA persists across levels
                 const std::string name = bb::game::LitWorld::levelName(next);
@@ -594,8 +651,9 @@ struct App {
                 c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
                 c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             }
-            poseActors(lerp);
+            poseActors(lerp, c.pos);
             r.drawScene(c, s);
+            if (play) drawOverlayText();  // game text (save prompt, hints): drawn with --no-hud too
             if (play && !args.noHud) drawHud();
             if (tbPlay && !args.noHud) drawTbHud();
             if (scene.placeholder) {
@@ -614,7 +672,7 @@ struct App {
     }
 
     // Live actors (not spawn templates); in play mode Bugs at the simulated position and collected pickups hidden.
-    void poseActors(bool lerp) {
+    void poseActors(bool lerp, glm::vec3 eye) {
         actorMeshes.clear();
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
@@ -642,6 +700,25 @@ struct App {
                 bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
                               {a.rot[0], a.yaw, a.rot[2]}, a.scale, actorMeshes);
             }
+        if (play) {  // ground shadows (0x44bb50): the shadow entity's model on one identity part
+            // The PC exe orders polygons by ordering-table bucket (the shadow +9 deeper in view space), not per pixel;
+            // with a depth buffer the quad would sink into the visual floor (which differs from the collision heights
+            // it is placed on), so its vertices are pulled kShadowPull units toward the eye (Inferred value; ponytail:
+            // a per-mesh polygon offset in both backends if thin geometry ever shows it through).
+            constexpr float kShadowPull = 24.0f;
+            bb::AnimState rigid;
+            rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
+            for (const bb::game::LitWorld::Shadow& s : play->world.shadows()) {
+                const size_t first = actorMeshes.size();
+                bb::poseActor(scene.actorModels[scene.shadowModels.at(s.entity)], rigid, {s.pos.x, s.pos.y, s.pos.z}, s.rot,
+                              {s.scale, 0x1000, s.scale}, actorMeshes);
+                for (size_t k = first; k < actorMeshes.size(); ++k)
+                    for (bb::Vertex& v : actorMeshes[k].vertices) {
+                        const glm::vec3 p{v.pos[0], v.pos[1], v.pos[2]}, q = p + kShadowPull * glm::normalize(eye - p);
+                        v.pos[0] = q.x, v.pos[1] = q.y, v.pos[2] = q.z;
+                    }
+            }
+        }
         r.setActorMeshes(actorMeshes);
     }
 
@@ -657,7 +734,44 @@ struct App {
         r.drawText(x, y, sc * 2, t, kYellow);
         if (!w.playerModel()) // no decoded actor model for Bugs: say so instead of drawing nothing silently
             r.drawText(x, y - float(14 * sc), sc, "PLACEHOLDER: Bugs model not decoded", kRed);
-        if (play->freeFly) r.drawText(x, y - float(26 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
+        if (play->freeFly) r.drawText(x, y - float(26 * sc), sc, "F5 FREE-FLY (debug camera)", kRed);
+    }
+
+    // Overlay text (LitWorld::glyphs, sprite list drawn by 0x44cfa0 / GL 0x40b130): each glyph's font TIM
+    // (Scene::overlayFont) at its pen position, w x h in the exe's 512x240 2-D space (origin at the centre) on the
+    // centred 4:3 view, texels times the palette's channel mask (0 white, 1 yellow, 2 green, 3 blue, 4 red, 5+
+    // untinted). Original Fidelity applies the PC texel curve (Scene::pcTexGamma) like the 3-D textures.
+    void drawOverlayText() {
+        static constexpr uint8_t kPal[5][4] = {
+            {255, 255, 255, 255}, {255, 255, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 0, 0, 255}};
+        if (fontImages.size() != scene.overlayFont.size() || fontFidelity != s.fidelity) {
+            freeFont();
+            fontFidelity = s.fidelity;
+            const float gamma = s.texGamma(scene.pcTexGamma);
+            for (const int32_t t : scene.overlayFont) {
+                if (t < 0) { fontImages.push_back(0); continue; }
+                bb::Texture tx = scene.textures[size_t(t)];
+                if (gamma != 1.0f)
+                    for (size_t i = 0; i < tx.rgba.size(); ++i)
+                        if (i % 4 != 3) tx.rgba[i] = uint8_t(std::floor(256.0f * std::pow(float(tx.rgba[i]) / 256.0f, gamma)));
+                fontImages.push_back(r.createImage(tx));
+            }
+        }
+        // 0x408100: position scale 0x4efb7c = view width / 512 (x), 0x4efb80 = height / 240 (y); sprite size scale
+        // 0x4efb84 steps with the width scale: >= 2 -> 2, >= 1.5 -> 1.5, >= 1 -> 1, else 0.85 (640x480: 16x16 px).
+        const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
+        const float ss = sx >= 2.0f ? 2.0f : sx >= 1.5f ? 1.5f : sx >= 1.0f ? 1.0f : 0.85f;
+        for (const bb::game::OverlayGlyph& g : play->world.glyphs) {
+            if (!g.glyph || g.glyph > fontImages.size() || !fontImages[g.glyph - 1u]) continue;
+            const bb::Texture& tx = scene.textures[size_t(scene.overlayFont[g.glyph - 1u])];
+            r.drawImage(fontImages[g.glyph - 1u], W * 0.5f + std::trunc(float(g.x) * sx), H * 0.5f + std::trunc(float(g.y) * sy),
+                        float(tx.width) * ss, float(tx.height) * ss, s.fidelity == Fidelity::Enhanced,
+                        g.pal < 5 ? kPal[g.pal] : kWhite);
+        }
+    }
+    void freeFont() {
+        for (const uint32_t i : fontImages) r.destroyImage(i);
+        fontImages.clear();
     }
 
     // TB text HUD: who has the camera/control, mode, call-friend readiness (the original sprite HUD is not ported).
@@ -696,7 +810,7 @@ struct App {
         if (screen == Screen::Level && play) {
             const bb::game::LitWorld& w = play->world;
             text += std::format("\nPLAY  tick {}  state {} seq {}  anim {}  flags14 {:08x}\nbugs {} {} {}  yaw {}  ground {}  zone {}"
-                                "\ncam eye {} {} {}  yaw {}  F1 free-fly  F2 fidelity  F4 fog",
+                                "\ncam eye {} {} {}  yaw {}  F1 help  F5 free-fly  F2 fidelity  F4 fog",
                                 w.ticks, w.p.state, w.p.seq, w.p.anim, w.p.flags14, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.yaw,
                                 w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw);
             if (!w.unsupported.empty()) {
@@ -772,18 +886,42 @@ int run(const std::optional<Args>& args) {
             std::println("bbtime: {}: {}{}", g.shortName, g.status,
                          g.backdrop ? " | backdrop " + g.backdropPath.string() : std::string(" | no backdrop"));
         }
+        if (!args->importSaves.empty()) {  // original Datas/bin, or an install root containing it
+            fs::path from = findPath(args->importSaves, {"Datas", "bin"});
+            if (from.empty()) from = args->importSaves;
+            std::println("bbtime: import LiT saves from {}: {}", from.string(),
+                         bb::game::importLitSaves(from, bbtime::saveDir() / "lit"));
+        }
+        std::string level = args->level;
+        if (args->slot > 0) {  // as the title menu: load the slot (0x407190 case 5) or start a new game in it (case 4)
+            const fs::path file = bb::game::litSaveGamePath(bbtime::saveDir() / "lit", args->slot);
+            std::error_code ec;
+            try {
+                app.litSave = fs::exists(file, ec) ? bb::game::parseLitSaveGame(bb::readFile(file), args->slot)
+                                                   : bb::game::LitSaveGame::newGame(args->slot);
+            } catch (const std::exception& e) {
+                std::println(stderr, "bbtime: {} (a .bak copy may hold the previous save)", e.what());
+                return 1;
+            }
+            app.litSave->G()[0x36] = 0;  // load clears GD+0x76 (camera/cutscene lock)
+            const auto G = app.litSave->G();
+            std::println("bbtime: slot {} {}: level {} health {}/{} carrots {} golden {} clocks {}", args->slot,
+                         fs::exists(file, ec) ? file.string() : "new game", app.litSave->startLevel(), G[1], G[2],
+                         G[3], G[7] | G[0xfc] << 8, G[5]);
+            if (level.empty()) level = bb::game::LitWorld::levelName(app.litSave->startLevel());
+        }
         if (args->game) {
             app.gameIdx = *args->game == GameId::LostInTime ? 0 : 1;
             app.mainSel = app.gameIdx;
             app.screen = Screen::Game;
-            if (!args->level.empty()) {
+            if (!level.empty()) {
                 auto& lv = app.game().levels;
-                if (auto it = std::ranges::find_if(lv, [&](const std::string& l) { return iequals(l, args->level); }); it != lv.end()) {
+                if (auto it = std::ranges::find_if(lv, [&](const std::string& l) { return iequals(l, level); }); it != lv.end()) {
                     app.levelSel = int(it - lv.begin());
                     app.enterLevel(*it);
                 } else {
-                    std::println(stderr, "bbtime: level '{}' not found on disk; showing placeholder anyway", args->level);
-                    app.enterLevel(args->level);
+                    std::println(stderr, "bbtime: level '{}' not found on disk; showing placeholder anyway", level);
+                    app.enterLevel(level);
                 }
             }
             if (args->camera) {
@@ -834,6 +972,7 @@ int run(const std::optional<Args>& args) {
         if (app.pad) SDL_CloseGamepad(app.pad);
         if (app.pad2) SDL_CloseGamepad(app.pad2);
         for (Game& g : app.games) app.r.destroyImage(g.backdrop);
+        app.freeFont();
     }
     return 0;
 }

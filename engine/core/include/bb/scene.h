@@ -3,6 +3,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -136,6 +137,12 @@ struct Scene {
     float spawnYaw = 0.0f;       // radians, engine Camera convention
     std::vector<ActorModel> actorModels; // LiT TOD-animated actor models (bb/actor.h poses them)
     std::vector<ActorInstance> actors;
+    // LiT shadow models (0x44bb50): entity id named by an entity's tag 0x46 (+0x3a) -> actorModels index of that
+    // template entity's first role-6 model (L01a: entity 3 = a 200 x 200 quad, texture 133, ABR 2).
+    std::map<uint16_t, uint32_t> shadowModels;
+    // LiT overlay text font (0x44ccd0): template entity 68's class-8 sprite asset, one 0x64 record per glyph, each a
+    // whole 16x16 (icons up to 64x32) TIM. overlayFont[glyph - 1] = Scene::textures index, -1 if not loaded.
+    std::vector<int32_t> overlayFont;
     SceneStats stats;
     std::vector<std::string> notes; // short human-readable status lines for overlays (gaps, research state)
 };

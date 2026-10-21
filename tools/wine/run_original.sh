@@ -15,15 +15,25 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 stop() ( # subshell: the sourced state must not leak into a new start
   env=$W/run/$1.env
-  [ -f "$env" ] || exit 0
-  # shellcheck disable=SC1090
-  . "$env"
-  kill "$SRV_PID" 2>/dev/null || true
-  pkill -f "$EXE" 2>/dev/null || true
-  sleep 1
-  pkill -9 -f "$EXE" 2>/dev/null || true
-  kill "$XVFB_PID" 2>/dev/null || true
-  rm -f "$env"
+  if [ -f "$env" ]; then
+    # shellcheck disable=SC1090
+    . "$env"
+    kill "$SRV_PID" 2>/dev/null || true
+    pkill -f "$EXE" 2>/dev/null || true
+    sleep 1
+    pkill -9 -f "$EXE" 2>/dev/null || true
+    kill "$XVFB_PID" 2>/dev/null || true
+    rm -f "$env"
+  fi
+  # Last game of the prefix gone: kill its wineserver and every orphan (explorer.exe /desktop etc.). Orphans
+  # otherwise pile up across runs (thousands of explorer.exe once exhausted RAM).
+  compgen -G "$W/run/*.env" >/dev/null && exit 0
+  "$WINESERVER_BIN" -k 2>/dev/null || true
+  for p in $(pgrep -u "$(id -u)" -f 'wine|\.exe'); do  # wine binaries only (this script also matches 'wine')
+    case $(readlink "/proc/$p/exe" 2>/dev/null) in *wine*) ;; *) continue ;; esac
+    grep -qzx "WINEPREFIX=$WINEPREFIX" "/proc/$p/environ" 2>/dev/null && kill -9 "$p" 2>/dev/null
+  done
+  true
 )
 
 if [ "${1:-}" = stop ]; then stop "$2"; exit 0; fi

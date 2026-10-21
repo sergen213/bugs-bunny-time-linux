@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <set>
 
 using namespace bb;
@@ -226,7 +227,17 @@ std::vector<V3> replayL01a(const BzeFile& bze, const Scene& scene) {
         if (t >= 50 && t < 110) in.buttons = PadUp;
         if (t >= 110 && t < 130) in.buttons = PadCross;
         w.tick(in);
-        if (t == 30) assert(w.cam.eye == (V3{23613, -1000, 11550}) && w.cam.flags == 0x440 && w.cam.target.y == w.p.pos.y - 400);
+        // Runtime (RUNTIME_REFERENCE §3, csv/litfid_walkin*.{csv,txt}): tick 1 attaches Bugs (state 130) at z 8830;
+        // the carrier moves +25 from tick 2 and Bugs follows one tick behind; tick 34 releases him at the carrier's
+        // z 9655 in state 1.
+        // Tick t = original counter 2t + 3 (load update = the exe's load pass; RUNTIME_REFERENCE §3/§8).
+        if (t >= 1 && t <= 33) {  // ticks 1..33 carried
+            const int k = t;
+            assert(w.p.state == 130 && w.p.carrier >= 0 && w.p.pos.z == 8830 + 25 * std::max(0, k - 2));
+            assert(w.actors[size_t(w.p.carrier)].pos.z == 8830 + 25 * (k - 1));
+        }
+        if (t == 34) assert(w.p.state == 1 && w.p.carrier < 0 && w.p.pos.z == 9655);
+        if (t == 31) assert(w.cam.eye == (V3{23613, -1000, 11550}) && w.cam.flags == 0x440 && std::abs(w.cam.target.y - (w.p.pos.y - 400)) <= 3);  // >> 2 lerp residue
         if (w.p.state == 130 && t130 < 0) t130 = t;
         if (w.p.state == 1 && t130 >= 0 && t1 < 0) t1 = t;
         trace.push_back(w.p.pos);
@@ -247,6 +258,35 @@ std::vector<V3> replayL01a(const BzeFile& bze, const Scene& scene) {
     return trace;
 }
 
+// Bugs' ground shadow (0x44bb50): template entity 3 (tag 0x46) = one 200 x 200 subtractive quad textured 133; on flat
+// ground it lies at the ground height with scale 0x1000 and Bugs' yaw; in the air it shrinks 4/4096 per unit of height.
+void testShadow(const BzeFile& bze, const Scene& scene) {
+    assert(scene.shadowModels.contains(3));
+    const ActorModel& sm = scene.actorModels[scene.shadowModels.at(3)];
+    assert(sm.meshes.size() == 1 && sm.meshes[0].mesh.blend == Blend::Subtract && sm.objects[0].size() == 4);
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.loadUpdate();
+    for (int t = 0; t < 60; ++t) w.tick({});
+    auto bugs = [&] {
+        const auto s = w.shadows();
+        assert(!s.empty() && s[0].entity == 3);
+        return s[0];
+    };
+    LitWorld::Shadow s = bugs();
+    std::printf("L01a shadow: at %d %d %d rot %d %d %d scale %d (Bugs %d %d %d ground %d)\n", s.pos.x, s.pos.y, s.pos.z,
+                s.rot[0], s.rot[1], s.rot[2], s.scale, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.groundY());
+    assert(s.pos.y == w.groundY() && s.scale == 0x1000 && std::abs(s.pos.x - w.p.pos.x) < 100 && std::abs(s.pos.z - w.p.pos.z) < 100);
+    PadInput jump;
+    jump.buttons = PadCross;
+    int minScale = 0x1000;
+    for (int t = 0; t < 16; ++t) {
+        w.tick(jump);
+        minScale = std::min(minScale, bugs().scale);
+    }
+    std::printf("L01a shadow during the jump: min scale %d\n", minScale);
+    assert(minScale < 0x1000 && minScale >= 0x800);
+}
+
 // Walk through the first L01a carrot (type 14, touched -> spawn fx template whose clip end runs A48 gvcrt): it
 // is collected and counted (health 6/6 -> carrots +1).
 void testCarrot(const BzeFile& bze, const Scene& scene) {
@@ -263,6 +303,7 @@ void testCarrot(const BzeFile& bze, const Scene& scene) {
     const auto it = std::ranges::find_if(w.actors, isCarrot);
     assert(it != w.actors.end());
     const size_t idx = size_t(it - w.actors.begin());
+    const int32_t def0 = it->def;
     const V3 at = it->pos;
     std::printf("L01a: %zu actors, first carrot #%zu at %d %d %d\n", w.actors.size(), idx, at.x, at.y, at.z);
     w.G[18] |= 0x80;  // as when coming back from L01B: the start director skips the walk-in (C31 G[18] & 0x80)
@@ -274,7 +315,7 @@ void testCarrot(const BzeFile& bze, const Scene& scene) {
     std::printf("carrots %d, unsupported:", w.carrots());
     for (const std::string& u : w.unsupported) std::printf(" %s", u.c_str());
     std::printf("\n");
-    assert(w.carrots() >= 1 && w.actors[idx].dead);
+    assert(w.carrots() >= 1 && (w.actors[idx].dead || w.actors[idx].def != def0));  // freed slots are reused by spawns
 }
 
 // L01a level exit (zone trigger flag 0x80000 -> level 5 = L01B, GAMEPLAY §1.2): Bugs placed on the ground at the
@@ -301,6 +342,41 @@ int testExit(const BzeFile& bze, const Scene& scene) {
                 LitWorld::levelName(w.nextLevel).c_str(), t);
     assert(w.nextLevel == 5 && LitWorld::levelName(5) == "L01B");
     return t;
+}
+
+// L01A's pushable block (type 5, 0x445a60; tag 0x1d 0x89 = X only, keep on the floor) vs the original
+// (RUNTIME_REFERENCE §10, csv/litpush_L01A.csv): Bugs poked to (24723, -640, 10774) yaw 1422 at counter 103, ↑ from
+// 201, R1 added at 215. He touches it at 217 (state 24 push, flags14 0x20000 from the 150-ahead probe), pushes from
+// 219 (flags14 0x4000) and the block takes his move one tick later (it updates before him), sliding X only while he
+// follows; release at 301 leaves it at x 25610.
+void testPushL01a(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfxChannels = 24;
+    w.loadUpdate();
+    size_t bi = 0;
+    while (bi < w.actors.size() && w.actors[bi].type != 5) ++bi;
+    assert(bi < w.actors.size());
+    auto block = [&] { return &w.actors[bi]; };  // by index: spawns may reallocate the vector
+    assert(block()->pos == (V3{25215, -640, 10430}) && block()->param == 0x89);
+    struct At { int cnt; uint32_t seed; V3 bugs; uint16_t state; uint32_t f14; int32_t blockX; };
+    const At want[] = {{217, 0xe0486980, {24950, -640, 10575}, 24, 2, 25215},
+                       {219, 0x89753ad5, {24974, -640, 10557}, 24, 0x4002, 25215},
+                       {221, 0xd91dc2de, {24990, -640, 10562}, 24, 0x4002, 25239},
+                       {241, 0xba8daeee, {25084, -640, 10568}, 24, 0x4002, 25340},
+                       {271, 0x4e57a60f, {25219, -640, 10568}, 24, 0x4002, 25475},
+                       {301, 0x8a287814, {25345, -640, 10571}, 1, 2, 25610},
+                       {325, 0x3f0bc472, {25345, -640, 10568}, 1, 2, 25610}};
+    size_t k = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        if (cnt == 103) w.p.pos = {24723, -640, 10774}, w.p.yaw = 1422;
+        w.tick({.buttons = uint16_t(cnt >= 301 ? 0 : cnt >= 215 ? PadUp | PadR1 : cnt >= 201 ? PadUp : 0)});
+        if (cnt != want[k].cnt) continue;
+        const At& a = want[k++];
+        assert(w.rand_.seed == a.seed && w.p.pos == a.bugs && w.p.state == a.state && w.p.flags14 == a.f14 &&
+               block()->pos == (V3{a.blockX, -640, 10430}) && (block()->flags14 & 0x8000));
+    }
+    std::printf("L01A pushable block: push 217-301 matches the original (block x 25215 -> 25610)\n");
 }
 
 // Health 0 -> death state (HUD 0x44acc0), clip end -> respawn at the checkpoint with health 6 (§3.6). L01a's
@@ -350,6 +426,169 @@ void sweep(const std::filesystem::path& dir) {
     assert(loaded >= 79);  // GAMEPLAY §4.1: 79 LiT BZEs carry chunk 0x36
 }
 
+// L01A's first enemy vs the original (RUNTIME_REFERENCE §10, local/wine/csv/litenemy_L01A_{idle,fight}.csv): template
+// 932 spawned by the zone-gated director at (24500, -630, 15110), wandering (rand), turning at ledges (0x437f40), the
+// type-2 idle-fidget props driven by Bugs' anim event (G[176]) and every rand() call in between. Tick t = counter
+// 2t + 3; the oracle ran without audio (its 24 sound channels never free). Values below are the original's.
+const LitActor* enemy932(const LitWorld& w) {
+    for (const LitActor& a : w.actors)
+        if (!a.dead && a.entityId == 932) return &a;
+    return nullptr;
+}
+void testEnemyL01a(const BzeFile& bze, const Scene& scene) {
+    struct At { int cnt; uint32_t seed; V3 pos; int16_t yaw; uint16_t state; int16_t wander; };
+    {
+        LitWorld w = LitWorld::load(bze, &scene);
+        w.sfxChannels = 24;
+        w.loadUpdate();
+        const At want[] = {{9, 0x0bb31550, {24500, -624, 15125}, 4096, 1, 491},
+                           {431, 0x884dc7d5, {25270, -624, 16030}, 5006, 1, 400},
+                           {433, 0x67d0db44, {25278, -624, 16018}, 6210, 1, 399},  // ledge: steer +682, A38 +512
+                           {691, 0x21eba4a7, {24657, -624, 15191}, 6900, 361, 330},
+                           {1251, 0x79c4cece, {23853, -624, 15173}, 7440, 361, 276}};
+        size_t k = 0;
+        for (int t = 0; k < std::size(want); ++t) {
+            w.tick({});
+            if (2 * t + 3 == 5) assert(!enemy932(w));  // spawned on the 3rd tick (zone table empty before drawing)
+            if (2 * t + 3 != want[k].cnt) continue;
+            const LitActor* e = enemy932(w);
+            assert(e && w.rand_.seed == want[k].seed && e->pos == want[k].pos && e->yaw == want[k].yaw &&
+                   w.defs[size_t(e->def)].states[size_t(e->state)].id == want[k].state && e->wander == want[k].wander);
+            ++k;
+        }
+    }
+    // Fight (csv/litenemy_L01A_fight2.csv, pads replayed by counter): teleported next to it (memsrv poke at counter
+    // 103), three kicks (□) make it face (state 236), chase (177) and start its attack (201) exactly as the original.
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfxChannels = 24;
+    w.loadUpdate();
+    const std::pair<int, uint16_t> pads[] = {{585, PadSquare}, {603, 0}, {641, PadSquare}, {657, 0}, {697, PadSquare}, {711, 0},
+                                             {771, PadCross}, {793, 0}, {881, PadUp}, {921, 0}, {967, PadCross}, {999, 0},
+                                             {1089, PadSquare}, {1103, 0}, {1143, PadSquare}, {1159, 0}};
+    const At want[] = {{603, 0xb2deca27, {25157, -624, 15651}, 6460, 236, 374},
+                       {659, 0xebdba1b2, {25157, -624, 15651}, -1771, 177, 374},
+                       {725, 0x2f841e10, {24730, -624, 14727}, -1780, 201, 374},
+                       {755, 0x6cde71e7, {24546, -624, 14307}, -1779, 201, 374},
+                       {1009, 0x9d5c6830, {24546, -624, 14307}, -1906, 209, 374},
+                       {1097, 0x5740b482, {24546, -624, 14307}, -1906, 192, 374}};
+    auto all = [&](uint16_t id) {
+        std::vector<const LitActor*> v;
+        for (const LitActor& a : w.actors)
+            if (!a.dead && a.entityId == id) v.push_back(&a);
+        return v;
+    };
+    uint16_t buttons = 0;
+    size_t k = 0;
+    for (int t = 0; 2 * t + 3 <= 1185; ++t) {
+        const int cnt = 2 * t + 3;
+        for (const auto& [c, b] : pads)
+            if (c == cnt) buttons = b;
+        if (cnt == 103) w.p.pos = {24500, -624, 14200};
+        w.tick({.buttons = buttons});
+        // Its growing attack box (TOD packet 9) pushes Bugs out (0x433500; his box is the fixed ±70 / ±40), then the
+        // hand (packet 10 attach point, 0x434840) hits: health 5, knock-back state 10 on counter 769, sliding -8 z
+        // at 773 without a push. Walking into it (881-921) is deflected, never stopped.
+        if (cnt == 761) assert(w.p.pos == (V3{24452, -624, 14093}) && w.health() == 6);
+        if (cnt == 767) assert(w.health() == 6 && w.p.state == 1);
+        if (cnt == 769) assert(w.p.pos == (V3{24447, -624, 14082}) && w.health() == 5 && w.p.state == 10);
+        if (cnt == 773) assert(w.p.pos == (V3{24447, -624, 14069}) && w.rand_.seed == 0xeea36799);
+        if (cnt == 929) assert(w.p.pos == (V3{24510, -624, 14154}));
+        // Stomp (✕ at 967): no contact at 1007 (corner past its box), at 1009 it is (state 209), Bugs bounces (91).
+        if (cnt == 1007) assert(w.p.pos == (V3{24503, -923, 14144}) && w.p.state == 7);
+        if (cnt == 1009) assert(w.p.pos == (V3{24503, -881, 14144}) && w.p.state == 91);
+        // Kick (□ at 1089): the attach point hits at 1097 (health 9999, state 192); two carrots 39 and the golden
+        // carrot 542 spawn; it is flung (state 4) and freed at 1185, the hop count doubles the carrots' second hop,
+        // 542 lands on 1143 and is collected (state 129) when its frame-11 box touches Bugs at 1185.
+        if (cnt == 1097) assert(enemy932(w)->reg == 9999);
+        if (cnt == 1101) assert(all(39).size() == 2 && all(542).size() == 1 && all(542)[0]->pos == (V3{24541, -674, 14292}));
+        if (cnt == 1165) assert(all(39)[0]->pos == (V3{24580, -986, 13287}) && all(39)[1]->pos == (V3{23675, -1052, 13758}));
+        if (cnt == 1175) assert(all(39)[0]->pos == (V3{24585, -624, 13137}) && w.rand_.seed == 0x77680553);
+        if (cnt == 1183) {
+            const LitActor& g = *all(542)[0];
+            assert(enemy932(w) && enemy932(w)->pos == (V3{25306, -229, 17187}) &&
+                   w.defs[size_t(g.def)].states[size_t(g.state)].id == 1 && g.pos == (V3{24436, -897, 13977}));
+        }
+        if (cnt == 1185) {
+            const LitActor& g = *all(542)[0];
+            assert(!enemy932(w) && w.defs[size_t(g.def)].states[size_t(g.state)].id == 129 && g.pos == w.p.pos &&
+                   w.rand_.seed == 0x7f6311a3);
+        }
+        if (k == std::size(want) || cnt != want[k].cnt) continue;
+        const LitActor* e = enemy932(w);
+        assert(e && w.rand_.seed == want[k].seed && e->pos == want[k].pos && e->yaw == want[k].yaw &&
+               w.defs[size_t(e->def)].states[size_t(e->state)].id == want[k].state && e->wander == want[k].wander);
+        ++k;
+    }
+    assert(k == std::size(want));
+    std::printf("L01A enemy 932: idle 1251 counters and the fight to its defeat (counter 1185) match the original\n");
+}
+
+// PROBE=1 [PROBE_PADS=file of "counter rawpad(hex)"] [PROBE_IDS=932,...]: one line per tick, same fields as
+// local/litenemies/enemy_trace.py (counter = 2t + 3).
+void probeEnemy(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfxChannels = 24;
+    w.loadUpdate();
+    std::map<int, uint16_t> pads;
+    if (const char* f = std::getenv("PROBE_PADS")) {
+        std::FILE* fp = std::fopen(f, "r");
+        int c;
+        unsigned v;
+        while (fp && std::fscanf(fp, "%d %x", &c, &v) == 2) pads[c] = uint16_t(v);
+        if (fp) std::fclose(fp);
+    }
+    std::set<int> ids{932};
+    if (const char* s = std::getenv("PROBE_IDS")) {
+        ids.clear();
+        for (const char* q = s; *q; ++q) {
+            ids.insert(std::atoi(q));
+            while (*q && *q != ',') ++q;
+            if (!*q) break;
+        }
+    }
+    std::set<int> types;  // PROBE_TYPES=5,8,...: also every live actor of these behaviour types (PROBE_T2 = 2)
+    if (const char* s = std::getenv("PROBE_TYPES"))
+        for (const char* q = s; *q; ++q) {
+            types.insert(std::atoi(q));
+            while (*q && *q != ',') ++q;
+            if (!*q) break;
+        }
+    if (std::getenv("PROBE_T2")) types.insert(2);
+    auto traced = [&](const LitActor& a) { return !a.dead && (ids.contains(a.entityId) || types.contains(a.type)); };
+    const int n = std::getenv("PROBE_TICKS") ? std::atoi(std::getenv("PROBE_TICKS")) : 400;
+    uint16_t raw = 0;
+    for (int t = 0; t < n; ++t) {
+        const int cnt = 2 * t + 3;
+        if (auto it = pads.upper_bound(cnt); it != pads.begin()) raw = std::prev(it)->second;
+        if (const char* tp = std::getenv("PROBE_TELEPORT")) {  // counter,x,y,z[,yaw]: memsrv poke of Bugs' position
+            int c = 0, yaw = 0;
+            V3 to{};
+            const int got = std::sscanf(tp, "%d,%d,%d,%d,%d", &c, &to.x, &to.y, &to.z, &yaw);
+            if (got >= 4 && c == cnt) w.p.pos = to;
+            if (got == 5 && c == cnt) w.p.yaw = int16_t(yaw);
+        }
+        w.tick({.buttons = raw});
+        std::printf("%d %08x %x %d %d,%d,%d %d %u %x %d,%d,%d |", cnt, w.rand_.seed, raw, w.health(), w.p.pos.x, w.p.pos.y, w.p.pos.z,
+                    w.p.yaw, w.p.state, w.p.flags14, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z);
+        for (const LitActor& a : w.actors)
+            if (traced(a)) {
+                const ActorDef& d = w.defs[size_t(a.def)];
+                std::printf(" %u:%d,%d,%d:%d:%x:%d/%u/%d:%d:%u:%x:%d:%u:%u/%u/%u", a.entityId, a.pos.x, a.pos.y, a.pos.z, a.yaw, a.flags14,
+                            a.state >= 0 ? d.states[size_t(a.state)].id : -1, a.seq, a.step >= 0 ? d.steps[size_t(a.step)].id : -1, a.reg,
+                            a.timer, a.flags18, a.wander, a.type, a.anim, a.animState.frame, a.animState.countdown);
+            }
+        if (std::getenv("PROBE_BOX")) {  // enemy_trace.py bbox layout (Bugs; rot = yaw only) + the traced actors' boxes
+            auto box = [](const std::array<int16_t, 6>& b, int r, int inf, int yaw) {
+                std::printf(" #%d,%d,%d,%d,%d,%d/%d/%d/0,%d,0", b[0], b[1], b[2], b[3], b[4], b[5], r, inf, yaw);
+            };
+            box(w.p.animState.box, w.p.animState.radius, 0, w.p.yaw);
+            for (const LitActor& a : w.actors)
+                if (traced(a)) box(a.box, a.animState.radius, a.inflate, a.yaw);
+        }
+        std::printf("\n");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -367,10 +606,21 @@ int main() {
     if (!std::filesystem::exists(file)) { std::printf("no L01a.bze: skipped\n"); return 0; }
     const BzeFile bze = loadBze(file);
     const Scene scene = buildLitScene(bze, "L01A");
+    if (const char* lv = std::getenv("PROBE_LEVEL"); std::getenv("PROBE") && lv) {  // e.g. PROBE_LEVEL=Merlin
+        std::string up = lv;
+        for (char& c : up) c = char(std::toupper(uint8_t(c)));
+        const BzeFile b = loadBze(file.parent_path() / (std::string(lv) + ".bze"));
+        probeEnemy(b, buildLitScene(b, up));
+        return 0;
+    }
+    if (std::getenv("PROBE")) { probeEnemy(bze, scene); return 0; }
     testCarrot(bze, scene);
     assert(testExit(bze, scene) == testExit(bze, scene));  // deterministic
     sweep(file.parent_path());
     assert(replayL01a(bze, scene) == replayL01a(bze, scene));  // deterministic
+    testShadow(bze, scene);
+    testEnemyL01a(bze, scene);
+    testPushL01a(bze, scene);
     testDeath(bze, scene);
     std::printf("ok\n");
     return 0;

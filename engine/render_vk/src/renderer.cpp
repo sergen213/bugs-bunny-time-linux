@@ -1019,7 +1019,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     VkPipeline bound = VK_NULL_HANDLE;
     int boundGeom = -1;
     auto draw = [&](const GpuMesh& m) {
-        const int b = m.blend == Blend::Alpha ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
+        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA).
+        const bool pcSub = original && m.blend == Blend::Subtract;
+        const int b = m.blend == Blend::Alpha || pcSub ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
         if (VkPipeline p = pipe3D_[msaaOn_][b]; p != bound) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
         if (int g = m.actor; g != boundGeom) {
             vkCmdBindVertexBuffers(cb, 0, 1, &geomV[g], &offV[g]);
@@ -1028,7 +1030,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         }
         vkCmdSetCullMode(cb, m.twoSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
         pc.alphaRef = m.blend == Blend::AlphaTest ? 0.5f : -1.0f;
-        pc.flags = m.blend == Blend::Additive || m.blend == Blend::Subtract;
+        pc.flags = (m.blend == Blend::Additive || m.blend == Blend::Subtract) | (pcSub ? 2u : 0u);
         if (m.textureAnim >= 0) {
             const TexAnim& a = texAnims_[size_t(m.textureAnim)];
             pc.tex = a.frames[(a.start + texTick_ / a.hold) % a.frames.size()];

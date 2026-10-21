@@ -28,6 +28,12 @@ def main(argv):
         del argv[i:i + 2]
     game, out, secs, specs = argv[0], argv[1], float(argv[2]), [parse(s) for s in argv[3:]]
     m = Mem(game)
+
+    def addr(e):  # a pointer chain through an unreadable (e.g. null) pointer -> address 0 (reads blank)
+        try:
+            return m.addr(e)
+        except struct.error:
+            return 0
     cols = ['t'] + [f'{nm}_{i}' if n > 1 else nm for nm, _, _, n in specs for i in range(n)]
     with open(out, 'w', newline='') as f:
         w = csv.writer(f)
@@ -35,10 +41,14 @@ def main(argv):
         t0 = time.monotonic()
         nxt = t0
         while (now := time.monotonic()) - t0 < secs:
-            spans = [(m.addr(e), struct.calcsize(FMT[t]) * n) for _, e, t, n in specs]
+            spans = [(addr(e), struct.calcsize(FMT[t]) * n) for _, e, t, n in specs]
             row = [f'{now - t0:.4f}']
-            for (_, _, t, n), raw in zip(specs, m.read_many(spans)):
-                row += list(struct.unpack('<%d%s' % (n, FMT[t]), raw)) if len(raw) else [''] * n
+            raws = m.read_many(spans)
+            if any(len(r) != s for r, (_, s) in zip(raws, spans)):  # one bad span fails the batch: read singly
+                raws = [m.read(a, s) if a else b'' for a, s in spans]
+            for (_, _, t, n), (_, size), raw in zip(specs, spans, raws):
+                # null/unmapped pointer chains read short: blank cells
+                row += list(struct.unpack('<%d%s' % (n, FMT[t]), raw)) if len(raw) == size else [''] * n
             w.writerow(row)
             nxt += period
             time.sleep(max(0.0, nxt - time.monotonic()))

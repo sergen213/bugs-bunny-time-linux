@@ -34,7 +34,8 @@ uniform sampler2D uTex;
 uniform float uAlphaRef;   // texels below are discarded (AlphaTest); negative = off
 uniform vec2 uFog;         // linear fog start, end; end <= start = off
 uniform vec3 uFogColor;
-uniform int uAdditive;     // additive/subtractive surfaces fade to black, not to the fog colour
+uniform int uAdditive;     // 1: additive/subtractive surfaces fade to black, not to the fog colour; 2: PC ABR-2 texel
+                           // alpha = trunc luma of the raw texel (bugs.exe 0x420d10 case 2), alpha-blended, fog to black
 uniform float uColorScale; // vertex rgb multiplier (PS1 modulation: 255/128), result saturates
 uniform float uTexGamma;   // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
 in vec2 vUv;
@@ -43,8 +44,10 @@ in float vDist;
 out vec4 oCol;
 void main() {
     vec4 t = texture(uTex, vUv);
+    float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
     if (uTexGamma != 1.0) t.rgb = floor(256.0 * pow(t.rgb * (255.0 / 256.0), vec3(uTexGamma)) + 1e-3) / 255.0;
     vec4 c = t * vCol;
+    if (uAdditive == 2) c.a = luma * vCol.a;
     c.rgb = min(c.rgb * uColorScale, vec3(1.0));
     if (c.a < uAlphaRef) discard;
     if (uFog.y > uFog.x) {
@@ -443,7 +446,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
             glBindTexture(GL_TEXTURE_2D, m.texture);
         }
         glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : -1.0f);
-        glUniform1i(uAdditive_, m.blend == Blend::Additive || m.blend == Blend::Subtract);
+        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA).
+        const bool pcSub = original && m.blend == Blend::Subtract;
+        glUniform1i(uAdditive_, pcSub ? 2 : m.blend == Blend::Additive || m.blend == Blend::Subtract);
         glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(m.indexCount), GL_UNSIGNED_INT,
                                  reinterpret_cast<void*>(size_t(m.firstIndex) * sizeof(uint32_t)), m.baseVertex);
         ++drawCalls_;
@@ -471,9 +476,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glDepthMask(GL_FALSE);
     for (const GpuMesh* m : translucent) {
         // Destination alpha is kept at 1 so the window never turns see-through under a compositor.
-        if (m->blend == Blend::Alpha) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        const bool pcSub = original && m->blend == Blend::Subtract;
+        if (m->blend == Blend::Alpha || pcSub) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
         else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
-        glBlendEquationSeparate(m->blend == Blend::Subtract ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
+        glBlendEquationSeparate(m->blend == Blend::Subtract && !pcSub ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
         draw(*m);
     }
     glBlendEquation(GL_FUNC_ADD);

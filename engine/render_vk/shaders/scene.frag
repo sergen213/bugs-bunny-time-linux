@@ -9,7 +9,8 @@ layout(push_constant) uniform P {
     vec4 fogColorScale;
     vec2 fog;       // linear fog start, end; end <= start = off
     float alphaRef; // texels below are discarded (AlphaTest); negative = off
-    uint flags;     // bit 0: additive/subtractive surface, fades to black instead of the fog colour
+    uint flags;     // bit 0: additive/subtractive surface, fades to black instead of the fog colour; bit 1: PC ABR-2
+                    // (bugs.exe 0x420d10 case 2: alpha = trunc luma of the raw texel, alpha-blended)
     uint tex;
     uint samp;
     float texGamma; // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
@@ -20,8 +21,10 @@ layout(location = 2) in float vDist;
 layout(location = 0) out vec4 oCol;
 void main() {
     vec4 t = texture(sampler2D(uTex[pc.tex], uSamp[pc.samp]), vUv);
+    float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
     if (pc.texGamma != 1.0) t.rgb = floor(256.0 * pow(t.rgb * (255.0 / 256.0), vec3(pc.texGamma)) + 1e-3) / 255.0;
     vec4 c = t * vCol;
+    if ((pc.flags & 2u) != 0u) c.a = luma * vCol.a;
     c.rgb = min(c.rgb * pc.fogColorScale.a, vec3(1.0));
     if (c.a < pc.alphaRef) discard;
     if (pc.fog.y > pc.fog.x) {

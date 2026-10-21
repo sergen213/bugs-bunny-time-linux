@@ -1,6 +1,8 @@
 # Texture gaps: face texture ids with no TIM in the level — LiT + TB
 
-**Status: Verified (code + data, both games); frame timing of script-driven links Inferred.**
+**Status: Verified (code + data, both games). Frame timing: type-20 hold byte and type-2 tag-0x3f flipbook lists
+Verified against `bugs.exe` alias-table traces (L04C3 links 9/11, L02A1 links 16/63; GAMEPLAY_STATUS.md "Texture
+links"); only script-driven links without a tag-0x3f list (cycled in order, 2 ticks per frame) remain Inferred.**
 Tool: `tools/re/texgap.py` (per-level table, `--check`, contact sheets). Evidence PNGs:
 `/mnt/1st4TB/BugsBunny/local/re/texgap/`.
 

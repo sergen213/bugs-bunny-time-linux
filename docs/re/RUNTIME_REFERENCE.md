@@ -33,7 +33,7 @@ Scripts (`tools/wine/`):
 | `run_original.sh lit\|tb [switches]` / `run_original.sh stop lit\|tb` | start headless (returns when the window exists; state in `$W/run/<game>.env`, log in `$W/logs/`) / stop. Env `RUNNER=ge\|wine`, `SYNC=off` (Proton: `PROTON_NO_NTSYNC/FSYNC/ESYNC=1`), `RES`, `AUDIO` |
 | `shot.sh lit\|tb OUT.png` | 640×480 client-area screenshot |
 | `send_keys.sh lit\|tb STEP…` | XTEST keys: `Up+d@10t` (hold chord 10 ticks), `_@500` (wait ms) |
-| `peek.py lit\|tb ADDR TYPE [N]` | one read; `ADDR` may be `[0x4b324c]+0xe4` (u32 deref); `--selftest` |
+| `peek.py lit\|tb ADDR TYPE [N]` | one read; `ADDR` may be `[0x4b324c]+0xe4` (u32 deref); `--selftest`. `peek.py lit ADDR poke HEX` writes bytes (memsrv `W`; test-only, e.g. open a menu — needs an oracle started after the memsrv change) |
 | `trace.py lit\|tb OUT.csv SECS name=ADDR:TYPE[*N]…` | poll to CSV (default 33 ms, `--period`) |
 | `cam.py lit\|tb` | live eye/look-at → bbtime `--camera X,Y,Z,YAW,PITCH` (PS1 → engine `(x,−y,−z)`, play.cpp yaw/pitch); `--selftest` |
 
@@ -57,6 +57,9 @@ Runner notes (R):
 * **TB exits intermittently** with an X `BadWindow` on `X_UnmapWindow` (resource 0x400001), seen 3× (system Wine and
   Proton-GE, ntsync and `SYNC=off`) minutes after a level was left running; a dedicated 240 s idle run after the
   intro skip did **not** reproduce it, so the trigger is unknown (Research Required). Restart TB per capture.
+* **LiT exits/hangs at the title** (this pass, Proton-GE ntsync): left idle on the title logo (no menu open) the exe
+  quit with the same X `BadWindow`/`X_UnmapWindow` ~10–20 s after boot (3×), and once froze (S[] static) after a
+  Quit Game → title. Opening the slot menu promptly (Return until `S[3]` = `peek 0x4b2263` reads 2) avoids it.
 
 ## 2. Tick rate (GAMEPLAY.md §1.1/§1.3, ENGINE_COMPARISON.md pacer)
 
@@ -72,7 +75,7 @@ Player `P = *(0x4b324c)`; pos `+0xe4` s32×3, rot `+0xdc` s16×3, flags14 `+0x14
 
 | claim (S, GAMEPLAY.md) | runtime (R) | evidence | verdict |
 |---|---|---|---|
-| level start: state 2, then scripted walk-in | state 2 at tick 0, state 130 from tick 5 walking +25 z/tick (8830 → 9655), state 1 from tick 71 | `csv/litworld_L01A_idle.csv`, `csv/lit_spawn.csv` | R (new fact) |
+| level start: state 2, then scripted walk-in | state 2 at tick 0, state 130 from counter 3 (attach, z 8830), Bugs +25 z/tick one tick behind carrier 246, state 1 at z 9655 when the carrier's 34th update releases him (counter 69→71) | `csv/litworld_L01A_idle.csv`, `csv/lit_spawn.csv`, `csv/litfid_walkin.csv`, `csv/litfid_walkin_list.txt` | **Verified** (bbtime: `replayL01a` per-tick asserts, §7) |
 | §3.3 jump start: H 39, step 70, phase 0x400 (+step on first arc tick), flags14 bit 1 | `+0x104..` = 39 70, phase 1094 (0x446) on arc tick 1, flags14 2 → 1 → 9 (descending) → 2 | `csv/lit_jump_hold.csv` ticks 135–187 | **Verified** |
 | §3.3 standard jump (✕ held) apex −389 at arc tick 15, lands tick 26 | y −640 → −1029 (389) at tick 165 = arc tick 15; lands tick 187 = 26 | same | **Verified** |
 | §3.3 variable height: release in 0x600–0x800 → phase 0x800; early-release apex −285 @ 8, lands 18 | 2-tick tap: phase 1584 → 2118 (0x800 + 70), apex −925 (285) at arc tick 8, lands arc tick 18 | same, ticks 255–291 | **Verified** |
@@ -107,7 +110,12 @@ flags `+0x20`, state id `[+0x17c]+6`; `GD = *(0x639b30)`; camera view 0 block `0
 | §4.3 2P framing: `e > 15 → D += e`, e clamped 40 | 2P (A4 = 0x12): D 1200 → +40 per tick while the players separate | `tbplay/F_2p_granny.csv` ticks 765–795 | **Verified** |
 | §4.1 R1 switch toggles `A4 & 4`, focus follows one tick later | A4 0 → 12 → 4, focus pointer changes on the next sample | `tbplay/C_switch_taz_jump.csv` ticks 387–397 | **Consistent** (TBPlay analyses) |
 | §4.2 call friend refused while cooldown < 45 | L1 at +20 ticks refused, at +80 accepted; cooldown `0x4ceb08` resets to 0 | `tbplay/D_callfriend.csv` | **Verified** |
+| §4.2 call-friend arrival: partner program block 4 spawns carrier template 169 at the floor spot; partner rides its TOD 0xa00 part | carrier entity (id 169) at (16442, −2100, 6921) = floor point; Taz y − floor −1432, −1432, −1337, −1242, −1139 … −103, 0, states 261 261 260 262 … 263 50 142; Taz x/z = carrier + (4, −1) | `tbplay/D_callfriend.csv` ticks 481–527, `tbplay/H_callfriend_carrier.csv` (Taz `+0x90/+0xe8/+0x84`, carrier pos/frame/anim) | **Verified** (bbtime `game.tb` asserts all 17 heights and states; x/z ≤ 5: carrier face-camera yaw not modelled) |
+| §3.2 idle fidgets: state 8 `ticks > 30 && rand() > 30000` → S7 `S[0x1fe] = rand() % 5` → 17/20/23/26/29 sequences; loops 18/21/24/27/30 exit at the last frame when `ticks > 90` or `ticks > 20 && rand() > 28000` | Bugs 8 → 20 (tick 449), 21, 22, 8, 29, 30, 31, 8, 26, 27, 28, 8 … 17, 18, 19, 8, 23 — 37 changes in 100 s; `+0x82` 7, 8, 9 … (not reset on entry); rand seed `0x4cf26c` from 0x64e07fb7 with 0–7 draws per tick; `+0x14e` 0x2000 on the last frame's hold-expiry tick and the loop-restart tick | `tbplay/G_idle_rng.csv` (ticks 379–1771; rows with Bugs state 383 = intro) | **Verified** (bbtime `game.tb`: traced seed set per tick, all 37 changes on the same tick); state 23 holds 10 ticks vs 6 from its 4-frame TOD (open) |
 | TIME_BUSTERS.md §6 P1 key slots | runtime `config.pc`: arrows, L1 A, L2 D, R1 S, R2 F, △ W, ○ Q, ✕ E, □ R, select Tab, start Esc, View none; P2 numpad 8/5/6/4 … | `$W/tb/Datas/BIN/config.pc` | R (defaults of 0x415fd0) |
+| §3.3 view list: +0x6e 2 culls beyond +0x76 from the camera, sleep +0x50 | guard 267 (0x41a, 7500) frozen (+0x82 390 constant over 600 ticks) ~7.3k from the camera; after Bugs is poked 1200 in front it ticks again | `tbnpc/A_guard_patrol.csv`, `tbnpc/B_guard_attack.pkl.gz` (Proton-GE oracle; pool `0x4d2704`, 465 × 0x1b0 B per tick + camera, S, GD) | **Consistent** |
+| §3.4 guard logic (template 265): notice in front within 2500 → 497 504 502 501 364 (throw) | 357 522 497 504 502 501 364 435 502 501 364 435 …; Bugs hurt 189/190/191 by the thrown item, health 6 → 5 → 4 | `tbnpc/B_guard_attack.pkl.gz` | **Verified** to 364 (bbtime `game.tb` asserts the sequence); **Contradicted** afterwards (bbtime 508 512: projectile 401 not ported) |
+| §3.5 melee hit / flash / death | guard 502 → 394 → 500; Bugs 208, health −1 per hit, flash `0x4d2058` 0x40 → 0x7c then 0x3c; Bugs at 0 health: f20 0x2000100, GD+0xa2 1, A4 4 (Taz), lives (GD+0xa0) 3; checkpoint `0x4d26e0` = (−2391, −52, −6293, 489) | `tbnpc/C_*`/`D_*` (kernel captures, saved B only), peeks | **Consistent** (bbtime test: melee 394 → Bugs 189, health 5, flash; death → partner; both down → lives 2) |
 
 ## 5. Projection, fog, texturing
 
@@ -147,6 +155,9 @@ flags `+0x20`, state id `[+0x17c]+6`; `GD = *(0x639b30)`; camera view 0 block `0
    the 2-player menu entry sets `GD+0xA4 = 0x12`.
 9. **LOST_IN_TIME.md / RESEARCH.md launch options**: LiT needs `/b00` to reach the title on PC (launcher passes it);
    with no `/b` the default level 2 (LANGUAGE.BZE) is missing from the PC disc.
+10. **GAMEPLAY.md §8.1** (now §LiT saves below): the save checksum rule, slot naming, Savedata summary layout and
+    the load path are **Verified**; the S[0x08] result reaches the logic as S[17] = 10 (the type-16 menu entity copies
+    S8 → S17, L01a @0x1eb45).
 
 ## 7. Side-by-side with bbtime (same camera, 4:3, `--fidelity original`)
 
@@ -197,18 +208,123 @@ Fidelity now uses colour scale 1.0 + `Scene::pcTexGamma` (LiT 5/6, TB 1); Enhanc
 FOV: Original Fidelity is fixed at 51.28° in both backends (`bb/render/camera.h`); camera eye +400: the code already
 matched (§6 item 2 was a doc-only error). §6 item 3: the play camera is initialised by the load-time update
 (`LitWorld::loadUpdate`, 0x430f80) and the type-36 camera director 0x444b50 + camera 0xc00 mode are ported; first
-frame now shows the spawn snap (eye 100 behind / 400 above Bugs), not the origin. Residual: bbtime's walk-in moves
-Bugs 2 ticks earlier and stops at z 9630 (original 9655, last step +50) — carrier timing not resolved.
-Shadow blob (S, Research Required): 0x44c4b0 registers every drawn actor with tag `0x46` (`+0x3a` = shadow entity
-id, parsed 0x42e7a0 case 'F') into `0x4b21a0` (max 40; Bugs skipped in first person); 0x44bb50 draws, per actor, the
-part of type 6 of that entity's model on the ground (0x44b4f0 probe; on platforms scaled `(y−ground)·4 + 0x1000`,
-min 0x800) darkened by the zone `+0x28` (0x44cb90). Not small (entity lookup, ground probe, part-type-6 mesh, blend):
-not implemented.
+frame now shows the spawn snap (eye 100 behind / 400 above Bugs), not the origin.
+**Walk-in (fixed, Verified):** fresh capture `csv/litfid_walkin.csv` (player + carrier `+0x70` chain) and
+`csv/litfid_walkin_list.txt` (live list `0x4b3740` poll, `local/litfidelity/walk_list.py`): counter 3 state 2 → the
+director spawns template 246 and attaches Bugs (state 130, `+0x70` = carrier, flags14 stays 2) on the same tick;
+the carrier moves +25 z/tick from its 2nd update; Bugs' world z = carrier z one tick late (he is updated before the
+carrier: player is linked ahead of the rest list, 0x447d40) — 8830, 8830, 8855 … 9605; the carrier's 34th update
+(z 9655) releases him (item flag 0x4000, 0x440120 `LAB_00443606`+: world position recomputed from the coordinate
+chain = carrier position, `+0xdc/+0xe0` cleared, flags14 `& 0xfffff5f6 | 0x1000`) → state 1 at z 9655. Counter c ↔
+bbtime tick (c−3)/2+1. Root cause of the old 2-tick/25-unit offset: bbtime copied the carrier position after the
+whole actor pass (Bugs same-tick instead of one tick late) and released him at his own stale z. `replayL01a` asserts
+every walk-in tick. **Verified**.
+**Shadow (implemented, Verified visually):** 0x44c4b0 registers every drawn actor with tag `0x46` (`+0x3a` = shadow
+entity id; L01a Bugs and 12 actors use entity 3) into `0x4b21a0` (max 40; Bugs skipped in first person, camera flags
+0x20). 0x44bb50 draws the first role-6 model of that template entity (L01a entity 3: one 0x40 quad ±200, texture
+133 = a soft 64×64 grey blob, flags 0x09 ABR 2) at: position = the actor's second part origin (0x44ba00 →
+0x4375d0), ground via GroundAt 0x436c20 (open floor drops to the zone below), + hoff, clamped to `0x4b2378` (chunk
+0x3b tag 0x3c s16, A88/A91) and not above the actor unless camera flags 0x100; scale x/z = `(y_actor − y_shadow)·4 +
+0x1000` (min 0x800, 0x1000 when the ground is above); tilt from three box-corner ground probes kept within ±0x22
+(0x44b4f0 second pass); ridden platforms (flags8 8 / flagsC 0x2000) put it at the feet with the platform's tilt.
+PC GL draw of ABR 2 (0x420d10 case 2, 0x4122xx flush): texel alpha = trunc(0.299R + 0.587G + 0.114B) of the raw
+texel, blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA (`0x4ac028/0x4ac02c` = 0x302/0x303 at runtime defaults) — a
+lightening/greying blob, not a PS1 subtractive one; Original Fidelity uses this in both backends (Enhanced keeps the
+PS1 subtract). Side-by-side `compare/side_lit_L01A_shadow_{gl,vk}.png` (original `orig_lit_L01A_shadow.png`
+after the walk-in, bbtime `--autoplay '-*90'` tick 90): MAD 1.58 / 1.58, gain 0.99/0.99/0.98; the soft blob under
+Bugs' feet matches in place and size. Not ported: the first 0x44b4f0 pass (projection onto a non-ridden class-2
+actor below), the zone darkening 0x44cb90 tint, ordering-table depth (bbtime pulls the quad 24 u toward the eye).
 
 ## 8. Other captures (for LiTWorld / TBPlay)
 
 `csv/litworld_L04C3_links.csv`, `csv/litworld_L02A1_links.csv` (texture-link alias table `0x4e5e80`),
 `csv/litworld_L01A_idle.csv` (+ `shots/litworld_L01A_{2,8}s.png`); `tbplay/{A_idle_jump,B_run,C_switch_taz_jump,
-D_callfriend,E_switch_turn_L2,F_2p_granny,probe_start}.csv` + PNGs. Title screens: `shots/tb_title_menu.png`,
+D_callfriend,E_switch_turn_L2,F_2p_granny,G_idle_rng,H_callfriend_carrier,probe_start}.csv` + PNGs. Title screens: `shots/tb_title_menu.png`,
 `shots/tb_title_sheet.png` (CCINTRO), `shots/tb_pause_menu.png`, `shots/lit_title.png`, `shots/lit_menu.png`; levels:
 `shots/lit_L01A_spawn.png`, `shots/ge_lit_L01A.png`, `shots/ge_tb_ARCA01.png`.
+
+## 9. LiT saves (GAMEPLAY.md §8.1, formats/SAVE_LIT.md)
+
+Files (R): `local/saves/lit/save{1_merlin_new,2_merlin_cheats,3_gc333_credits}/{Savegame2.dat,Savedata.dat,
+gd_before*.txt}` + PNGs; the prefix's `Datas/bin` blanks were restored afterwards. One session, Proton-GE:
+title → New game → slot 2 (`G[0x9f]` = `[0x52fd00]+0x100df` reads 2 at slot select) → Start → CCINTRO (56) →
+LS01 (3) → CCMERLIN (70) → MERLIN (51). The pause menu has no save entry; the prompt "Do you want to save your
+game? Yes / No" is the type-16 menu entity of every playable level, active while `S[17]` = 1 (written by the
+Merlin/LS01 save actors, e.g. MERLIN entity @0x104df state 129 on ✕ after its tutorial dialog). It was opened with
+`peek.py lit 0x4b2271 poke 01`, then ← (S[18] = 1, Yes) and ✕ → `S[0x0a]` = 6 → 0x4074f0.
+
+| save | trigger | observed | verdict |
+|---|---|---|---|
+| 1 | prompt Yes in MERLIN, new game | `Savegame2.dat` + `Savedata.dat` written (mtime), `Savegame1/0` untouched; GD+0 = 0x33 (51); +4 = 0x17a = Σs8 of the other 316 bytes (old +4 = 0); S[17] = 10 afterwards | **Verified**: slot file = `Savegame%d` with %d = G[0x9f] (1-based) |
+| 2 | cheats `□R1✕L1 □R1✕L1` (G[3] = 99) and `□R1✕L1 ✕R1✕L1` (G[8] = 0x1f), prompt Yes again | +4 = 637 = 514 (rest) + 0x7a + 0x01 (old checksum bytes) | **Verified**: the old checksum is part of the sum |
+| 3 | cheat `□R1✕L1 ✕□R1L1` (GC 333, clocks 124 → CCEND 71), then `poke 0x4b226a 06` | Savedata +0x34 = `4d 01 7c 00` = {u16 333, u16 124} at +8 + 0x2c·(2−1); mask +4 = 2; S[8] = 0x0a | **Verified**: summary layout, mask bit `1 << (slot−1)`, request 6 is processed in any level (CCEND has no save entity) |
+| load | restart, title (`S[0x2b..]` = 0x14d / 0x7c copied from Savedata; menu shows "2. 333 124"), Load game → slot 2 (save 2 file) | GD = file bytes, G[0x0e] = 0x33, then level 51 with G[3] = 99, G[8] = 0x1f; Bugs at the level spawn (5940,−560,10050) | **Verified**: load continues in GD+0's level, position not saved |
+
+bbtime: `ctest -R game.lit_save` (all three files parse byte-identically; `writeLitSave` from the pre-save state
+reproduces each original `Savegame2.dat` **and** `Savedata.dat` byte for byte). Smoke: `XDG_DATA_HOME=local/saves/
+smoke_xdg bbtime --import-saves local/saves/lit/save2_merlin_cheats --game lit --slot 2 --hidden --mute --frames 60
+--screenshot local/saves/smoke/lit_slot2_loaded.png` → "slot 2 …: level 51 health 6/6 carrots 99", MERLIN, Bugs at
+(5940,−561,10050), HUD CARROTS 99 (original after load: `save2_merlin_cheats/orig_after_load{,_pause}.png`).
+
+Save prompt overlay (2026-10-19, Proton-GE, `run_original.sh lit /opengl /win /x640 /y480 /b51`, `peek.py lit 0x4b2271
+poke 01`; shots `local/wine/compare/litsave/orig_{before,prompt,yes_1..3}.png`):
+
+| claim | runtime | verdict |
+|---|---|---|
+| glyph list `0x4b373c` (count `0x4b39a8`) | 29 entries `{sprite, s16 x, s8 y, u8 pal}`: "Doyouwanttosaveyourgame?" x −141, −130, −114, … 125 at y 50 pal 1, then Yes x −50/−37/−29 and No 30/43 at y 70 pal 3; sprites = font base + 0x10·(glyph−1) of table `0x4ae3a8` | **Verified**: interpreter positions (advance table `0x4ae4a8`, centring by width >> 1, command byte skip) = `test_lit_overlay` |
+| glyph scale `0x4efb88` | 1.0 at 640×480 | **Verified** |
+| palettes / screen space | 1 yellow (207,201,0), 3 blue (0,0,200), 0 white (207,201,200) after ← (S[18] = 1) outside the S[11] ≤ 10 blink; text centre x = 320/640, y 50 → rows 344–353 of 480: 512×240 space centred, 16×16 cells | **Verified** (colours sampled, used by the app) |
+| the prompt does not freeze Bugs | ← also walked/turned him | Observed |
+| F1 help (L01A `/b04`, 2026-10-19; `local/wine/compare/litfont/orig_help{.png,_glyphs.txt}`) | `S[12]` = 3, 178 glyphs "Help Menu", "Look A", "Crouch S/Button1" … "Enter Select" (prefix config: use-joystick `0x9ca858` = 1, joyMap 0..7, kbdMap default); Bugs frozen | **Verified**: `testHelp` asserts all 178 glyphs (key names, `>DJ` suffix, spaces dropped, palettes 2/3) |
+| font sprite size | `0x4efb84` = 1.0 at 640×480; glyph rows 344–353 for y 50 (cell 16×16 px, not ×2 vertically); x = 320 + ftol(x · 1.25) | **Verified**: bbtime 640×480 VK/GL prompt covers the original's yellow/blue/white pixels exactly (+7 edge px), colours ±1 (`compare/litsave/font_crop_compare.png`) |
+
+bbtime: `ctest -R game.lit_overlay`; side-by-sides `local/wine/compare/litsave/{side_by_side_font,font_crop_compare}.png`
+(original font sprites) and `local/wine/compare/litfont/side_by_side_help.png`; in-play save
+smoke → `local/saves/smoke_prompt/bbtime/saves/lit/Savegame3.dat` + `Savedata.dat` (GAMEPLAY_STATUS.md Saves row).
+
+## 10. LiT enemies (L01A, `/b04`, template 932) — GAMEPLAY.md §7.1–7.3
+
+Captures (`local/litenemies/enemy_trace.py OUT SECS IDS [TYPES]`: one row per tick counter with Bugs, pad, eye, rand seed
+`0x4ae610` and selected actors; rows sampled mid-tick repeat the previous seed = "torn"): `csv/litenemy_L01A_idle.csv`
+(no input, 1263 counters), `csv/litenemy_L01A_idle2.csv` (+ type-2 actors, Bugs anim), `csv/litenemy_L01A_fight.csv`
+(Bugs poked to (24500, −624, 14200) after counter 101 with `local/litenemies/poke_pos.py`, then □ kicks / ✕ jumps),
+`csv/litenemy_L01A_fight2.csv` (the same fight replayed by counter with `local/litenemies/pad_play.py fight_pads.txt`,
+identical except four key releases one tick later, plus `bbox`/`abox` columns: box `+0x48..+0x54`, radius `+0x2e`,
+inflation `+0x20`, rotation `+0xdc` of Bugs and each traced actor; its pads: `local/litenemies/fight2_pads.txt`).
+Comparison: `PROBE=1 PROBE_PADS=… [PROBE_TELEPORT=103,24500,-624,14200] [PROBE_IDS=932,39,542,37] [PROBE_BOX=1]
+test_game` + `local/litenemies/cmp.py` (`seeds.py` separates torn rows from real rand differences).
+
+| claim | runtime | verdict |
+|---|---|---|
+| tick mapping | bbtime tick t (after `loadUpdate`) = counter 2t + 3; rand seed is 1 at counter 0 (no srand) and identical across runs | **Verified** |
+| zone-gated actors (+0x3c & 1) | start director fires on counter 5, not 3 (table 0x4b3460 empty before the first frame) → carrier spawn/attach and camera director one tick later than the load pass | **Verified** |
+| spawn order 0x448d40 | spawned actor runs in the spawning tick (appended to the active list): 932 timer 1 on its first row (counter 9) | **Verified** |
+| activation distance | 0x4078d0 estimate; 932 director (radius 6000) activates when the eye reaches z 9830 (counter 9) | **Verified** |
+| type-2 sprite actors / anim events | L01A position-less type-2 props hold flipbook frames (0x438970); Bugs' fidget anim 72 event A19 sets G[176] = 3 at counter 89 → props state 361 | **Verified** |
+| sound channels | without an audio device the 24 channel slots `0x4b3260` never free (14 busy at counter 237, 24 at 1739) → chance sounds stop consuming rand | R (tests set `sfxChannels = 24`) |
+| enemy 932 idle | wander, ledge turn at counter 433 (+682 steer, +512 A38), random state 361 — all 1263 counters match | **Verified** (`testEnemyL01a`) |
+| enemy notices / chases / attacks | kicks → state 236 (counter 603), chase 177 (659), attack 201 (725), step 217 (755) match | **Verified** |
+| Bugs' box | x/z always (−70, −40)..(70, 40), radius 80, inflation 0; only the heights follow his packet-9 frames — 0x43a880's tail overwrites them each tick unless the move has flagsB 0x2000 | **Verified** (fight2 `bbox`, every row after the load) |
+| hand hit / push-out | Bugs pushed away 757–763 by the growing attack box (TOD packet 9, 0x433500 face push), hand attach point (TOD packet 10, 0x434840) hits at 769: health 5, state 10 | **Verified** exactly (`testEnemyL01a`; the former z +1 came from his animated box) |
+| knock-back after the hit | slides (0, −8) at 773 then −10 z/tick, no push: his nearest corner is 192 in front of 932's box face 177 | **Verified** (the extra (−9, −21) push came from his animated box: z1 83 instead of 40) |
+| walking into the enemy | 881–921 Bugs walks into 932: the move is only deflected by the face push, never zeroed (z 14154 at 929) | **Verified** (bbtime used to stop him when his centre was inside the box) |
+| stomp | ✕ at 967: at 1007 his corners miss the box (x 75 > 66), at 1009 one corner touches it with the feet 50 below its top → 932 flags14 0x80 → state 209, Bugs state 91 (bounce) | **Verified** (contact only through 0x433500's corner hits) |
+| kick damage | □ at 1089: Bugs' attach point (packet 10 of anim 365, his `+0x58`) inside 932's box at 1097 (0x433380: radius² `+0x30`, box grown by inflation + 4) → health 9999, state 192 | **Verified** |
+| enemy defeat / carrots | 1099 two carrots 39 and 1101 the golden carrot 542 spawn; 932 is flung (state 4) and freed at 1185; the carrots' n-th bounce steps the arc n × w[2] (0x440120 `+0x194`; second hop 1159–1175 twice as fast), flags14 0x800000 once ≥ 0x400 | **Verified** |
+| golden carrot pickup | 542 lands (state 1) at 1143, is collected (state 129, at Bugs' position) at 1185 when its frame-11 box (−75, 0, −97, 140, −209, 40) + inflation 40 touches a corner of Bugs' box | **Verified**; its yaw: the exe's item flag 0x1000 only re-parents the coordinate (local position zeroed, yaw untouched), the world yaw becomes Bugs' (168) on the next update (1187), bbtime snaps it at 1185 — the one field differing in the 596 fight counters 970–2159 compared |
+
+## 11. LiT pushable block (L01A, `/b04`, type 5 at (25215, −640, 10430)) — GAMEPLAY.md §4.4
+
+Capture `csv/litpush_L01A.csv` (`local/litenemies/enemy_trace.py OUT 22 99999 5`, abox column + `+0x40/+0x44`): Bugs poked
+to (24723, −640, 10774) yaw 1422 at counter 101 (`poke_pos.py 101 24723 -640 10774 1422`), pads
+`local/litpush/l01a_pads.txt` (↑ from 201, ↑+R1 from 215, release 301) replayed with `pad_play.py`. Comparison:
+`PROBE=1 PROBE_IDS=99999 PROBE_TYPES=5 PROBE_PADS=… PROBE_TELEPORT=103,24723,-640,10774,1422 test_game` + `cmp.py`.
+Block tags: 0x1d = 0x89 (+0x17c: X only, keep on the floor), flags8 0x4308 (platform 8 + pushable 0x4000), box
+(−243, 0, −230)..(190, −479, 233), radius 337 (tag 0x1c 4th u16), inflation −50, activation 0x3a = {0x22, 6000}.
+
+| claim | runtime | verdict |
+|---|---|---|
+| touch / push state | 217: Bugs' corner touches the box (flags14 0x8000 on the block), the 150-ahead / 50-up probe (0x433380 mask 0x4000) finds it → flags14 0x20000 → R1 rule state 24 | **Verified** (`testPushL01a`) |
+| pushing | from 219 move 23 (flagsA 0x4000000) hands his move to the block (+0x40/+0x44 = 24,−18 … 9,−7), flags14 0x4000; the block (platform group, before Bugs) moves X only one tick later and traces him back by (moved − pushed): z stays 10568 | **Verified** (block x 25239 at 221 … 25610 at 301; Bugs, eye, rand every counter) |
+| release | ↑ alone at 301 → state 1, the block stays at 25610 | **Verified** |
+| activation | counter 3 / 9–107 the block is skipped (flags18 0x100, on-screen test act3c 0x20); bbtime's on-screen approximation keeps it active (only its flags14 2 at counter 3 differs) | **Contradicted** (pre-existing 0x447d40 & 0x20 approximation; no effect on positions) |

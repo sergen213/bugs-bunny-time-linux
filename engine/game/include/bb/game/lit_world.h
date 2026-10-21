@@ -65,6 +65,15 @@ struct ActorItem {
     int32_t p1 = 0, p2 = 0;
 };
 // One entity chunk 0x07 / 0x0a (live) or 0x08 (spawn template), tag map GAMEPLAY.md §7.1.
+// Frame events of one animation asset (chunk 0x22 tags 0x28 / 0x0d, run by 0x4393e0 on the frame boundary).
+struct AnimFx {
+    struct Sound { uint8_t id = 0, frame = 0, reload = 0, count = 0; };  // tag 0x28 {sound, frame, repeat reload}
+    struct Event { uint16_t id = 0; uint8_t f2 = 0, f3 = 0; uint16_t frame = 0; LogicItem item; };  // tag 0x0d (12 B)
+    uint16_t anim = 0;  // asset role = animation id
+    std::vector<Sound> sounds;
+    std::vector<Event> events;
+};
+
 struct ActorDef {
     uint8_t chunk = 0;
     uint16_t type = 0, entityId = 0;
@@ -76,14 +85,18 @@ struct ActorDef {
     int16_t reg = 0;                                // tag 0x1e (+0x1e: hit points / register)
     int16_t param = 0;                              // tag 0x1d (+0x17c; type 14 turn shift +0x196)
     std::array<int16_t, 6> box{};                   // tags 0x1b/0x1c/0x42: minX, maxY, minZ, maxX, minY (top), maxZ
+    uint16_t radius = 0;                            // tag 0x1c/0x42 4th u16: +0x2e (+0x30 = radius²)
     int16_t inflate = 0;                            // tag 0x38 (+0x20)
     uint16_t act3c = 0, act3e = 0;                  // tag 0x3a activation flags / radius
     int16_t zone = -1;                              // tag 0x1f
+    uint16_t shadow = 0;                            // tag 0x46 (+0x3a): shadow template entity id, 0 = none
     int32_t model = -1;                             // Scene::actorModels index (TOD actors), -1 none
     uint16_t idleAnim = 0;                          // ActorInstance::anim: looped by behaviours without script animation
     std::vector<PlayerState> states;
     std::vector<ActorStep> steps;
     std::vector<ActorItem> items;
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> flipbooks;  // listed tag-0x3f assets: anim id, {record, ticks}...
+    std::vector<AnimFx> animFx;                     // listed animation assets with frame events (copies: counters per def)
 };
 
 // Fields MoveActor 0x437390 and the arc 0x43a250 act on; shared by Bugs and every actor (offsets of the 0x1f4-B actor).
@@ -111,6 +124,8 @@ struct Player : Mover {
     int32_t carrier = -1;          // actor carrying Bugs (its +0x6c, item flag 0x20000000): Bugs follows it
     uint16_t contact = 0;          // +0x34 entity id of the last actor touched / hit
     AnimState animState;
+    V3 hand;                   // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet
+    bool handSet = false;
 };
 
 struct LitActor : Mover {
@@ -120,9 +135,13 @@ struct LitActor : Mover {
     std::array<int16_t, 3> rot{};  // +0xdc (yaw kept in Mover::yaw)
     std::array<int32_t, 3> scale{4096, 4096, 4096};
     std::array<int16_t, 6> box{};
+    uint16_t radius = 0;           // +0x2e (tag 0x1c, then TOD packet 9)
+    uint32_t radius2 = 0;          // +0x30 pre-test radius² (tag: radius², packet 9: (inflate + radius)²)
     int16_t inflate = 0;
     uint16_t act3c = 0, act3e = 0;  // +0x3c activation flags (A32/A64) / +0x3e radius
-    int16_t param = 0;             // +0x17c (platforms) / +0x196 (type 14)
+    int16_t param = 0;             // +0x17c (platforms; type 32 overlay: wait ticks) / +0x196 (type 14)
+    uint16_t script = 0;           // type 32 +0x17e: overlay script index, | 0x8000 until its first behaviour call
+    int32_t resume = -1;           // type 32 +0x180: continuation offset into LitWorld::overlayText, -1 none
     int16_t state = -1;            // +0x180: ActorDef::states index, -1 = not started
     uint16_t seq = 0;              // +0x17c (type 14 / 2): step index within the state
     int16_t step = -1;             // +0x184: ActorDef::steps index
@@ -131,13 +150,30 @@ struct LitActor : Mover {
     int16_t damage = 0;            // +0x38 pending damage
     int16_t wander = 0, wanderDir = 0;  // +0x18e / +0x190
     int16_t p17e = 0;              // platform phase / offset +0x17e
+    int16_t hops = 0;              // +0x194 type 14: bounce count of a flagsA 0x8000000 hop (reset by the first call)
+    int16_t pushX = 0, pushZ = 0;  // +0x40 / +0x44 type 5: Bugs' push move this tick (0x43a880 writes, 0x445a60 uses)
+    bool boxInit = false;          // type 5 first call done (box rotated into the world frame)
     int32_t lo = 0, hi = 0;        // platform lift limits +0x184 / +0x194
     V3 base;                       // platform rest position +0x190..
     int32_t rider = -1;            // +0x6c (player riding = -2)
     bool visible = true;           // +4 bit 2 (cleared when culled)
     bool active = false;           // linked into the active list this tick
     bool dead = false;             // flags14 0x100 handled: freed
+    V3 hand;                       // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet (+0x68)
+    bool handSet = false;
     AnimState animState;
+};
+
+// One overlay text glyph of this tick's 2-D sprite list (0x4b373c, 8 B {font sprite, s16 x, s8 y, u8 palette}),
+// emitted by the overlay interpreter 0x44d100 and drawn by 0x44cfa0: a 16x16 font cell with its top-left at (x, y)
+// in a 512x240 screen space whose origin is the screen centre. Palette: 0 white, 1 yellow, 2 green, 3 blue, 4 red,
+// 5-12 button icons (untinted).
+struct OverlayGlyph {
+    uint8_t ch = 0;     // script byte
+    uint8_t glyph = 0;  // 1-based font glyph (table 0x4ae3a8[ch]): Scene::overlayFont[glyph - 1]
+    int16_t x = 0;
+    int8_t y = 0;
+    uint8_t pal = 0;
 };
 
 struct Camera {
@@ -188,6 +224,11 @@ public:
     int nextLevel = -1;              // level change request (GD+0 / DAT_004b39bc = 1), LitWorld::levelName id
     std::vector<uint16_t> sfx;       // section-3 sound-bank blob indices started this tick (sound table, LOGIC §3)
     std::set<std::string> unsupported;  // logic conditions/actions/flags met but not interpreted (status/overlay)
+    MsvcRand rand_;                  // exe rand() 0x4ae610 (tests sync it with the original's seed)
+    // Free sound channels (0x4b3260, 24 slots, freed by the mixer when a sample ends): -1 = always one free (with
+    // audio, slots recycle); the audio-less Wine oracle never frees them (runtime: all 24 busy by counter 1739),
+    // so tests replaying its traces set 24.
+    int32_t sfxChannels = -1;
 
     int health() const { return G[1]; }
     int carrots() const { return G[3]; }
@@ -196,11 +237,32 @@ public:
     int32_t groundY() const { return p.groundBase + p.hoff; }
     const V3& checkpoint() const { return checkpoint_; }  // 0x4b2460 respawn point
 
+    // Ground shadow of one drawn actor (0x44bb50): Scene::shadowModels[entity] posed at Trans(pos) * RotMatrix(rot) *
+    // Scale(scale, 0x1000, scale), PS1 axes.
+    struct Shadow { uint16_t entity = 0; V3 pos; std::array<int16_t, 3> rot{}; int32_t scale = 0x1000; };
+    // This tick's shadows (0x44c4b0 registration, max 40): Bugs unless first person, then drawn actors with tag 0x46.
+    std::vector<Shadow> shadows() const;
+    int32_t shadowMaxY = 0x7fff;     // 0x4b2378: shadow y clamp (chunk 0x3b tag 0x3c s16, A88, A91)
+
     // Logic VM (LOGIC.md §4/§5). self = the actor running the item (nullptr = Bugs).
     bool cond(const LogicItem& it, LitActor* self);
     void act(const LogicItem& it, LitActor* self);
     // Spawns template entity `entityId` (0x448d40) at pos/yaw; returns the actors index or -1.
     int spawn(uint16_t entityId, const V3& pos, int16_t yaw);
+
+    // Overlay text scripts (chunk 0x49 tag 0x4a, one block per language in section 3; English loaded): u16 offset
+    // table, NUL-terminated '>'-command text (GAMEPLAY.md §7.6). Empty = level without overlays.
+    std::vector<uint8_t> overlayText;
+    std::vector<OverlayGlyph> glyphs;  // this tick's overlay text (0x4b373c, cleared at the start of actorsTick)
+    // >D / >J key names (config.pc maps, original defaults): keyNames[n] = keyboard key of >D n (config kbdMap entries
+    // 11 kick □, 9 crouch ○, 8 look △, 10 jump ✕, 6 roll L1, 5 camera R2, 7 action R1, 4 camera L2, named as the exe's
+    // DIK table); joyButtons[n] = joyMap byte of >J n ("BUTTON%i"); joystick = config+0x38 use-joystick (C98, >DJ).
+    std::array<std::string, 8> keyNames{"F", "S", "A", "D", "E", "W", "R", "Q"};
+    std::array<uint8_t, 8> joyButtons{3, 1, 0, 2, 4, 6, 5, 7};
+    bool joystick = false;
+    // 0x44e310: spawns a type-32 overlay actor (template 68) running script `script` (resume: continue `a`'s paused
+    // script instead); returns the script's status nibble (>P digits; 4 for an unpaused >W0), 0 if nothing ran.
+    uint32_t overlay(uint16_t script, LitActor* resume = nullptr);
 
 private:
     const ActorModel* model_ = nullptr;
@@ -208,7 +270,8 @@ private:
     V3 spawn_;
     int16_t spawnYaw_ = 0;
     V3 levelEye_;  // chunk 0x3b tag 0x2b
-    std::vector<std::array<int32_t, 2>> sounds_;  // sound id -> {blob index or -1, flags} (tags 0x04 + section-4 program table)
+    std::vector<std::array<int32_t, 4>> sounds_;  // sound id -> {blob or -1, flags, chance byte, listed} (tags 0x04 + section-4 programs)
+    std::vector<AnimFx> playerFx_;   // the player's animation sound / logic events
 
     // Player-behaviour globals (§3).
     int32_t vsX_ = 0, vsZ_ = 0;    // 0x4b3c10 / 0x4b3c18 smoothed ground velocity
@@ -224,11 +287,17 @@ private:
     int32_t defaultDeathState_ = 0;  // 0x4b2370 (zone trigger 0x400000)
     int32_t deathStateA92_ = 0;      // 0x4b39d8 (A92)
     int32_t camHold_ = 0;            // 0x4b3dac (A41)
-    MsvcRand rand_;
+    uint16_t playerShadow_ = 0;      // player +0x3a (tag 0x46)
+    int16_t playerInflate_ = 0;      // player +0x20 (tag 0x38) box inflation
+    bool handHitsPlayer(const V3& h) const;
+    bool boxPush(const LitActor& o, V3& w) const;
+    std::vector<uint32_t> order_;    // live list 0x4b3740 order (actors indices; spawns appended, dead removed)
+    std::vector<size_t> spawned_;    // spawned during this actorsTick: run after the active list (0x448d40)
 
+    uint32_t todTick(const ActorModel& m, AnimState& st, uint16_t anim, uint32_t mode, std::vector<AnimFx>& fx, LitActor* self);
     void initPlayer();
     void playerTick();
-    void playerContacts(V3& w);
+    void playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz);
     void playerAttacks(const PlayerMove& mv);
     void moveActor(Mover& m, V3& delta, Ground& r, int16_t boxTop);
     void arcTick(Mover& m);
@@ -252,12 +321,22 @@ private:
     void type14(size_t i);
     void type2(size_t i);
     void platform(size_t i, uint32_t mode);
+    void pushable(size_t i);
     void director(size_t i);
     void cameraDirector(size_t i);
     bool runItem(size_t i, const ActorItem& it, bool gated);  // item gates + condition; true = fires
     int findActor(uint16_t entityId) const;
     void startScript(LitActor& a, uint16_t stateId);
     uint32_t animate(LitActor& a, uint16_t anim, uint32_t mode);
+
+    // lit_overlay.cpp
+    uint32_t overlayStatus_ = 0;     // 0x4b3fc4: status of the last C55/A49/A51/A52 overlay (C56)
+    uint32_t overlayRun(LitActor& a, size_t pc);  // 0x44d100: interpret from overlayText[pc]; raw status bits
+    void overlayActor(size_t i);                  // type 32 behaviour 0x4470e0
+    uint8_t speech_ = 0;             // 0x4b322e playing speech id (A81)
+    uint32_t speechStart_ = 0, speechMs_ = 0;  // 0x4b1c68 start (tick) / 0x4b1c60 length (ms)
+    void speechTick();               // 0x41e2b0 status S[0x17] (lit_world.cpp)
+    bool helpRequest_ = false;       // 0x4b1a2c F1 help request (consumed by tick step 7)
 };
 
 } // namespace bb::game

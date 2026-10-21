@@ -348,9 +348,37 @@ ends the block**), 0x10 IF (continue), 0x20 nested / else-if, `\` (0x5c) with 0x
 0x4 NOT. This resolves GAMEPLAY.md §10.9 "'X' flag bit 0x08" (statement marker). **'X' pad condition** `{u16
 flags, required, any-of}`: source 0x400 new press (`held & ~prev`), 0x200 held, 0x100 raw, default pressed;
 0x800/0x1000/0x2000/0x4000 → pads 0..3 (default = the actor's pad); 0x8000 adds camera-relative stick directions
-(±50); false for players while `GD+0x9f` or `DAT_004d24d7 & 1` (cut-scene). 'N' = return u32 event. 'R' = `{flags,
-u8 cond, X, Y}`: 1 `S[Y] == X`, 5 `≥`, 7 `<`, 0x10 ticks in state `+0x82 > Y<<8 | X`, 0x18 `S[Y] & X`, 0x19
-`GD[0x58+Y] & X`, 0x49 depth `+0x1a2 ∈ [X, Y]` (O/H).
+(±50); false for players while `GD+0x9f` or `DAT_004d24d7 & 1` (cut-scene). 'N' = return u32 event. Chain bit 0x40
+acts as AND for `]` `^` `` ` `` and forces their result true. A false AND / nested marker without a skip slot ends the
+block with 0x10000000 (O/H; ported in `engine/game/src/tb_world.cpp`).
+
+Conditions (payload after the encoder 0x433ab0 compression; O/H):
+
+| tag (op) | payload | test |
+|---|---|---|
+| 'R' (8) | `{u8 flags, u8, u8 cond, u8, u16 X, u16 Y}` | table `0x4cd560[cond]`: 1 `S[Y] == X`; 2 `GD(Y) == X`; 3 `X < S[Y]`; 4 `X < GD(Y)`; 5 `X ≤ S[Y]`; 6 `X ≤ GD(Y)`; 7 `S[Y] < X`; 9 `S[Y] ≤ X`; 0xd `(s8)S[Y] == (s8)S[X]`; 0xf/0x10/0x11 `+0x82` `<`/`>`/`==` `N = Y<<8 \| X`; 0x13 `N < +0x82/30`; 0x14 `+0x82 % 30 == 0 && +0x82/30 == N`; 0x18 `S[Y] & X`; 0x19 `GD[0x58+Y] & X`; 0x1a `S[Y] != X`; 0x35/0x37 sound X (any / own voice) playing → `Y != 1` when silent; 0x36 focus carries a child; 0x45 bit X of `GD+500` (Y = 0: clear); 0x48 `(s16)+0x128 == X`; 0x49 depth `+0x1a2 ∈ [X, Y]`; 0x4a false; 0x80 `0x431680`. `GD(Y)` = u16 at `GD+0x58+Y` for even Y < 0x31, else u8. X is compared unsigned. (The previous decode read the cond from byte 3.) |
+| 'T' (10) | `{flags, u8, u8 sub, u8, u32 mask, u32 target}` | table `0x4cd8e4`: sub < 0xc selects target (below); 0 `+0x20 & mask`, 1 `+0x24`, 2 `+0x28`, 3 `+0x08` |
+| 'W' (0xc) `0x45a660` | `{flags, mode, p8, pc, p10}` | mode 4: frame counter `+0x14a == p8+1` and hold `+0x153 == 0`; else 8: `+0x14e & 0x2000` (last frame: hold expired on the last frame, kept on the loop-restart tick); else 0x80: `+0x14e & 0x1000` (restarted); 1/2: `rand() & 0xffff` must exceed p8 / pc; 0x20 contact `+0x54` id p10; 0x80000000: target = selector p10, sub `mode & 0x8f000000` (with `mode & 0x0f000000`): 0x81 target frame, 0x82 line of sight, 0x83 bearing sector `((pc−p8) & 0xfff) ≥ (atan2(t−self) − yaw − p8) & 0xfff`, 0x85 target transition event, 0x86 target state id, 0x87 `+0x42`, 0x88 distance² vs p8² (xz, 3D with 0x20000000; 0x10000000 = farther), 0x89 target-yaw sector, 0x8a/0x8b target y / Δy ∈ [pc, p8], 0x8c `+0x1ac`, 0x8d relative-yaw sector; 0x40 side assignment; result `!(mode & 0x10)` |
+| 'Z' (0x10) / '[' (0x11) | `{flags, u32 mask}` | parent `+0x08 & mask` / any attached child's |
+| ']' (0x13) | `{flags, u16 block, u32 target}` | runs block (< 10000 entity list, else global list) on self (0xc: a result without 0x10000000 ends the calling block), a target (events dispatched there), or every entity with the id (0x20000000); result = `r != 0x10000000` (or 0x40); target/block absent → unchanged |
+| '^' (0x14) `0x45cc40` | `{flags, u16 frame, u32 mode, u16 template}` | frame counter == frame+1 (0x40000/0x80000 clamp, 0x800 any) and hold 0 and an attach part (+0x84, unless 0x4000); 0x20 releases what hangs on it (program 0x10000); 0x10000 ground decal; bits 1 2 4 8 0x200 0x400 0x20000 spawn effect `template`; true |
+| '`' (0x16) | `{flags, u8 sound, u8 frame, u8 count}` | on frame+1 with hold 0: play `sound` every `count+1`-th time (per-item counter); true |
+
+Target selector `0x45a120(sel, self)`: 0x40000000 child with id (0 any), 0x80000000 parent, 0x20000000 first entity
+with id, 0x8000 nearest living entity with id; > 0x10 first living entity with id; 0xb contact `+0x54`, 0xc self,
+0xd `+0x1ac`, 8/0xe focus, 9/0xf partner, 2 Bugs / 3 Taz (unless `GD+0xa2` bars them), 4/6 nearest and 5/7 farthest
+player (3D / xz), 10 the player recorded in `+0x24 & 0x3000000`, else focus (O/H).
+
+Actions: 'S' (7) table `0x4cd6ac` — 3/4 `S[Y]`/`GD` `|= X`, 5 `&=`, 7/8 `= rand() % X`, 10/11 `= X`, 12 `S[Y] = S[X]`,
+16 `+0x82 = 0`, 20 sound, 21 `S[Y] += (s8)X`, 76/77 octant bit of the bearing to/from target X, 79, 82, 126 (above);
+'V' (0xb) `0x45ad70` `{u32 op, p1, p2, p3}` (non-0x80000000 branch): 0x810 spawn template p3 (p2 times) at the attach
+part or the actor (0x800 random yaw), on the spawned or selected target 0x40000 attach (to `+0x84`), 0x4000 event p1,
+0x20000 kill; 0x200 release children matching `+0x08 & p1` / `+0x0c & p2` (`+0x20 |= 0x10000`, program run);
+0x20/0x40 sound p1; results 0x80000 next, 0x4000000 previous, 0x10000000 restart at p1; 0x400 removes self. 'Y' (0xf)
+event to the first child of behaviour 0x21 (5 = drop). `+0x82` is incremented by the entity loop after every tick
+unless `+0x28 & 0x20`; state entry does not reset it (trace G). Entity program: tag 0x16 words `{+0x08, +0x0c, +0x10,
+u16 block +0x2c, masks +0x14..}` — `0x45ea90` runs block +0x2c when `+0x20` gets a masked bit (0x10000000 call
+friend, 0x10000 released) and clears it.
 
 ### 3.2 Abilities → states (ARCA01; templates 181 Bugs: 167 states / 108 transitions / 99 blocks, 182 Taz: 113/84/72)
 
@@ -425,14 +453,26 @@ place(): p = focus.pos; p.y −= 200; partner collision bit 0x100 cleared during
     query flags = ((partner+0x10 & focus+0x10) >> 24 & 0xf0) | 0x703 (bit 0 cleared if !strict), radius 20 (§1.4)
     camYaw = atan2(view look-at − eye); best = 0
     for i in 0..7: a = camYaw ± (2·(i/2)+1)·0x100        // ±22.5°, ±67.5°, ±112.5°, ±157.5°
-        d = RotY(a)·(0,0,500); segment query (p, d) → d cut at the hit; d ·= 0x0ccd/4096 (0.8)
-        q = hit ? |d.xz|² : 200000
-        if q > best: d ·= (|d| − 50)/|d|; c = p + d
-            floor: query (c with y −150, (0,400,0)) hits with normal.y < −11000
-            clear: none of 4 queries c → RotY(k·0x400)·(0,0,60) hits
-            if floor && clear: best = q; result = c
+        d = RotY(a)·(0,0,500); segment query (p, d) → d cut at the hit; q8 = d·0x0ccd/4096 (0.8)
+        q = hit ? |q8.xz|² : 200000
+        if q > best: d ·= (|d| − 50)/|d|; d ·= 0.8; c = p + d      // cut before scale (trace D)
+            floor: query (c, (0,400,0)) hits with normal.y < −11000 → f = the hit point
+            clear: none of 4 queries (f − (0,150,0)) → RotY(k·0x400)·(0,0,60) hits
+            if clear: best = q; result = f                     // the partner lands on the floor
     return best ≥ 0x57e5 (≈ 150 units free) ? result : fail
 ```
+
+**Arrival** (R **Verified**, traces D/H; `ctest -R game.tb` asserts every tick): the `+0x20 |= 0x10000000` bit runs
+the partner's entity program (tag 0x16: block +0x2c = 4, mask 0x10000000 in Bugs 0x1041c000 / Taz 0x10010010) via
+`0x45ea90`. Block 4: `]` block 0xc3 on self, S3 `S[0x63] |= 2`, S10 `S[0x67] = 25`, no child with `+0x08 & 0x94` →
+V 0x10 spawns template 169 (carrier, behaviour 0x0e) at the partner's position and yaw, S16, event 0xa4 → partner
+states 261 261 261 260 262 (Bugs 261 261 260 262). Carrier state 3 (anim 217, 21 frames, once) block 3: frame 1
+(W mode 4, p8 0) V 0x40000 attaches the partner to the carrier's `+0x84` part (TOD packet 0xa00 of frames 0–3, list
+position 4); frame 17 U6, V 0x200 releases children with `+0x08 & 0x4000000` (`+0x20 |= 0x10000` → partner block 4 → event
+0xa5 → 263 50 142, Bugs 263 264 13), sound 0x4b; frame 19 V 0x400 removes the carrier. The attached partner reads the
+carrier's previous-tick pose (players tick before created entities): y − floor = −1432, −1432, −1337, −1242, −1139,
+−1037, −934, −830, −727, −623, −519, −415, −311, −207, −103, 0, then lands (states as above). The carrier turns to
+the camera (flagsB 0x10, not ported: partner x/z differ by ≤ 5 from H's (+4, −1)).
 
 ### 4.3 Camera — dispatcher `0x439700(target)`, follow `0x437800` (O/H unless noted)
 
@@ -678,14 +718,18 @@ wanted track to 0 on level load (music stops until the level logic runs).
 
 ## 8. Residual unknowns (Research Required)
 
-1. Runtime confirmation: arcs, gravity, camera constants/spring rest/look-at, 2P framing and call-friend cooldown
-   are now Verified, run speed and switch Consistent (§9; RUNTIME_REFERENCE.md §4). Still open: walk speeds (not
-   exercisable from the keyboard), idle fidgets ('W' condition), the partner's arrival programs (states 260–263).
+1. Runtime confirmation: arcs, gravity, camera constants/spring rest/look-at, 2P framing, call-friend cooldown and
+   arrival, idle fidgets are now Verified, run speed and switch Consistent (§9; RUNTIME_REFERENCE.md §4). Still open:
+   walk speeds (not exercisable from the keyboard); Bugs state 23 (anim 40) lasts 10 ticks in trace G although its
+   packed TOD (asset 31, 4 frames) gives 6 under the `0x469770` rule that matches every other clip.
 2. Collision: header +0 low u16, polygon +0x14, surface +2/+6; surface flags 0x1/0x4/0x10/0x20/0x40/0x100/0x80000
    gameplay names; per-mode sweep internals (`0x44ba20`, `0x442430`, `0x44cf80`, `0x440060`, polygon tests) not
    transcribed; world-origin shift entity `DAT_004d5924+0x9c`; how TRCA02 relocates its players.
-3. Player: flagsA 0x100/0x20000/0x10000000, flagsB 0x1/0x200/0x20000000, flagsC 0x20000; VM conditions 'W', 'T',
-   '[', ']'; partner behaviour in 1P (no AI found; idles — I/M); ability-unlock writers for `GD+0xac/+0xad`.
+3. Player: flagsA 0x100/0x20000/0x10000000, flagsB 0x1/0x200/0x20000000, flagsC 0x20000; VM pieces W 0x40/0x82/0x87/
+   0x8c, R 0x45(X = 0xffff)/0x48/0x80, the V 0x80000000 branch (damage, rig swap, camera), op 0x15 '_' (`0x45c670`,
+   camera target), anim-asset logic blocks (chunk 0x22 'M', run by `0x469770` when a hold expires); the carrier's
+   face-camera yaw (flagsB 0x10); partner behaviour in 1P (no AI found; idles — I/M); ability-unlock writers for
+   `GD+0xac/+0xad`.
 4. Camera: `0x440360` sphere-probe output layout (look-mode eye placement I/L); params +0x12c/+0x130.
 5. Animation: role-12 models, packet 0x600, part subtypes 2–4, the 37 models with all-zero vertex word 3.
 6. Music: whether the PlayMusic(−1) → Track99 → Track14 path is reachable in normal play.
@@ -702,8 +746,35 @@ Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
 | §2.1 walk/run, grip | S[0x66] = S[0x67] = 25; keyboard run 49 u/tick (mag 127); grip ramp 13/14, 21/23, 26/28 … 33/36 | Verified (run, grip); RUNTIME_REFERENCE.md §4: run **Consistent** (steady velocity (528, 0, 576)/16 = 48.84 u/tick ≈ 50·(0x800 − \|Δ\|)/0x800 with a residual heading error); walk 26 **Not exercised** (keyboard = full stick) |
 | §4.1 switch | A4 0 → 12 on the R1 tick, camera target `0x4d5028` one tick later | Verified (tick order/latch); RUNTIME_REFERENCE.md §4: **Consistent** (A4 0 → 12 → 4) |
 | §2.2 gravity, §4.3 constants | vy +160 (×16) per tick; `B+0x118..0x148` = 1200 500 20 400 50 5000 800 300 300 30 10 15 400, `0x4d9ae0` 1200, `0x4d9acc` 0x1000, look-at T.y − 300 | Verified (RUNTIME_REFERENCE.md §4) |
-| §4.2 call friend | spot (326, 148) from Bugs for camYaw 490 = first candidate; cooldown 50 at level start, refused < 45 | Verified; **correction**: `d ·= (\|d\| − 50)/\|d\|` comes **before** `d ·= 0.8` (q uses the 0.8-scaled cut vector); partner appears ≈1230 above the spot and descends ≈104/tick in template states 260–263 (entity program on `+0x20 & 0x10000000`) |
+| §4.2 call friend | spot (326, 148) from Bugs for camYaw 490 = first candidate; cooldown 50 at level start, refused < 45; arrival (D, H `H_callfriend_carrier.csv`): carrier entity 169 at the floor spot, partner at its part 1432 above, descending 0, 95, 95, 103 … per tick, landed after 15 ticks, states 261 261 260 262 … 263 50 142 | Verified; **corrections**: `d ·= (\|d\| − 50)/\|d\|` comes **before** `d ·= 0.8` (q uses the 0.8-scaled cut vector); the floor query starts at the candidate (not 150 above) and the result is the floor point; the drop is the carrier's animation (§4.2 arrival), not gravity |
 | §1.5 collision box | `+0x60..` = tag-0x61 record 0 (Bugs −70 0 −60 \| 70 −400 80, Taz −85 0 −50 \| 85 −240 125) | **correction**: the box comes from tag 0x61 records (loader case 0x61, action 82 `0x432530` selects `+0x123`, `0x450460` morphs ±20/tick); TOD 0x900 applies only with `+0x123` = 0xff (all-zero packets for the players) |
 | §4.3 camera | D (`0x4d9ae0`) = 1200, flags `0x4d5200` = 0x1280 (1P) / 0x300 (2P), body `0x4d514c` = eye + 400·dir(L − eye), rest \|aim − eye\| = 1203; L follows T with f8 (xz) / f4 (y) exactly | **correction**: the spring error `(\|d\| − D) >> 2` is measured from the **eye** (B+4) to T − (0,400,0) and moves the body; no vertical dead band observed after landing; L2/R2 ramp 5, 9, 13 … as §4.3, L2 = +yaw orbit |
 | §4.3 2P framing | D +16, +28, +38, then +40/tick as the players separate; split at \|Δxz\| 2752 → snap to the focus, D −= (D − 1200) >> 2 | Verified; projection distance ≈ 248 for the ±190 × ±90 bounds (fit, I/M) |
-| §3.2 idle fidgets | 8 → 26 → 27 → 28 → 8 while idle | needs the unknown 'W' condition (open) |
+| §3.2 idle fidgets | trace G `G_idle_rng.csv` (100 s idle, rand seed `0x4cf26c` per tick): 8 → 20 21 22, 29 30 31, 26 27 28, 17 18 19, 23 (37 changes); `+0x82` 7, 8, 9 … not reset on state entry | **Verified**: replaying the traced seed per tick, all 37 changes on the original tick (`game.tb`); needs W mode 1/8, S7, S16 and the TB last-frame flag (§3.1). Open: state 23 hold (§8 item 1) |
+| §3.3 view list 0x45eee0 | guard 267 (+0x6e 0x41a, range 7500) not listed (+0x82 frozen at 390) with the camera ~7.3k away; listed again once Bugs was poked 1200 in front of it (`local/wine/tbnpc/B_guard_attack.pkl.gz`, full entity pool per tick) | Consistent |
+| §3.4 NPC logic (guard, template 265) | notice → 357 522 497 504 502 501 364 → 435 (throw) | Verified up to 364 (`game.tb`); Contradicted after (V 0x80100000 throw / template 401 projectile not ported) |
+| §3.5 damage | guard melee 394 (dmg 1, probe at TOD 0xa00 point) → Bugs hurt 208/189, health −1, flash 0x4d2058 0x40 → 0x7c (60 ticks); Bugs death → GD+0xa2 1, A4 4 (Taz), lives 3 kept (C/D captures) | Consistent (bbtime: health 6 → 5, state 189, flash; death → partner, then both down → lives 2, both 6 health) |
+
+### 3.3–3.5 Entities, view list, combat (O/H code; runtime above)
+
+* **Entity list** `0x4d4fd0`: every chunk 0x07/0x0a/0x63 in file order (appended by `0x4609b0`), spawns (`0x460b00`
+  copies the 0x08 template entity) appended and added to the current view list. Templates `0x433620`: +0x50 =
+  tag-0x27 template id → `0x45a120` (first living entity with the id, ids > 0x10) else the 0x08 template; the
+  template's +0x10c/+0x110/+0x114 lists are appended after the own ones (own first wins); class 16 only +0x114.
+* **View list** `0x45eee0` (per view, after the camera): `0x45ee90` sets +0x24 |= 4 for all; contact list
+  `0x4d2734` = flags0 & 0x2000100 == 0x100 (not +0x6e 0x20, not an absent partner); activation block +0x118 must
+  return 0x40000000; sleep +0x50 -= (|Δcamera|/4·0x4038 + 0x302a) >> 12; +0x6e (tag 0x39 @0): 0x20 never, 2 range
+  +0x76 (@2) from the camera eye (cull → +0x50 = excess), 4/8 frustum (z + r(+0x4a) < H=400; |x|·0xd7a − z·0x8a0;
+  up |y|·0xf77 − z·0x419; down y·0xf6d − z·0x43e; > r = out; 4 adds an 8-corner box test), 0x10/0x40 keep
+  out-of-view entities listed, 1 world-slot test, 0x400 LOD, 0x80 shadow list. Loop `0x460630` ticks listed entities
+  by class table `0x4cea60` (14 `0x453de0`, 16 `0x450bc0`, 35 `0x450cd0`, 20 `0x453d00`, 2 `0x4599e0`, 9 `0x44d6f0` …).
+* **Hits** (`0x453de0`): intake at the head (vulnerable state flagsA 0x10000 vs +0x20 0x8000000 player hits,
+  flagsB 8 vs 0x4000000 enemy hits, flagsB 0x8000 stomps, +0x24 0x40000000 forced): health +0x3c −= +0x66, players
+  flash 60 ticks (+0x28 0x200), < 1 → +0x20 0x2000000, event 0x10000000 (overrides `0x4d2720`/`0x4d5948`, then
+  `0x4d5944`/`0x4d273c`, else 4), else event 0x8000000 when +0x5e set; contact loop sets +0x54 both ways and
+  +0x20 0x40/0x80; attacks (flagsA 0xc0000) use the mover contacts (0x1000000) or probe `0x447fd0` (point = +0x7c,
+  within 125 of the target box); results +0x24 0x100000 / 2 (|1 lethal) feed the entity program masks.
+* **Player down** `0x44ea50` (dispatcher, dead player, plain event): partner present → dead one absent (GD+0xa2
+  1/2), control switches; both down → GD+0xa0 lives −1, checkpoint `0x4d26e0..ec`, both 6 health, forced call
+  friend; no life → level 5 (RETRY), lives 3. V 0x80080000 = forced damage; V 2/8 (0x8… branch) and V 0x2000 set
+  the checkpoint. Ported in `engine/game/src/tb_entities.cpp`.

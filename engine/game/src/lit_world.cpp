@@ -5,6 +5,7 @@
 #include "bb/levelscript.h"
 
 #include <algorithm>
+#include <numeric>
 #include <cstring>
 #include <format>
 #include <map>
@@ -68,6 +69,10 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
     if (scene)
         for (const ActorInstance& a : scene->actors) at[a.scriptOffset] = &a;
     bool player = false;
+    std::map<uint16_t, std::pair<uint16_t, std::vector<uint8_t>>> flipbooks;  // chunk 0x22 tag 0x3f: asset -> (role, pairs)
+    std::vector<std::vector<uint16_t>> refs;  // per def: tag-0x0f asset list
+    std::vector<uint16_t> playerRefs;
+    std::map<uint16_t, AnimFx> animFx;        // chunk 0x22 animation assets with frame sounds / logic events
     std::span<const uint8_t> prog;  // chunk 0 tag 0x01: u32 n, n x 16 programs x 8 B {u16 1-based blob, ...} (0x41e030)
     for (const ScriptItem& it : ls.items) {
         if (it.kind != ScriptItem::Kind::Chunk) continue;
@@ -82,8 +87,26 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
                 // 0x41edb0: program entry (bank * 16 + program) of DAT_0054afc4; flag 0x400 = per-language speech table.
                 const size_t e = 4 + (size_t(t.data[2]) * 16 + t.data[3]) * 8;
                 const int32_t blob = !(flags & 0x400) && e + 2 <= prog.size() ? int32_t(prog[e] | prog[e + 1] << 8) - 1 : -1;
-                if (id >= w.sounds_.size()) w.sounds_.resize(id + 1u, {-1, 0});
-                w.sounds_[id] = {blob, flags};
+                if (id >= w.sounds_.size()) w.sounds_.resize(id + 1u, {-1, 0, 0, 0});
+                w.sounds_[id] = {blob, flags, t.data.size() > 7 ? t.data[7] : 0, 1};
+            }
+        } else if (it.code == 0x22) {  // asset: tag 0x27 {u16 role, u16 id}; tag 0x3f flipbook {u16 n, u16, u32 off, u32 size}
+            const ScriptTag *id = tag(it, 0x27), *fl = tag(it, 0x3f);
+            if (id) {
+                AnimFx fx;
+                fx.anim = le<uint16_t>(id->data, 0);
+                for (const ScriptTag& t : it.tags) {
+                    if (t.id == 0x28 && t.data.size() >= 3) fx.sounds.push_back({t.data[0], t.data[1], t.data[2], 0});
+                    if (t.id == 0x0d && t.data.size() >= 12)  // {u16 id, u8, u8, u16 frame, cond, A, B, act, u8 X, u8 Y}
+                        fx.events.push_back({le<uint16_t>(t.data, 0), t.data[2], t.data[3], le<uint16_t>(t.data, 4),
+                                             {t.data[6], t.data[7], t.data[8], t.data[9], t.data[10], t.data[11]}});
+                }
+                if (!fx.sounds.empty() || !fx.events.empty()) animFx[le<uint16_t>(id->data, 2)] = std::move(fx);
+            }
+            if (id && fl && fl->data.size() >= 8) {
+                const uint32_t n = le<uint16_t>(fl->data, 0), off = le<uint32_t>(fl->data, 4);
+                if (off > s4.size() || s4.size() - off < size_t(n) * 2) throw FormatError("LitWorld: flipbook list outside section 4");
+                flipbooks[le<uint16_t>(id->data, 2)] = {le<uint16_t>(id->data, 0), {s4.begin() + off, s4.begin() + off + n * 2}};
             }
         } else if (it.code == 0x36) {
             if (const ScriptTag* t = tag(it, 0x37)) {
@@ -91,8 +114,16 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
                 if (size_t(off) + size > s4.size()) throw FormatError("LitWorld: chunk 0x36 block outside section 4");
                 w.hf = Heightfield::parse(std::span(s4).subspan(off, size));
             }
+        } else if (it.code == 0x49) {  // overlay text: tag 0x4a = 6 x {u32 offset, u32 size} in section 3, by language
+            if (const ScriptTag* t = tag(it, 0x4a); t && bze.find(3) >= 0) {
+                const uint32_t off = le<uint32_t>(t->data, 0), size = le<uint32_t>(t->data, 4);  // language 0: English
+                const std::vector<uint8_t> s3 = bze.payload(size_t(bze.find(3)));
+                if (size_t(off) + size > s3.size()) throw FormatError("LitWorld: chunk 0x49 text outside section 3");
+                w.overlayText.assign(s3.begin() + off, s3.begin() + off + size);
+            }
         } else if (it.code == 0x3b) {
             if (const ScriptTag* t = tag(it, 0x2b)) w.levelEye_ = v3(t);  // §5 initial eye
+            if (const ScriptTag* t = tag(it, 0x3c)) w.shadowMaxY = le<int16_t>(t->data, 0);  // 0x4b2378 (movsx)
         } else if (it.code == 0x09) {  // zone trigger volume (§4.4)
             Trigger tr;
             tr.pos = v3(tag(it, 0x10));
@@ -119,9 +150,12 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
                 if (const ScriptTag* t = tag(it, 0x11)) w.spawnYaw_ = int16_t(wrapSigned(le<int16_t>(t->data, 2)));
                 if (const ScriptTag* t = tag(it, 0x27)) w.p.entityId = le<uint16_t>(t->data, 0);
                 if (const ScriptTag* t = tag(it, 0x1f)) w.p.zone = t->data[0];
+                if (const ScriptTag* t = tag(it, 0x46)) w.playerShadow_ = le<uint16_t>(t->data, 0);
+                if (const ScriptTag* t = tag(it, 0x38)) w.playerInflate_ = le<int16_t>(t->data, 0);
                 if (auto m = at.find(it.offset); m != at.end()) w.model_ = &scene->actorModels[m->second->model];
                 for (const ScriptTag& t : it.tags) {
                     const auto& d = t.data;
+                    if (t.id == 0x0f) playerRefs.push_back(le<uint16_t>(d, 0));
                     if (t.id == 0x32) {
                         PlayerState s{le<uint16_t>(d, 0), {}};
                         for (size_t k = 0; k < 5; ++k) s.moves[k] = le<int16_t>(d, 2 + k * 2);
@@ -142,6 +176,7 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
             d.chunk = it.code;
             if (type) d.type = type->data[0];
             if (auto m = at.find(it.offset); m != at.end()) d.model = int32_t(m->second->model), d.idleAnim = m->second->anim;
+            std::vector<uint16_t>& r = refs.emplace_back();
             for (const ScriptTag& t : it.tags) {
                 const auto& x = t.data;
                 switch (t.id) {
@@ -151,13 +186,18 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
                 case 0x15: d.cls = x[0]; break;
                 case 0x16: d.flags8 = le<uint32_t>(x, 0), d.flagsC = le<uint32_t>(x, 4); break;
                 case 0x1b: for (size_t k = 0; k < 3; ++k) d.box[k] = le<int16_t>(x, k * 2); break;
-                case 0x1c: case 0x42: for (size_t k = 0; k < 3; ++k) d.box[3 + k] = le<int16_t>(x, k * 2); break;
+                case 0x1c: case 0x42:
+                    for (size_t k = 0; k < 3; ++k) d.box[3 + k] = le<int16_t>(x, k * 2);
+                    if (x.size() >= 8) d.radius = le<uint16_t>(x, 6);
+                    break;
                 case 0x1d: d.param = le<int16_t>(x, 0); break;
                 case 0x1e: d.reg = le<int16_t>(x, 0); break;
                 case 0x1f: d.zone = x[0]; break;
                 case 0x27: d.entityId = le<uint16_t>(x, 0); break;
                 case 0x38: d.inflate = le<int16_t>(x, 0); break;
                 case 0x3a: d.act3c = le<uint16_t>(x, 0), d.act3e = le<uint16_t>(x, 2); break;
+                case 0x46: d.shadow = le<uint16_t>(x, 0); break;
+                case 0x0f: r.push_back(le<uint16_t>(x, 0)); break;
                 case 0x32: {
                     PlayerState s{le<uint16_t>(x, 0), {}};
                     for (size_t k = 0; k < 5; ++k) s.moves[k] = le<int16_t>(x, 2 + k * 2);
@@ -180,6 +220,13 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
             w.defs.push_back(std::move(d));
         }
     }
+    for (size_t i = 0; i < w.defs.size(); ++i)
+        for (const uint16_t a : refs[i]) {
+            if (auto f = flipbooks.find(a); f != flipbooks.end()) w.defs[i].flipbooks.push_back(f->second);
+            if (auto f = animFx.find(a); f != animFx.end()) w.defs[i].animFx.push_back(f->second);
+        }
+    for (const uint16_t a : playerRefs)
+        if (auto f = animFx.find(a); f != animFx.end()) w.playerFx_.push_back(f->second);
     if (!player) throw FormatError("LitWorld: no player entity (tag 0x13 == 1)");
     if (w.hf.empty()) throw FormatError("LitWorld: no chunk 0x36 collision heightfield");
     if (!w.findState(1) || !w.findMove(uint16_t(w.findState(1)->moves[0])))
@@ -207,6 +254,8 @@ void LitWorld::start(V3 spawn, int16_t yaw, int16_t zone) {
     actors.clear();  // live list DAT_004b3740: chunks 0x07 / 0x0a in file order (§7.1)
     for (size_t i = 0; i < defs.size(); ++i)
         if (defs[i].chunk != 0x08) actors.push_back(instantiate(i));
+    order_.resize(actors.size());
+    std::iota(order_.begin(), order_.end(), 0u);
 }
 
 const PlayerState* LitWorld::findState(uint16_t id) const {
@@ -219,11 +268,28 @@ const PlayerMove* LitWorld::findMove(uint16_t id) const {
         if (m.id == id) return &m;
     return nullptr;
 }
+// 0x434840: point h inside Bugs' box — xz distance² within (inflation + radius)², then in his rotated frame inside
+// the TOD box grown by the inflation horizontally, strictly between the top +0x52 and +0x4a.
+bool LitWorld::handHitsPlayer(const V3& h) const {
+    const int32_t dx = int16_t(h.x - p.pos.x), dy = int16_t(h.y - p.pos.y), dz = int16_t(h.z - p.pos.z);
+    const int32_t r = playerInflate_ + p.animState.radius;
+    if (uint32_t(dz * dz + dx * dx) > uint32_t(r * r)) return false;
+    const V3 l = rotY(int16_t(0x1000 - p.yaw), dx, dy, dz);
+    const auto& b = p.animState.box;
+    return b[0] - playerInflate_ < l.x && l.x < b[3] + playerInflate_ && b[2] - playerInflate_ < l.z &&
+           l.z < b[5] + playerInflate_ && l.y < b[1] && b[4] < l.y;
+}
+
 int16_t LitWorld::boxTop() const { return p.animState.box[4] ? p.animState.box[4] : kApproxBoxTop; }
 
 // Sound start 0x41deb0 mode 1 (mode 2 releases a looping voice: no voices are simulated).
 void LitWorld::playSound(uint32_t id) {
-    if (id < sounds_.size() && sounds_[id][0] >= 0) sfx.push_back(uint16_t(sounds_[id][0]));
+    // 0x41deb0 (mode 1): needs a free channel of 24 (none -> nothing, no rand), then the table entry; flag 0x80 =
+    // chance, plays when rand() >= byte 7 * 0x80; a started sound holds its channel.
+    if (sfxChannels == 0 || id >= sounds_.size() || !sounds_[id][3]) return;
+    if ((sounds_[id][1] & 0x80) && rand_() < sounds_[id][2] * 0x80) return;
+    if (sfxChannels > 0) --sfxChannels;
+    if (sounds_[id][0] >= 0) sfx.push_back(uint16_t(sounds_[id][0]));
 }
 
 // ---- tick ----
@@ -231,6 +297,11 @@ void LitWorld::playSound(uint32_t id) {
 void LitWorld::tick(const PadInput& in) {
     ++ticks;
     sfx.clear();
+    // F1 (window message, before the tick body): request the help screen, or leave a pause state (0x40e4a1).
+    if (in.help) {
+        if (S[12] == 0) helpRequest_ = true;
+        else S[12] = 2;
+    }
     // §2.2: all words zero while the player is scripted/dead (flags14 0x1000000) or a level change is pending.
     if ((p.flags14 & 0x1000000) || nextLevel >= 0) {
         pad.raw = pad.held = pad.prev = pad.pressed = 0;
@@ -238,11 +309,44 @@ void LitWorld::tick(const PadInput& in) {
     } else {
         padTick(pad, in);
     }
-    cameraTick();   // §1.1 step 3a: camera first, from the previous tick's player position
+    if (S[12] == 0) cameraTick();  // §1.1 step 3a: camera first, from the previous tick's player position
     actorsTick();   // §7.1: activation, then behaviours in active-list order (player among them)
     // HUD actor 0x44acc0 (§3.6): health below 1 -> death state (A92 override, else the zone-trigger default).
-    if (int8_t(G[1]) < 1 && !(p.flags14 & 0x1000000))
+    if (S[12] == 0 && int8_t(G[1]) < 1 && !(p.flags14 & 0x1000000))
         kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_));
+    speechTick();   // §1.1 step 5
+    // §1.1 step 7 (0x4065e0): pause states. Help opens unless a scripted camera (0x300 without 1), the cutscene lock
+    // G[0x36] or speech blocks it; 2 (resuming) returns to 0. ponytail: 0x4b3fc0 (also gates 2 -> 0) taken as 0.
+    if (S[0] == 0) {
+        if (S[12] == 0) {
+            if (!(((cam.flags & 0x300) && !(cam.flags & 1)) || G[0x36] || S[0x17]) && helpRequest_) S[12] = 3;
+        } else if (S[12] == 2) {
+            S[12] = 0;
+        }
+    }
+    helpRequest_ = false;
+}
+
+// XA speech status S[0x17] (0x41e2b0, the path without an audio device, which the Wine oracle takes): A81 start 8 ->
+// 2 -> 4 playing (clock started) -> 0 once the clip length (samples, exe table 0x45c338 for language 0 / 44100 Hz
+// 0x45c968) has elapsed on the 30 Hz tick clock. ponytail: no speech audio is played.
+void LitWorld::speechTick() {
+    static constexpr uint32_t kSamples[64] = {
+        0,      0,      77197,  90406,  88204,  805166, 1102502, 1716648, 971506, 1878373, 1240976, 383501, 753510,
+        1006069, 447489, 1232039, 353492, 1130107, 884945, 581247, 1421654, 936905, 606247, 453214, 230665, 346839,
+        318239, 247099, 189021, 199949, 191106, 187893, 272622, 1502372, 4183086, 623438, 1076876, 92746, 99267,
+        286484, 204502, 298573, 187581, 196015, 197146, 430963, 339479, 212750, 126887, 186525, 112542, 275479,
+        196248, 369126, 325794, 318488, 664293, 237626, 389965, 354743, 378819, 390353, 411233, 431813};
+    uint8_t& st = S[0x17];
+    if (st == 8) {
+        st = 2;
+    } else if (st == 2) {
+        speechMs_ = speech_ < 2 || speech_ >= 64 ? 0 : uint32_t(kSamples[speech_] * 1000ull / 44100);
+        speechStart_ = ticks;
+        st = 4;
+    } else if (st == 4 && uint64_t(ticks - speechStart_) * 1000 >= uint64_t(speechMs_) * 30) {
+        st = 0;
+    }
 }
 
 void LitWorld::initPlayer() {  // 0x43a880 first call (part list not built yet)
@@ -684,7 +788,7 @@ void LitWorld::playerTick() {
     }
     if ((p.flags14 & 0x81000000) == 0) moveActor(p, w, r, boxTop());
     if (sum0 != w.z + w.x) p.flags14 |= 0x100000;  // blocked by a wall this tick
-    playerContacts(w);  // 0x433500 mask 0x9a690a: solids, platforms, pickups (approximation)
+    playerContacts(w, mv->flagsA, lz);  // 0x433500 mask 0x9a690a: solids, platforms, pushables, pickups
     p.pos.x += w.x;
     p.pos.y += w.y;
     p.pos.z += w.z;
@@ -730,7 +834,7 @@ void LitWorld::playerTick() {
     // 7. Animation (§3.1 step 4, §6).
     if (p.anim == mv->anim) {
         if (!(mv->mode & 0x8000) || lz != 0) {
-            const uint32_t res = model_ ? animTick(*model_, p.animState, 0, 0) : AnimMissing;
+            const uint32_t res = model_ ? todTick(*model_, p.animState, 0, 0, playerFx_, nullptr) : AnimMissing;
             if (res == AnimFinished) {
                 if (p.state == 1) p.seq = uint16_t(rand_() & 3);  // random idle fidget
                 ++p.seq;
@@ -742,8 +846,22 @@ void LitWorld::playerTick() {
             }
         }
     } else {
-        if (model_) animTick(*model_, p.animState, mv->anim, uint32_t(uint16_t(mv->mode)));
+        if (model_) todTick(*model_, p.animState, mv->anim, uint32_t(uint16_t(mv->mode)), playerFx_, nullptr);
         p.anim = mv->anim;
+    }
+    if (model_ && p.animState.attachNew) {  // packet 10 -> +0x58 (0x44e400), as for actors (lit_actors animate)
+        p.animState.attachNew = false;
+        if (const auto o = partOrigin(*model_, p.animState, size_t(p.animState.attachPart), {p.pos.x, p.pos.y, p.pos.z},
+                                      {0, p.yaw, p.lean}, {4096, 4096, 4096}, false))
+            p.hand = {(*o)[0], (*o)[1], (*o)[2]}, p.handSet = true;
+    }
+    // 0x43a880 tail: unless the move keeps the animated box (flagsB 0x2000), Bugs' box x/z and radius are fixed;
+    // only the packet-9 heights follow the animation (runtime: L01A fight capture, +0x48..+0x54 = ±70 / ±40, +0x2e 80).
+    // ponytail: the carried-actor variants (+0x6c with flags8 0x2000: longer z1 / the carried box) are not modelled.
+    if (!(mv->flagsB & 0x2000)) {
+        auto& b = p.animState.box;
+        b[0] = -70, b[2] = -40, b[3] = 70, b[5] = 40;
+        p.animState.radius = 80;
     }
 
     // 8. End of tick: inside a wall -> restore the last safe position (§4.3).
@@ -1014,6 +1132,72 @@ void LitWorld::cameraTick() {
     }
     cam.candCopy = cam.cand;
     cam.flags &= ~0x80u;
+}
+
+// ---- shadows: 0x44c4b0 registration, 0x44bb50 draw, 0x44ba00 position, 0x44b4f0 scale / tilt ----
+
+std::vector<LitWorld::Shadow> LitWorld::shadows() const {
+    std::vector<Shadow> out;
+    if (!scene_) return out;
+    auto one = [&](uint16_t entity, const Mover& m, const ActorModel* model, const AnimState& st,
+                   std::array<int16_t, 3> rot, std::array<int32_t, 3> scale, const std::array<int16_t, 6>& box,
+                   const LitActor* support) {
+        if (!entity || !model || st.parts.empty() || out.size() >= 40 || !scene_->shadowModels.contains(entity)) return;
+        // 0x44ba00: one part -> the actor position, else the origin of the second part of the list; skipped when that
+        // part is not drawn (+0xb4).
+        const auto o = partOrigin(*model, st, st.parts.size() > 1 ? 1 : 0, {m.pos.x, m.pos.y, m.pos.z}, rot, scale);
+        if (!o) return;
+        Shadow s{entity, st.parts.size() > 1 ? V3{(*o)[0], (*o)[1], (*o)[2]} : m.pos, {0, m.yaw, 0}, 0x1000};
+        if (support && ((support->flags8 & 8) || (support->flagsC & 0x2000))) {  // riding: at the feet, platform tilt
+            s.pos.y = m.pos.y;
+            s.rot = {support->rot[0], support->yaw, support->rot[2]};
+            out.push_back(s);
+            return;
+        }
+        Ground g;
+        g.zone = m.zone;
+        hf.groundAt(s.pos, g);  // overwrites y with the zone bottom
+        while ((g.kind & KindOpen) && g.zone != -1) {  // open floor: drop into the zone below
+            ++s.pos.y;
+            hf.groundAt(s.pos, g);
+        }
+        s.pos.y += g.hoff;
+        if (s.pos.y > shadowMaxY) s.pos.y = shadowMaxY;
+        if (!(cam.flags & 0x100) && s.pos.y < m.pos.y) s.pos.y = m.pos.y;
+        // 0x44b4f0 (ponytail: its first pass, projecting onto a non-ridden collision-class-2 platform below, is not
+        // ported): ground at three box corners of the actor position, each kept within ±0x22 of the shadow height.
+        const int32_t ref = s.pos.y;
+        Ground h;
+        h.zone = m.zone;
+        auto probe = [&](int32_t dx, int32_t dz) {
+            V3 q{m.pos.x + dx, m.pos.y, m.pos.z + dz};
+            hf.groundAt(q, h);
+            if (h.kind & KindBlocked) return ref;
+            const int32_t y = q.y + h.hoff;
+            return y >= ref + 0x23 || y <= ref - 0x23 ? ref : y;
+        };
+        const V3 a{box[0], probe(box[0], box[2]), box[2]}, b{box[3], probe(box[3], box[2]), box[2]},
+            c{box[0], probe(box[0], box[5]), box[5]};
+        s.scale = ref < m.pos.y ? 0x1000 : std::max((m.pos.y - ref) * 4 + 0x1000, 0x800);
+        if (a.y != b.y || a.y != c.y) {  // tilt to the plane of the three probes (yaw dropped)
+            const V3 u{b.x - a.x, b.y - a.y, b.z - a.z}, v{c.x - a.x, c.y - a.y, c.z - a.z};
+            const int32_t nx = u.y * v.z - u.z * v.y, ny = v.x * u.z - u.x * v.z, nz = u.x * v.y - v.x * u.y;
+            s.rot = {int16_t(ratan2(nz, ny)), 0, int16_t(ratan2(nx, ny))};
+        }
+        out.push_back(s);
+    };
+    // Bugs first (the registration list follows the draw list), skipped in first person (camera flags 0x20).
+    if (!(cam.flags & 0x20))
+        one(playerShadow_, p, model_, p.animState, {0, p.yaw, p.lean}, {4096, 4096, 4096}, p.animState.box,
+            p.platform >= 0 ? &actors[size_t(p.platform)] : nullptr);
+    for (const LitActor& a : actors) {
+        if (!a.active || !a.visible || a.dead || a.type == 7) continue;
+        const ActorDef& d = defs[size_t(a.def)];
+        const bool tod = a.animState.box != std::array<int16_t, 6>{};  // TOD packet 9 overrides the tag box
+        one(d.shadow, a, d.model >= 0 ? &scene_->actorModels[size_t(d.model)] : nullptr, a.animState,
+            {a.rot[0], a.yaw, a.rot[2]}, a.scale, tod ? a.animState.box : a.box, nullptr);
+    }
+    return out;
 }
 
 } // namespace bb::game

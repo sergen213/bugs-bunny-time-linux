@@ -10,15 +10,22 @@
 namespace bb::game {
 namespace {
 
-constexpr int16_t kSteer[9] = {0, 0, 0, 341, -341, 682, -682, 1023, -1023};    // 0x4add98
-constexpr int16_t kSteerFine[9] = {0, 0, 0, 256, -256, 512, -512, 768, -768};  // 0x4addb0 (flagsA 0x80000)
+constexpr int16_t kSteer[10] = {0, 0, 0, 341, -341, 682, -682, 1023, -1023, 0};    // 0x4add98 (+ the word after: k = 9)
+constexpr int16_t kSteerFine[10] = {0, 0, 0, 256, -256, 512, -512, 768, -768, 0};  // 0x4addb0 (flagsB 0x80000)
 constexpr int32_t kPlayerHalf = 70;  // default player box ±70 / ±40 (§3.7); one half-width for both axes (approximation)
 
-int64_t dist2(const V3& a, const V3& b, bool y) {
-    const int64_t dx = a.x - b.x, dy = y ? a.y - b.y : 0, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
+// 0x4079c0(dx² + dy² + dz²): round(sqrt) of the int32 sum (wraps like the exe beyond ±46340 per axis).
+int32_t dist(const V3& a, const V3& b, bool y) {
+    const uint32_t dx = uint32_t(a.x - b.x), dy = y ? uint32_t(a.y - b.y) : 0, dz = uint32_t(a.z - b.z);
+    const int32_t s = int32_t(dx * dx + dy * dy + dz * dz);
+    return s < 0 ? INT32_MIN : isqrt(s);  // exe: sqrt(negative) = NaN -> __ftol 0x80000000
 }
-int32_t dist(const V3& a, const V3& b, bool y) { return int32_t(std::sqrt(double(dist2(a, b, y)))); }
+// 0x4078d0 / 0x407970: activation / director-camera length estimate, max + (mid + min) / 4.
+int32_t approxLen(int32_t x, int32_t y, int32_t z) {
+    x = std::abs(x), y = std::abs(y), z = std::abs(z);
+    const int32_t hi = std::max(x, y), lo = std::min(x, y);
+    return hi <= z ? ((hi + lo) >> 2) + z : ((z + lo) >> 2) + hi;
+}
 
 const PlayerState* stateById(const ActorDef& d, uint16_t id) {
     for (const PlayerState& s : d.states)
@@ -42,6 +49,18 @@ bool inBox(const LitActor& a, const V3& q, int32_t grow, int32_t up, int32_t dow
            ly >= a.box[4] - a.inflate - up && ly <= a.box[1] + a.inflate + down;
 }
 
+// 0x433380's point test: q within the +0x30 pre-test radius of o, then in o's yaw frame inside its box grown by inflate + 4
+// horizontally (heights not grown).
+bool pointInBox(const LitActor& o, const V3& q) {
+    const auto& b = o.box;
+    if (!(b[0] | b[1] | b[2] | b[3] | b[4] | b[5])) return false;  // 0x407890: empty box
+    const int32_t dx = int16_t(q.x - o.pos.x), dy = int16_t(q.y - o.pos.y), dz = int16_t(q.z - o.pos.z);
+    const int32_t g = o.inflate + 4;
+    if (uint32_t(dz * dz + dx * dx) > o.radius2) return false;
+    const V3 l = rotY(int16_t(0x1000 - o.yaw), dx, dy, dz);
+    return b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= l.y && l.y <= b[1];
+}
+
 } // namespace
 
 LitActor LitWorld::instantiate(size_t i) const {
@@ -55,6 +74,8 @@ LitActor LitWorld::instantiate(size_t i) const {
     a.yaw = d.rot[1];
     a.scale = d.scale;
     a.box = d.box;
+    a.radius = d.radius;
+    a.radius2 = uint32_t(d.radius) * d.radius;
     a.inflate = d.inflate;
     a.act3c = d.act3c, a.act3e = d.act3e;
     a.param = d.param;
@@ -64,13 +85,15 @@ LitActor LitWorld::instantiate(size_t i) const {
     return a;
 }
 
+// Walks the live list (0x4b3740) from its head: the first matching entity id in list order.
 int LitWorld::findActor(uint16_t entityId) const {
-    for (size_t k = 0; k < actors.size(); ++k)
+    for (const uint32_t k : order_)
         if (!actors[k].dead && !(actors[k].flags14 & 0x100) && actors[k].entityId == entityId) return int(k);
     return -1;
 }
 
-// 0x448d40: copy of template `entityId` (chunk 0x08) at pos / yaw. Dead slots are reused and the pool never
+// 0x448d40: copy of template `entityId` (chunk 0x08) at pos / yaw, appended to the live list and to the end of the
+// running active list (so it updates later in the same tick, last). Dead slots are reused and the pool never
 // reallocates during a tick (behaviours hold references): pool full -> -1, like the exe's fixed actor pool.
 int LitWorld::spawn(uint16_t entityId, const V3& pos, int16_t yaw) {
     for (size_t i = 0; i < defs.size(); ++i) {
@@ -78,23 +101,115 @@ int LitWorld::spawn(uint16_t entityId, const V3& pos, int16_t yaw) {
         LitActor a = instantiate(i);
         a.pos = pos;
         a.yaw = yaw;
-        for (size_t k = 0; k < actors.size(); ++k)
-            if (actors[k].dead && int(k) != p.platform) {
-                actors[k] = std::move(a);
-                return int(k);
-            }
-        if (actors.size() == actors.capacity()) return -1;
-        actors.push_back(std::move(a));
-        return int(actors.size() - 1);
+        a.active = true;
+        size_t k = 0;
+        while (k < actors.size() && !(actors[k].dead && int(k) != p.platform)) ++k;
+        if (k == actors.size()) {
+            if (actors.size() == actors.capacity()) return -1;
+            actors.push_back(std::move(a));
+        } else {
+            actors[k] = std::move(a);
+        }
+        order_.push_back(uint32_t(k));
+        spawned_.push_back(k);
+        return int(k);
     }
     unsupported.insert(std::format("spawn template {}", entityId));
     return -1;
 }
 
+// 0x438970, the sprite path of the actor animation (flipbook actors flags8 0x200000 via 0x4393e0, and every type-2
+// actor): the animation is the listed tag-0x3f asset whose role is `anim`, n x {u8 record, u8 ticks}. Start: frame 0,
+// countdown = ticks[0]; at the last frame with countdown 0 a once-clip (mode 2) ends (0x100, or keeps returning
+// 0x200 with 0x800 = hold), others restart; else countdown 0 advances a frame (countdown = its ticks), then
+// countdown -= 1 (u8) and the last frame sets 0x2000. Runtime: L01A's type-2 ambient sprites hold frame 0 (anim 134,
+// mode 0x802) and count 2, 1, 0 then hold (anim 1, 3 ticks).
+static uint32_t flipbookTick(AnimState& st, const std::vector<uint8_t>& list, uint16_t anim, uint32_t mode) {
+    mode &= 0xffff;
+    if (mode & AnimStop) { st.flags = 0x100; return AnimStopped; }
+    if ((mode & AnimResume) && (st.flags & AnimPause)) st.flags &= ~AnimPause;
+    else if (mode & AnimPause) { st.flags |= AnimPause; return AnimPlaying; }
+    st.flags &= ~0x3000u;
+    const auto ticksOf = [&](uint32_t f) { return f * 2 + 1 < list.size() ? list[f * 2 + 1] : uint8_t(0); };
+    if (mode & 0xb) {
+        st.anim = anim;
+        st.flags = mode | 0x1200;
+        st.last = uint16_t(list.size() / 2 - 1);
+        st.frame = 0;
+        st.countdown = ticksOf(0);
+    }
+    if (st.frame == st.last && st.countdown == 0) {
+        if (st.flags & AnimOnce) {
+            const uint32_t f = st.flags;
+            st.flags = (st.flags & ~0x200u) | 0x100;
+            return (f & AnimHold) ? AnimPlaying : AnimFinished;
+        }
+        if (st.flags & AnimLoop) st.flags |= 0x80;
+        st.frame = 0;
+        st.countdown = ticksOf(0);
+        st.flags |= 0x1000;
+    }
+    if (st.countdown == 0) st.countdown = ticksOf(++st.frame);
+    --st.countdown;
+    if (st.frame == st.last) st.flags |= 0x2000;
+    return AnimPlaying;
+}
+
+// 0x4393e0 with its frame-boundary side effects: when a frame is shown (countdown 0, not the once-clip end) its
+// sound records (tag 0x28: frame match, every `reload + 1`-th time) and logic events (tag 0x0d: frame match or
+// flag3 0x08; cond -> action; flag2 0x02 spawns template `id` at the actor) run. Runtime: L01A Bugs' idle fidget
+// anim 72 sets G[176] = 3 on its first frame (A19), which starts the type-2 prop actors' state 361 (counter 89).
+// Not ported: event flags 0x01/0x40 (attached children), 0x04/0x08 and flag3 0x01/0x04 (grab / release / force Bugs).
+uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, uint32_t mode, std::vector<AnimFx>& fx,
+                           LitActor* self) {
+    const bool boundary = (mode & 0xb) || (st.countdown == 0 && !(st.flags & (AnimPause | 0x100)));
+    const uint32_t r = animTick(m, st, anim, mode);
+    if (!boundary || r != AnimPlaying || st.frame == 0 || fx.empty()) return r;
+    const uint16_t frame = uint16_t(st.frame - 1);
+    const auto it = std::ranges::find(fx, st.anim, &AnimFx::anim);
+    if (it == fx.end()) return r;
+    for (AnimFx::Sound& s : it->sounds) {
+        if (s.frame != frame) continue;
+        if (s.count) { --s.count; continue; }
+        s.count = s.reload;
+        playSound(s.id);
+    }
+    for (const AnimFx::Event& e : it->events) {
+        if ((e.frame != frame && !(e.f3 & 8)) || (e.item.cond && !cond(e.item, self))) continue;
+        if (e.item.act) act(e.item, self);
+        if (e.f2 & 2) {
+            const V3 at = self ? self->pos : p.pos;
+            if (const int k = spawn(e.id, at, self ? self->yaw : p.yaw); k >= 0) actors[size_t(k)].zone = self ? self->zone : p.zone;
+        }
+        if ((e.f2 & 0x4d) || (e.f3 & 5)) unsupported.insert(std::format("anim event flags {:x}/{:x}", e.f2, e.f3));
+    }
+    return r;
+}
+
 uint32_t LitWorld::animate(LitActor& a, uint16_t anim, uint32_t mode) {
-    const ActorDef& d = defs[size_t(a.def)];
-    const uint32_t r = scene_ && d.model >= 0 ? animTick(scene_->actorModels[size_t(d.model)], a.animState, anim, mode) : AnimMissing;
-    if (r != AnimMissing) return r;
+    ActorDef& d = defs[size_t(a.def)];
+    if ((a.flags8 & 0x200000) || a.type == 2) {
+        const uint16_t want = (mode & 0xb) ? anim : a.animState.anim;
+        for (const auto& [role, list] : d.flipbooks)
+            if (role == want && list.size() >= 2) return flipbookTick(a.animState, list, anim, mode);
+    }
+    const uint32_t r = scene_ && d.model >= 0 ? todTick(scene_->actorModels[size_t(d.model)], a.animState, anim, mode, d.animFx, &a) : AnimMissing;
+    if (r != AnimMissing) {
+        AnimState& st = a.animState;
+        if (st.boxSet) {  // packet 9 (+0x48..+0x54, +0x2e, +0x30)
+            a.box = st.box;
+            a.radius = st.radius;
+            const int32_t r = a.inflate + st.radius;
+            a.radius2 = uint32_t(r * r);
+        }
+        if (st.attachNew) {             // packet 10 -> +0x58 (part origin through its parent chain, world)
+            st.attachNew = false;
+            if (const auto o = partOrigin(scene_->actorModels[size_t(d.model)], st, size_t(st.attachPart), {a.pos.x, a.pos.y, a.pos.z},
+                                          {a.rot[0], a.yaw, a.rot[2]}, a.scale, false))
+                a.hand = {(*o)[0], (*o)[1], (*o)[2]}, a.handSet = true;
+        }
+        return r;
+    }
     // ponytail: no TOD for this id (no model / sprite-only actor): frame 0 on the starting tick, then finished, so
     // frame-0 and clip-end item gates each fire once (the exe's 0x4393e0 / 0x438970 timing is not reproduced).
     if (anim) { a.animState.frame = 0, a.animState.countdown = 0, a.animState.flags = 0; return AnimPlaying; }
@@ -120,24 +235,35 @@ void LitWorld::startScript(LitActor& a, uint16_t stateId) {
 
 void LitWorld::actorsTick() {
     if (actors.capacity() < actors.size() + 256) actors.reserve(actors.size() + 512);  // spawn headroom (see spawn())
-    const V3 ref = (cam.eye.x | cam.eye.y | cam.eye.z) ? cam.eye : p.pos;  // activation reference: camera eye
+    spawned_.clear();
+    glyphs.clear();  // 0x4b373c sprite list restarts with each update
+    // Activation reference: the camera eye, Bugs while the eye components sum to 0 (load update; 0x447d40).
+    const V3 ref = cam.eye.x + cam.eye.y + cam.eye.z != 0 ? cam.eye : p.pos;
     const V3 fwd{cam.target.x - cam.eye.x, 0, cam.target.z - cam.eye.z};
     const double fl = std::max(1.0, std::sqrt(double(fwd.x) * fwd.x + double(fwd.z) * fwd.z));
     std::vector<size_t> first, solid, plats, rest;  // type 0x15, flags8 0x20000, flags8 8, others (each LIFO)
-    for (size_t i = 0; i < actors.size(); ++i) {
+    for (const uint32_t i : order_) {
         LitActor& a = actors[i];
         a.active = false;
         if (a.dead || (a.flagsC & 0x40)) continue;
         a.visible = true;
         a.flags18 &= ~0x100u;
         if (a.entityId != 5 && a.type != 20 && int(i) != p.platform && a.act3c != 0) {
-            if ((a.act3c & 2) && dist(ref, a.pos, true) > a.act3e) {  // beyond +0x3e
+            if ((a.act3c & 2) && approxLen(ref.x - a.pos.x, ref.y - a.pos.y, ref.z - a.pos.z) > a.act3e) {  // beyond +0x3e
                 if (!(a.act3c & 0x40)) continue;
                 a.visible = false;
                 a.flags18 |= 0x100;
             }
-            // +0x3c & 1 portal-zone visibility: not simulated (always visible). & 0x20: projected centre within
-            // ±0x100 of the 512-wide 4:3 reference at H = 400 (vertical test and multi-part corners omitted).
+            // +0x3c & 1 portal-zone visibility: the visible-zone table 0x4b3460 is filled by drawing, so it is empty
+            // for the load update and the first tick (runtime: L01A's zone-gated start director fires on the 2nd
+            // tick, counter 5); afterwards every zone counts as visible (portal visibility not simulated).
+            if ((a.act3c & 1) && a.visible && ticks <= 1) {
+                if (!(a.act3c & 0x40)) continue;
+                a.visible = false;
+                a.flags18 |= 0x100;
+            }
+            // & 0x20: projected centre within ±0x100 of the 512-wide 4:3 reference at H = 400 (vertical test and
+            // multi-part corners omitted).
             if ((a.act3c & 0x20) && a.visible) {
                 const double rx = a.pos.x - cam.eye.x, rz = a.pos.z - cam.eye.z;
                 const double cz = (rx * fwd.x + rz * fwd.z) / fl, cx = (rx * fwd.z - rz * fwd.x) / fl;
@@ -156,34 +282,45 @@ void LitWorld::actorsTick() {
         a.active = true;
         (a.type == 0x15 ? first : (a.flags8 & 0x20000) ? solid : (a.flags8 & 8) ? plats : rest).push_back(i);
     }
-    auto run = [&](const std::vector<size_t>& v) {
-        for (auto it = v.rbegin(); it != v.rend(); ++it) {
-            if (!(actors[*it].flags14 & 0x100)) behaviour(*it);
-            LitActor& a = actors[*it];
-            ++a.timer;
-            if (a.flags14 & 0x100) {
-                a.dead = true;  // freed by 0x447a50
-                if (p.platform == int(*it)) { p.platform = -1; p.flags14 &= ~0x14u; }
-            }
+    // Paused (S[12] != 0: 1 pause menu, 2 resuming, 3 help): only actors with flagsC 0x40000000 run (pause/help
+    // menus and the overlays they spawn), the player and camera stand still (0x447d40).
+    const bool paused = S[12] != 0;
+    auto one = [&](size_t i) {
+        if (paused && !(actors[i].flagsC & 0x40000000)) return;
+        if (!(actors[i].flags14 & 0x100)) behaviour(i);
+        LitActor& a = actors[i];
+        ++a.timer;
+        if (a.flags14 & 0x100) {
+            a.dead = true;  // freed by 0x447a50
+            std::erase(order_, uint32_t(i));
+            if (p.platform == int(i)) { p.platform = -1; p.flags14 &= ~0x14u; }
         }
+    };
+    auto run = [&](const std::vector<size_t>& v) {
+        for (auto it = v.rbegin(); it != v.rend(); ++it) one(*it);
     };
     run(first);
     run(solid);
     run(plats);
-    playerTick();
-    ++p.timer;
-    run(rest);
-    if (p.carrier >= 0) {  // attached coordinate: Bugs at the carrier's origin (0x11c local offset zero)
-        const LitActor& c = actors[size_t(p.carrier)];
-        if (c.dead) {
-            p.carrier = -1;
-            p.flags14 &= ~4u;
-        } else {
-            p.pos = c.pos;
-            p.yaw = c.yaw;
-            p.zone = c.zone;
-        }
+    // Carried (attached coordinate, 0x11c local offset zero): Bugs' world position is the carrier's as of his own
+    // update, i.e. before a carrier in the rest list moves -> one tick behind it (runtime: L01a walk-in, Bugs z =
+    // carrier z - 25 each tick). His own movement does not apply while attached.
+    if (p.carrier >= 0 && actors[size_t(p.carrier)].dead) p.carrier = -1;
+    const bool held = p.carrier >= 0;
+    const V3 heldAt = held ? actors[size_t(p.carrier)].pos : V3{};
+    if (held) {
+        p.pos = heldAt;
+        p.yaw = actors[size_t(p.carrier)].yaw;
+        p.zone = actors[size_t(p.carrier)].zone;
     }
+    if (!paused) {
+        playerTick();
+        ++p.timer;
+    }
+    if (held) p.pos = heldAt;
+    run(rest);
+    for (size_t q = 0; q < spawned_.size(); ++q) one(spawned_[q]);  // spawned this tick: appended to the active list
+    spawned_.clear();
 }
 
 void LitWorld::behaviour(size_t i) {
@@ -198,8 +335,10 @@ void LitWorld::behaviour(size_t i) {
     case 12: platform(i, 2); return;
     case 13: platform(i, 8); return;
     case 14: type14(i); return;
+    case 5: pushable(i); return;
     case 16: director(i); return;
     case 36: cameraDirector(i); return;
+    case 32: overlayActor(i); return;
     case 18: platform(i, 1); return;
     case 19: platform(i, 4); return;
     case 22: platform(i, 0x10); return;
@@ -212,7 +351,7 @@ void LitWorld::behaviour(size_t i) {
     case 29: platform(i, 0x400); return;
     case 3: case 7: case 11: case 15: case 17: case 20: case 21: case 30: case 33: case 35: return;  // no-op / texture link
     default: {
-        // 0 static prop, 4 flipbook effect, 5 pushable, 8 rope, 10 tagger, 31 projectile, 32 overlay, 34 attached:
+        // 0 static prop, 4 flipbook effect, 8 rope, 10 tagger, 31 projectile, 34 attached:
         // not simulated; TOD models loop their initial animation as in the viewer.
         LitActor& a = actors[i];
         const ActorDef& d = defs[size_t(a.def)];
@@ -253,7 +392,7 @@ bool LitWorld::runItem(size_t i, const ActorItem& it, bool t14) {
             unsupported.insert("item flag 0x400000");
         } else if (f & 0x18000000) {
             const int32_t d = dist(tgt->pos, a.pos, f & 1);
-            if ((f & 0x200000) ? d < it.p1 : d > it.p1) return false;
+            if ((f & 0x200000) ? uint32_t(d) < uint32_t(it.p1) : uint32_t(d) > uint32_t(it.p1)) return false;
         } else if ((f & 0x40000000) && (!ta || ta->animState.frame != it.p1)) {
             return false;
         }
@@ -275,6 +414,7 @@ void LitWorld::type14(size_t i) {
         ap->phase = 0x800;
         ap->jumpH = 0x80;
         ap->wander = ap->wanderDir = 0;
+        ap->hops = 0;
         if (ap->state < 0) return;
     }
     LitActor& a = *ap;
@@ -311,14 +451,9 @@ void LitWorld::type14(size_t i) {
         a.flags14 &= 0xdfffffbf;
     } else {
         a.flags14 |= 0x40;
-        if ((fa & 0x10000) && !(p.flags14 & 0x3000000)) {
-            // Hand point = TOD attach point +0x58 (packet 0xa, not decoded): 150 in front, 200 up (approximation).
-            const V3 hand = [&] { const V3 o = rotY(a.yaw, 0, 0, 150); return V3{a.pos.x + o.x, a.pos.y - 200, a.pos.z + o.z}; }();
-            const V3 lp = rotY(0x1000 - p.yaw, hand.x - p.pos.x, 0, hand.z - p.pos.z);
-            if (std::abs(lp.x) <= kPlayerHalf && std::abs(lp.z) <= kPlayerHalf && hand.y >= p.pos.y + boxTop() && hand.y <= p.pos.y &&
-                damagePlayer(a, st) && st->w[4])
-                forceState(uint16_t(st->w[4]));
-        }
+        // Hand attack: the attach point +0x58 (TOD packet 10 of the last applied frame) inside Bugs' box (0x434840).
+        if ((fa & 0x10000) && a.handSet && !(p.flags14 & 0x3000000) && handHitsPlayer(a.hand) && damagePlayer(a, st) && st->w[4])
+            forceState(uint16_t(st->w[4]));
         if (fa & 0x800000) {
             a.flags14 |= 0x20000000;
             if ((!(p.flags14 & 0x3000000) || (a.flags8 & 0x40000000)) && (a.flags14 & 0x8000) && damagePlayer(a, st) && st->w[4])
@@ -388,20 +523,30 @@ void LitWorld::type14(size_t i) {
         inBox(a, {p.pos.x - w.x, p.pos.y, p.pos.z - w.z}, kPlayerHalf, 0, -boxTop()) && damagePlayer(a, st) && st->w[4])
         forceState(uint16_t(st->w[4]));
     // Ballistic hop (flagsA 0x10): the exe aims the arc at a target; a fixed arc +0x18 step / +0x1a height here.
+    // flagsA 0x8000000 on the ground bounces: hop n steps the arc n × +0x18 until that reaches 0x400, then flags14
+    // 0x800000 ends it (runtime: L01A carrots 39 from enemy 932, second hop at counters 1159-1175 twice as fast).
     if ((fa & 0x10) && !(a.flags14 & 0x209)) {
-        a.phase = 0x400;
-        a.jumpH = st->w[3];
-        a.jumpStep = st->w[2];
-        a.vy = 0;
-        a.flags14 = (a.flags14 & 0xeffff9f1) | 1;
+        const int32_t hop = (fa & 0x8000000) && (a.flags14 & 0x12) ? st->w[2] * ++a.hops : st->w[2];
+        if (hop < 0x400) {
+            a.phase = 0x400;
+            a.jumpH = st->w[3];
+            a.jumpStep = int16_t(hop);
+            a.vy = 0;
+            a.flags14 = (a.flags14 & 0xeffff9f1) | 1;
+        } else {
+            a.flags14 = (a.flags14 & 0xfff7efff) | 0x800000;
+        }
     }
     if ((fa & 0x10) && (a.flags14 & 1)) arcTick(a);
     if ((w.x | w.y | w.z) && !(fa & 0x80000000) && !(fb & 0x20002)) {
-        // 0x437f40: try the heading offsets until the step neither hits a wall, drops > 200 (unless 0x80000), nor
-        // changes zone (unless 0x40000000); none -> turn around and stand.
-        const int16_t* tab = (fa & 0x80000) ? kSteerFine : kSteer;
+        // 0x437f40: try the heading offsets (table by flagsB 0x80000) until the step neither hits a wall, drops
+        // (unless flagsA 0x80000), nor changes zone (unless flagsA 0x40000000, which adopts the new zone); none ->
+        // turn around and stand. A trace ending over open floor is re-probed with GroundAt one unit below at the
+        // end point, whose result replaces the trace's: no zone or > 200 below = drop.
+        const int16_t* tab = (fb & 0x80000) ? kSteerFine : kSteer;
         int k = 0;
         V3 got{};
+        int16_t zone = a.zone;
         for (; k < 9; ++k) {
             const V3 v = rotY(tab[k], w.x, w.y, w.z);
             V3 q = a.pos;
@@ -409,27 +554,36 @@ void LitWorld::type14(size_t i) {
             Ground r;
             r.zone = a.zone;
             hf.trace(q, dx, dz, r);
-            bool drop = false;
-            if (!(a.flags14 & 4)) {
-                if (r.kind & KindOpen) {
-                    V3 b{a.pos.x + dx, a.pos.y + 1, a.pos.z + dz};
-                    Ground g;
-                    g.zone = a.zone;
-                    hf.groundAt(b, g);
-                    drop = g.zone == -1 || ((r.kind & KindFloor) && g.groundY - a.pos.y > 200);
-                } else if ((r.kind & KindFloor) && !(a.flags14 & 0x219) && r.hoff + q.y - a.pos.y > 200) {
-                    drop = true;
-                }
+            zone = r.zone;
+            uint16_t kind = r.kind;
+            int16_t hoff = r.hoff;
+            if (a.flags14 & 4) {
+                kind = uint16_t((kind & ~KindOpen) | KindFloor);
+            } else if (!(kind & KindOpen)) {
+                if ((kind & KindFloor) && !(a.flags14 & 0x219) && hoff - a.pos.y + q.y > 200) kind = uint16_t((kind & ~6) | KindOpen);
+            } else {
+                V3 b{q.x + dx, q.y + 1, q.z + dz};
+                Ground g;
+                g.zone = a.zone;
+                hf.groundAt(b, g);
+                kind = g.kind;
+                hoff = g.hoff;
+                if (g.zone == -1) kind |= KindOpen;
+                else if ((kind & KindFloor) && g.groundY - a.pos.y > 200) kind = uint16_t((kind & ~6) | KindOpen);
             }
-            const bool shortened = (v.x + v.z) != (dx + dz), blocked = r.kind & KindBlocked;
-            if (blocked || (!(fa & 0x80000) && drop) || shortened) a.flags14 |= 0x100000;
-            if (drop) a.flags18 |= 0x20;
-            const bool zoneChange = !(fa & 0x40000000) && r.zone != -1 && r.zone != a.zone;
+            a.hoff = hoff;
+            const bool shortened = (v.z + v.x) - (dz + dx) != 0;
+            if ((kind & KindBlocked) || (!(fa & 0x80000) && (kind & KindOpen)) || shortened) a.flags14 |= 0x100000;
+            if (kind & KindOpen) a.flags18 |= 0x20;
+            const bool zoneChange = !(fa & 0x40000000) && zone != a.zone;
             got = {dx, v.y, dz};
-            if (!zoneChange && !blocked && (!drop || (fa & 0x80000)) && !shortened) break;
+            if (!zoneChange && !(kind & ((~(fa >> 16) & 8) | 4)) && !shortened) break;
         }
-        if ((!(a.flags18 & 0x20) || (fa & 0x80000)) && ((a.flags14 & 0x100000) || k > 8)) a.yaw = int16_t(a.yaw + (tab[std::min(k, 8)] >> 3));
-        else a.yaw = int16_t(a.yaw + tab[std::min(k, 8)]);
+        if (fa & 0x40000000) a.zone = zone;
+        if ((!(a.flags18 & 0x20) || (fa & 0x80000)) && ((fa & 0x40000000) || (a.flags14 & 0x100000) || k > 8))
+            a.yaw = int16_t(a.yaw + (tab[k] >> 3));
+        else
+            a.yaw = int16_t(a.yaw + tab[std::min(k, 8)]);
         if (k == 9 && (a.flags14 & 0x100000)) {
             a.yaw = int16_t(a.yaw + 0x800);
             w = {};
@@ -468,10 +622,12 @@ void LitWorld::type14(size_t i) {
                     }
                 } else if (f & 0x20000000) {  // attach actor P2 to self (carried, +0x6c); Bugs is P2 = his entity id
                     if (uint16_t(it.p2) == p.entityId && !(p.flags14 & 0x1000000)) {
+                        // 0x440120: Bugs' coordinate becomes a child of the carrier's (+0xc4, +0x70); his flags14 are
+                        // left alone (runtime: 2 throughout the L01a walk-in) and the turn error 0x4b3c20 reset.
                         if (f & 0x1000000) p.reg = a.reg;
                         p.carrier = int32_t(i);
                         p.platform = -1;
-                        p.flags14 = (p.flags14 & ~0x10u) | 4;
+                        turnErr_ = -1;
                         a.rider = -2;
                     } else {
                         unsupported.insert("item flag 0x20000000 (attach actor)");
@@ -490,9 +646,12 @@ void LitWorld::type14(size_t i) {
                 if (f & 0x80000000) forceState(uint16_t(it.p2));
                 if (f & 0x100000) { checkpoint_ = a.pos; checkpointYaw_ = a.yaw; }
                 if (f & 0x800) { p.pos = a.pos; p.yaw = a.yaw; p.platform = -1; p.flags14 &= ~0x14u; cameraSnap(p.pos); }
-                if ((f & 0x4000) && a.rider == -2) {  // release the carried actor (Bugs) where he is
-                    a.rider = -1;
+                if ((f & 0x4000) && a.rider == -2) {  // release Bugs at his attached world position = the carrier's
+                    a.rider = -1;                       // current one (coordinate chain), x/z rotation cleared
                     p.carrier = -1;
+                    p.pos = a.pos;
+                    p.zone = a.zone;
+                    p.lean = 0;
                     p.flags14 = (p.flags14 & 0xfffff5f6) | 0x1000;
                 }
                 if (f & 0x10000) {
@@ -516,14 +675,22 @@ void LitWorld::type14(size_t i) {
     const bool same = a.anim == st->anim;
     const uint32_t res = same ? animate(a, 0, 0) : animate(a, st->anim, uint16_t(st->mode));
     a.anim = st->anim;
-    if (res == AnimFinished || (same && (st->flagsA & 0x80) && (a.flags14 & 0x12))) {
-        a.flags14 &= 0xf9f7efff;
-        a.anim = 0;
+    if (a.animState.flags & 0x100) a.flags14 &= 0xf9f7efff;  // clip finished (+0x15c 0x100)
+    const bool landed = res != AnimFinished && same && (st->flagsA & 0x80) && (a.flags14 & 0x12);
+    if (res == AnimFinished || landed) {
+        if (landed) {
+            a.flags14 &= 0xf9ffffff;
+        } else {
+            a.flags14 &= 0xf9f7efff;
+            a.anim = 0;
+        }
         if (st->flagsA & 4) { a.flags14 |= 0x100; return; }
+        a.flags14 &= ~0x1000u;
         ++a.seq;
         const int16_t sid = a.seq < 5 ? d.states[size_t(a.state)].moves[a.seq] : int16_t(-16);
         if (uint16_t(sid) != 0xfff0 && a.seq < 5) {
             a.step = stepById(d, sid);
+            a.anim = 0;
             a.animState.frame = 0;
             a.animState.countdown = 0;
             if (a.step < 0) a.step = 0;
@@ -567,8 +734,10 @@ void LitWorld::type2(size_t i) {
                 if (f & 0x8000) continue;
                 if (f & 0x10) break;
             }
-            startScript(a, it.next);
-            return;  // 0x4455e0 returns after a state switch (the new step animates next tick)
+            startScript(a, it.next);  // 0x4455e0: +0x158 = 0 (restart), then animates the new step this tick
+            a.anim = 0;
+            if (a.step < 0) return;
+            break;
         }
     }
     const ActorStep& s2 = d.steps[size_t(a.step)];
@@ -610,7 +779,7 @@ void LitWorld::director(size_t i) {
                 tgt = &actors[size_t(t)];
             }
             const int32_t dd = dist(tgt->pos, a.pos, f & 1);
-            if ((f & 0x200000) ? dd < it.p1 : dd > it.p1) continue;
+            if ((f & 0x200000) ? uint32_t(dd) < uint32_t(it.p1) : uint32_t(dd) > uint32_t(it.p1)) continue;
         }
         if (it.item.act) act(it.item, &a);
         if (f & 0x200) playSound(uint32_t(it.p1));
@@ -850,15 +1019,165 @@ void LitWorld::platform(size_t i, uint32_t mode) {
     a.flags14 &= 0xf1676f7f;
 }
 
+// ---- type 5 pushable block (0x445a60) ----
+
+// Runs in the platform group (flags8 8), i.e. before Bugs: it applies the push he wrote last tick (+0x40/+0x44,
+// playerContacts) and hands back what it could not move by tracing him with (moved − pushed). +0x17c (tag 0x1d):
+// 1 / 2 allow X / Z, 0x100 / 0x200 forbid − / +, 0x40 never move (Bugs pushed back), 0x80 keep on the floor
+// (cancel when a corner or the centre would drop > 200), 0x20 flags14 4. Each corner of its box (grown by inflate/4,
+// in its yaw frame) traces the X and then the Z move; unless flagsC 0x80 the leading face is traced for a wall. No
+// animation (runtime: L01A block, csv/litpush_L01A.csv). Not ported: the 0x432fe0 (mask 0x20000) carrier trigger,
+// its own 0x433500 push against other solids, the free mode 0x17c & 4 and its trigger list +0xfc (no LiT block
+// uses 4; the others are not exercised by the captures).
+void LitWorld::pushable(size_t i) {
+    LitActor& a = actors[i];
+    const uint16_t f = uint16_t(a.param);
+    if (!a.boxInit) {  // first call: the part list for drawing (0x448980); the box stays the tag box
+        a.boxInit = true;
+        a.flags18 |= 0x80;
+        const ActorDef& d = defs[size_t(a.def)];
+        if (d.idleAnim && a.animState.parts.empty()) animate(a, d.idleAnim, AnimOnce);
+        a.box = d.box;
+        a.radius = d.radius;
+        a.radius2 = uint32_t(d.radius) * d.radius;
+        if (f & 0x20) a.flags14 |= 4;
+    }
+    if (f & 0x40) {
+        p.pos.x -= a.pushX;
+        p.pos.z -= a.pushZ;
+    } else if ((a.flags14 & 0x8000) && (p.flags14 & 0x4000) && !(f & 4)) {
+        const int32_t g = int16_t(a.inflate >> 2), half = a.inflate >> 1;
+        const V3 lo = rotY(a.yaw, a.box[0] - g, a.box[1], a.box[2] - g), hi = rotY(a.yaw, a.box[3] + g, a.box[4], a.box[5] + g);
+        auto allow = [&](int32_t d, uint16_t bit) {
+            return (!(f & bit) || ((f & 0x100) && d < 0) || ((f & 0x200) && d > 0)) ? 0 : d;
+        };
+        int32_t dx = allow(a.pushX, 1), dz = allow(a.pushZ, 2);
+        auto trace = [&](int32_t x, int32_t z, int32_t& tx, int32_t& tz, Ground& r) {
+            V3 q{x, a.pos.y, z};
+            r = Ground{};
+            r.zone = a.zone;
+            hf.trace(q, tx, tz, r);
+            return q.y;
+        };
+        auto floorCheck = [&](Ground& r, int32_t y) {  // 0x80: a floor more than 200 below cancels the move
+            if (!(f & 0x80)) return;
+            if ((r.kind & KindFloor) && r.hoff + y - a.pos.y > 200) r.kind |= KindOpen;
+            if (r.kind & KindOpen) dx = dz = 0;
+        };
+        for (const auto& [cx, cz] : {std::pair{lo.x, lo.z}, {hi.x, lo.z}, {lo.x, hi.z}, {hi.x, hi.z}}) {
+            Ground r;
+            int32_t tx = dx, tz = 0;
+            int32_t y = trace(a.pos.x + cx, a.pos.z + cz, tx, tz, r);
+            dx = tx;
+            floorCheck(r, y);
+            tx = 0, tz = dz;
+            y = trace(a.pos.x + cx, a.pos.z + cz, tx, tz, r);
+            dz = tz;
+            floorCheck(r, y);
+        }
+        if (!(a.flagsC & 0x80)) {  // the leading face must not cross a wall
+            const auto& b = a.box;
+            Ground r;
+            if (dx) {
+                int32_t tx = 0, tz = half - b[2] + b[5];
+                trace(dx < 0 ? a.pos.x - half + b[0] : a.pos.x + half + b[3], a.pos.z - half + b[2], tx, tz, r);
+                if (r.kind & KindBlocked) dx = 0;
+            }
+            if (dz) {
+                int32_t tx = half - b[0] + b[3], tz = 0;
+                trace(a.pos.x - half + b[0], dz < 0 ? a.pos.z - half + b[2] : a.pos.z + half + b[5], tx, tz, r);
+                if (r.kind & KindBlocked) dz = 0;
+            }
+        }
+        if (f & 0x80) {
+            V3 q{a.pos.x + dx, a.pos.y, a.pos.z + dz};
+            Ground r;
+            r.zone = a.zone;
+            hf.groundAt(q, r);
+            floorCheck(r, q.y);
+        }
+        a.pos.x += dx;
+        a.pos.z += dz;
+        a.flags18 |= 0x8000;
+        V3 q = p.pos;
+        int32_t bx = dx - a.pushX, bz = dz - a.pushZ;
+        Ground r;
+        r.zone = a.zone;
+        hf.trace(q, bx, bz, r);
+        p.pos.x += bx;
+        p.pos.z += bz;
+    }
+    V3 w{};
+    Ground r;
+    moveActor(a, w, r, a.box[4]);  // gravity (0x437390 with no move)
+    a.pos.y += w.y;
+    a.pushX = a.pushZ = 0;
+    a.flags14 &= 0xffff5fff;
+}
+
 // ---- Bugs vs actor boxes ----
 
 // 0x433500 (mask 0x9a690a) as used by 0x43a880, approximated: the first active collision-list actor whose box
 // (yaw frame, inflated by +0x20 and Bugs' half-width) contains Bugs' next position is the contact. Platforms
 // (flags8 8) are boarded from above (feet less than 100 below the top), pickups/touchables (0x2802, 0x20100) get
 // flags14 0x8000 "touched", landing on an actor sets its 0x80 (stomp, + hit 0x4000000 when its step is
-// stomp-vulnerable flagsB 0x8000; flagsB 0x10000000 makes Bugs bounce), solids (not sensor 0x2000000) stop the
-// horizontal move when hit from the side. Not ported: the exe's edge push-out geometry, pushables, swimming.
-void LitWorld::playerContacts(V3& w) {
+// stomp-vulnerable flagsB 0x8000; flagsB 0x10000000 makes Bugs bounce); solids only deflect the move through
+// boxPush (0x433500 face push; runtime: Bugs walking into 932 at counters 897-931 is never stopped). Not ported: the
+// contact choice between several actors, the vertical result, the re-trace of the pushed move, pushables, swimming.
+// 0x433500's face push for Bugs vs actor o (radius pre-test, vertical overlap, then the 4 corners + centre of his
+// inflated box moved by w, in o's yaw frame, against o's box grown by its inflation; the face is picked by the
+// sector of his position around o's box centre). Each corner past that face counts as a contact and, unless o is a
+// sensor (flags8 0x2000000), w is cut so the corner stops on the face — an animated box (TOD packet 9) growing into
+// a standing Bugs pushes him out (runtime: L01A enemy 932's attack, counters 757-763). x/z rotation ignored.
+bool LitWorld::boxPush(const LitActor& o, V3& w) const {
+    const auto& mb = p.animState.box;
+    const auto& ob = o.box;
+    const int32_t mi = playerInflate_, oi = o.inflate;
+    if (!(ob[0] | ob[1] | ob[2] | ob[3] | ob[4] | ob[5])) return false;  // 0x407890: empty box
+    const int32_t orad = o.radius;
+    const int32_t nx = int16_t(p.pos.x + w.x - o.pos.x), nz = int16_t(p.pos.z + w.z - o.pos.z);
+    const int32_t rr = mi + p.animState.radius + orad + oi;
+    if (uint32_t(nx * nx + nz * nz) > uint32_t(rr * rr)) return false;
+    const int16_t inv = int16_t(0x1000 - o.yaw);
+    const V3 rel{int16_t(p.pos.x - o.pos.x), int16_t(int16_t(p.pos.y - o.pos.y) + w.y), int16_t(p.pos.z - o.pos.z)};
+    const V3 r = rotY(inv, rel.x, rel.y, rel.z);
+    if (!(ob[4] < mb[1] + r.y + w.y && mb[4] + r.y + w.y <= ob[1])) return false;
+    const int32_t cx = (ob[3] >> 1) + (ob[0] >> 1), cz = (ob[2] >> 1) + (ob[5] >> 1);
+    const int32_t ang = ratan2(r.x - cx, r.z - cz);
+    const int32_t a1 = ang < 0 ? ratan2(ob[0] - oi - cx, ob[5] - cz + oi) : ratan2(ob[3] - cx + oi, ob[5] - cz + oi);
+    const int32_t a2 = ang < 0 ? ratan2(ob[0] - oi - cx, ob[2] - oi - cz) : ratan2(ob[3] - cx + oi, ob[2] - oi - cz);
+    V3 v = rotY(inv, w.x, w.y, w.z);
+    const bool sensor = o.flags8 & 0x2000000;
+    const int32_t corners[5][2] = {{mb[0] - mi, mb[5] + mi}, {mb[3] + mi, mb[5] + mi}, {mb[0] - mi, mb[2] - mi},
+                                   {mb[3] + mi, mb[2] - mi}, {0, 0}};
+    int hits = 0;
+    for (const auto& k : corners) {
+        const V3 cw = rotY(p.yaw, k[0], 0, k[1]);
+        const V3 c = rotY(inv, int16_t(cw.x + rel.x), 0, int16_t(cw.z + rel.z));
+        const int32_t x = c.x + v.x, z = c.z + v.z;
+        if (ang < 0 ? a1 < ang : ang < a1) {
+            if (z <= ob[5] + oi && (ang < 0 ? ob[0] - oi <= x : x <= ob[3] + oi)) {
+                if (!sensor) v.z = ob[5] - c.z + oi;
+                ++hits;
+            }
+        } else if (ang < 0 ? a2 < ang : ang < a2) {
+            if ((ang < 0 ? ob[0] - oi <= x : x <= ob[3] + oi) && z <= ob[5] + oi && ob[2] - oi <= z) {
+                if (!sensor) v.x = ang < 0 ? ob[0] - c.x - oi : ob[3] - c.x + oi;
+                ++hits;
+            }
+        } else if (ob[2] - oi <= z && (ang < 0 ? ob[0] - oi <= x : x <= ob[3] + oi)) {
+            if (!sensor) v.z = ob[2] - c.z - oi;
+            ++hits;
+        }
+    }
+    if (!hits) return false;
+    const V3 back = rotY(o.yaw, v.x, v.y, v.z);
+    w.x = int16_t(back.x);
+    w.z = int16_t(back.z);
+    return true;
+}
+
+void LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
     if (p.platform >= 0) {  // 0x434230: still over the platform?
         const LitActor& pl = actors[size_t(p.platform)];
         const V3 q{p.pos.x + w.x, p.pos.y, p.pos.z + w.z};
@@ -876,18 +1195,28 @@ void LitWorld::playerContacts(V3& w) {
     for (size_t i = 0; i < actors.size(); ++i) {
         LitActor& a = actors[i];
         if (!a.active || a.dead || a.def < 0 || defs[size_t(a.def)].cls != 2 || !(a.flags8 & 0x9a690a)) continue;
-        if (!inBox(a, q, kPlayerHalf, 0, -boxTop())) continue;
-        const int32_t below = q.y - (a.pos.y + a.box[4]);  // feet below the box top
+        // The move stays w0 unless a branch below takes boxPush's pushed move wp (the exe's int move vs. its s16 copy).
+        const V3 w0 = w;
+        V3 wp = w;
+        const bool pushed = boxPush(a, wp);  // every solid incl. platforms (the L01A block has flags8 8 | 0x4000)
+        // Actors touch only through boxPush's corner hits (runtime: no stomp on 932 at counter 1007, corner x 75 past
+        // its box; golden carrot 542 collected at 1185, not while its smaller frames hover next to Bugs). Platforms
+        // also keep the overlap test (boarding from above).
+        if (!pushed && (!(a.flags8 & 8) || !inBox(a, q, kPlayerHalf, 0, -boxTop()))) continue;
+        const int32_t below = q.y - (a.pos.y + a.box[4]);  // feet below the box top (0x433500's w.y result, negated)
         const bool falling = (p.flags14 & 0x208) && !(p.flags14 & 0x10000);
+        // Stomp; true when a type-14 actor is stomped (the exe then skips the push: goto LAB_0043d6d3).
         auto stomp = [&] {
-            if (!falling || below >= 100) return;
-            a.flags14 |= 0x80;
-            const ActorDef& d = defs[size_t(a.def)];
-            if (a.type == 14 && a.step >= 0 && !(p.flags14 & 0x3000000)) {
-                const ActorStep& st = d.steps[size_t(a.step)];
-                if (st.flagsB & 0x8000) a.flags14 |= 0x4000000, a.damage = 1, a.contact = 1, p.contact = a.entityId;
-                if (st.flagsB & 0x10000000) p.flags18 |= 0x40;
-            }
+            if (falling && below < 100) a.flags14 |= 0x80;
+            if (!(a.flags14 & 0x80) || a.type != 14 || a.step < 0 || (p.flags14 & 0x3000000)) return false;
+            const ActorStep& st = defs[size_t(a.def)].steps[size_t(a.step)];
+            if (st.flagsB & 0x8000) a.flags14 |= 0x4000000, a.damage = 1, a.contact = 1, p.contact = a.entityId;
+            if (st.flagsB & 0x10000000) p.flags18 |= 0x40;
+            return true;
+        };
+        // The push applies only from the side (feet more than 30 below the top), not for sensors / move flagsA 0x40.
+        auto sidePush = [&](bool stomped) {
+            if (!stomped && !(a.flags8 & 0x2000000) && !(moveFlagsA & 0x40) && below > 30) w.x = wp.x, w.z = wp.z;
         };
         if ((a.flags8 & 8) && !(p.flags14 & 0x1000010) && (!(p.flags14 & 1) || (p.flags14 & 8)) && below < 100) {
             stomp();
@@ -900,42 +1229,60 @@ void LitWorld::playerContacts(V3& w) {
         }
         a.contact = uint16_t(p.entityId);
         p.contact = a.entityId;
-        if (a.flags8 & 0x4000) {  // pushable: touched, blocked (pushing not ported)
+        if ((a.flags8 & 0x4000) && !(p.flags14 & 0x11)) {
+            // Pushable, on the ground: the probe 150 ahead / 50 up (0x433380 mask 0x4000, sensors excluded) finds it
+            // while he walks (forward speed) -> blocked by a pushable (flags14 0x20000, the push-state rule). A move
+            // with flagsA 0x4000000 then pushes: his move goes to the block (+0x40/+0x44, 0x445a60 moves it and hands
+            // back what it could not), flags14 0x4000; otherwise the face push stops him.
+            const V3 o = rotY(p.yaw, 0, 0, 150);
+            const V3 probe{p.pos.x + o.x, p.pos.y - 50, p.pos.z + o.z};
+            const LitActor* ahead = nullptr;
+            for (const LitActor& b : actors)
+                if (b.active && !b.dead && b.def >= 0 && defs[size_t(b.def)].cls == 2 && (b.flags8 & 0x4000) &&
+                    !(b.flags8 & 0x2000000) && pointInBox(b, probe)) {
+                    ahead = &b;
+                    break;
+                }
+            const bool facing = ahead == &a && lz != 0;
+            if (facing) p.flags14 |= 0x20000;
             a.flags14 |= 0x8000;
-            w.x = w.z = 0;
+            if ((moveFlagsA & 0x4000000) && facing) {
+                a.pushX = int16_t(w0.x), a.pushZ = int16_t(w0.z);
+                p.flags14 |= 0x4000;
+            } else {
+                w.x = wp.x, w.z = wp.z;
+            }
         } else if (a.flags8 & 0x2802) {
             p.flags14 |= 0x40000;
             a.flags14 |= 0x8000;
-            stomp();
-            if (!(a.flags8 & 0x2000000) && below > 30) w.x = w.z = 0;
+            sidePush(stomp());
         } else if (a.flags8 & 0x20100) {
             a.flags14 |= 0x8000;
-            stomp();
-            if (!(a.flags8 & 0x2000000) && below > 30) w.x = w.z = 0;
+            sidePush(stomp());
         }
         return;
     }
 }
 
-// Bugs' attacks: move flagsA 0x800000 body overlap (0x432fe0, centre inside the target box) and 0x10000 hand
-// point (0x433380; attach point not decoded: 150 ahead, 200 up). Targets: flags8 0x80; a type-14 target only
-// when its step is vulnerable (flagsA 0x4000). Effect: target flags14 0x4000000, damage 1.
+// Bugs' attacks (0x43a880): move flagsA 0x800000 body overlap (0x432fe0, approximated: centre inside the target
+// box) and 0x10000 hand point (0x433380: his +0x58 attach point, TOD packet 10 of the last applied frame). Each takes
+// the first flags8-0x80 collision actor it finds; a type-14 one is hit only when its step is vulnerable (flagsA
+// 0x4000). Effect: target flags14 0x4000000, damage 1 (runtime: L01A kick on 932 at counter 1097, health 9999).
 void LitWorld::playerAttacks(const PlayerMove& mv) {
-    if (!(mv.flagsA & 0x810000)) return;
-    const V3 o = rotY(p.yaw, 0, 0, 150);
-    const V3 hand{p.pos.x + o.x, p.pos.y - 200, p.pos.z + o.z};
-    for (LitActor& a : actors) {
-        if (!a.active || a.dead || !(a.flags8 & 0x80) || a.def < 0) continue;
-        const bool body = (mv.flagsA & 0x800000) && inBox(a, {p.pos.x, p.pos.y - 100, p.pos.z}, 0, 0, 0);
-        const bool handHit = (mv.flagsA & 0x10000) && inBox(a, hand, 4, 4, 4);
-        if (!body && !handHit) continue;
-        if (a.type == 14 && (a.step < 0 || !(defs[size_t(a.def)].steps[size_t(a.step)].flagsA & 0x4000))) continue;
-        a.flags14 |= 0x4000000;
-        a.damage = 1;
-        a.contact = 1;
-        p.contact = a.entityId;
-        return;
-    }
+    auto hit = [&](LitActor* a) {
+        if (!a || (a->type == 14 && (a->step < 0 || !(defs[size_t(a->def)].steps[size_t(a->step)].flagsA & 0x4000)))) return;
+        a->flags14 |= 0x4000000;
+        a->damage = 1;
+        a->contact = 1;
+        p.contact = a->entityId;
+    };
+    auto first = [&](auto&& test) -> LitActor* {
+        for (LitActor& a : actors)
+            if (a.active && !a.dead && a.def >= 0 && defs[size_t(a.def)].cls == 2 && (a.flags8 & 0x80) && test(a)) return &a;
+        return nullptr;
+    };
+    if (mv.flagsA & 0x800000) hit(first([&](const LitActor& a) { return inBox(a, {p.pos.x, p.pos.y - 100, p.pos.z}, 0, 0, 0); }));
+    if ((mv.flagsA & 0x10000) && p.handSet) hit(first([&](const LitActor& a) { return pointInBox(a, p.hand); }));
 }
 
 } // namespace bb::game

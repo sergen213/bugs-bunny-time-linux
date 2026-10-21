@@ -38,7 +38,7 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 | Simulation tick | Verified Against Original Behavior (30 Hz, counter +2/tick, 30.005 ticks/s; RUNTIME_REFERENCE.md §2); Implemented (`bb_game`, render locked in Original Fidelity) | Verified Against Original Behavior (tick `0x4d2708` +2/tick, 29.99 ticks/s; RUNTIME_REFERENCE.md §2); Implemented (`bb_game` TbWorld) |
 | GL renderer, Hor+, fidelity modes | Tested on real levels | Tested on real levels |
 | Collection menu + real title art | Tested | Tested |
-| Save / config | Designed (`Savegame%d.dat` 1-based, `Savedata.dat`; GAMEPLAY §8) — untested | Designed (layout in GAMEPLAY §8) — untested |
+| Save / config | Saves **Verified** (format, writer bytes, load vs Wine-made saves; `formats/SAVE_LIT.md`); config.pc not used | Designed (layout in GAMEPLAY §8) — untested |
 | Vulkan renderer | Tested (validation-clean, GL/VK PSNR 66–76 dB) | Tested |
 | Ray tracing | Research Required (RADV support probed only) | Research Required |
 | Qt 6 launcher + import wizard | Tested (desktop smoke, both installs) | Tested |

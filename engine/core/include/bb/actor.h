@@ -45,6 +45,9 @@ struct AnimState {
     size_t next = 0;             // index of the next TOD frame the applier reads
     std::array<int16_t, 6> box{}; // TOD packet 9: actor box min xyz, max xyz (+0x48..+0x54), PS1 axes
     uint16_t radius = 0;         // TOD packet 9: +0x2e
+    bool boxSet = false;         // a packet 9 was applied (the actor box then follows the animation)
+    int16_t attachPart = -1;     // TOD packet 10: part whose origin is the attach point (+0x58, hand / spawn point)
+    bool attachNew = false;      // packet 10 applied since the caller last read attachPart
 };
 
 // One 30 Hz tick of 0x4393e0 (TOD path; frame skip, sound and logic events not ported). Any of mode bits
@@ -67,6 +70,13 @@ void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t,
 
 // Slot positions of the current pose in PS1 axes with an identity root; unwritten slots are NaN. For tests.
 std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimState& st);
+
+// World position (PS1, rounded) of part `i`'s coordinate origin (0x4375d0 walks the GsCOORDINATE2 chain) under the
+// root Trans(pos) * RotMatrix(rot) * Scale(scale); nullopt when the part is absent or not drawn this pose.
+// World origin of part i (nullopt when out of range or, with mustDraw, not drawn).
+std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const AnimState& st, size_t i,
+                                                 std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
+                                                 std::array<int32_t, 3> scale, bool mustDraw = true);
 
 // Index of animation `animId` in model.anims, -1 if absent.
 int findAnim(const ActorModel& model, uint16_t animId);

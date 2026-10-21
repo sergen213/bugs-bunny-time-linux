@@ -7,6 +7,7 @@ The originals have no ASLR (image base 0x400000, DllCharacteristics 0), so Ghidr
 
 usage: memsrv.py SOCKET EXE_NAME -- cmd...
 protocol (one request line, one reply):  "R addr len [addr len ...]\n" -> u32 total length + raw bytes
+                                          "W addr hexbytes\n" -> u32 4 + u32 bytes written (0 on error)
                                           "P\n" -> u32 4 + u32 pid of the process whose cmdline contains EXE_NAME
 """
 import ctypes, os, socket, struct, subprocess, sys, threading
@@ -35,17 +36,23 @@ def serve(conn, exe, state):
         if parts[0] == b'P':
             state['pid'] = find_pid(exe)
             out = struct.pack('<I', state['pid'])
-        elif parts[0] == b'R':
+        elif parts[0] in (b'R', b'W'):
             if not state.get('pid') or not os.path.exists(f"/proc/{state['pid']}"):
                 state['pid'] = find_pid(exe)
+            mem = f"/proc/{state['pid']}/mem"
             out = b''
             try:
-                with open(f"/proc/{state['pid']}/mem", 'rb', buffering=0) as m:
-                    for a, n in zip(parts[1::2], parts[2::2]):
-                        m.seek(int(a, 0))
-                        out += m.read(int(n, 0))
+                if parts[0] == b'W':  # test-only pokes (e.g. open a menu); reads never modify the game
+                    with open(mem, 'r+b', buffering=0) as m:
+                        m.seek(int(parts[1], 0))
+                        out = struct.pack('<I', m.write(bytes.fromhex(parts[2].decode())))
+                else:
+                    with open(mem, 'rb', buffering=0) as m:
+                        for a, n in zip(parts[1::2], parts[2::2]):
+                            m.seek(int(a, 0))
+                            out += m.read(int(n, 0))
             except (OSError, ValueError):
-                out = b''
+                out = b'' if parts[0] == b'R' else struct.pack('<I', 0)
         else:
             out = b''
         f.write(struct.pack('<I', len(out)) + out)

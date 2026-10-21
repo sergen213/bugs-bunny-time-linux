@@ -144,13 +144,13 @@ Tod parseTod(std::span<const uint8_t> d, size_t off) {
             }
             case 2: have(4), pk.v[0] = int32_t(u32(pl) & 0xffff); break;
             case 3: have(4), pk.v[0] = int32_t(u32(pl)); break;
-            case 8: break;
+            case 8: case 10: break;  // 0xa: attach point = the addressed part's origin (no payload read)
             case 9:
                 have(14);
                 for (int i = 0; i < 6; ++i) pk.v[size_t(i)] = s16(pl + size_t(i) * 2);
                 pk.v[6] = u16(pl + 12);
                 break;
-            default: q = end; continue;  // 0 attr, 6 light, 0xa attach point: not applied by this port
+            default: q = end; continue;  // 0 attr, 6 light: not applied by this port
             }
             t.packets.push_back(pk);
             q = end;
@@ -216,6 +216,10 @@ void applyTodFrame(AnimState& st, const Tod& tod, size_t frame) {
         case 9:
             for (int i = 0; i < 6; ++i) st.box[size_t(i)] = int16_t(pk.v[size_t(i)]);
             st.radius = uint16_t(pk.v[6]);
+            st.boxSet = true;
+            break;
+        case 10:  // 0x44e400 0xa0000: the packet's part origin, through its parent chain, becomes actor +0x58
+            if (pi >= 0) st.attachPart = int16_t(pi), st.attachNew = true;
             break;
         }
     }
@@ -293,6 +297,17 @@ std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimS
     std::vector<Work> work;
     skin(model, st, Work{M3{1, 0, 0, 0, 1, 0, 0, 0, 1}, {}}, slots, work);
     return slots;
+}
+
+std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const AnimState& st, size_t i,
+                                                 std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
+                                                 std::array<int32_t, 3> scale, bool mustDraw) {
+    if (i >= st.parts.size()) return std::nullopt;
+    std::vector<Work> work;
+    workMatrices(st.parts, Work{coordMatrix(rot, scale), {float(pos[0]), float(pos[1]), float(pos[2])}}, work);
+    if (mustDraw && !drawn(model, st.parts[i], work[i])) return std::nullopt;
+    const V3& t = work[i].t;
+    return std::array<int32_t, 3>{int32_t(std::lround(t[0])), int32_t(std::lround(t[1])), int32_t(std::lround(t[2]))};
 }
 
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,

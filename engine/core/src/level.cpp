@@ -382,6 +382,20 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     std::map<uint16_t, std::pair<uint16_t, std::vector<uint16_t>>> sprites;  // asset id -> (class, frame tex ids)
     for (const auto& [aid, a] : all)
         if (a.tag == 0x40) sprites[aid] = {a.role, spriteTexIds(s4, a.off, a.size)};
+    // Overlay font: the first class-8 sprite asset listed (tag 0x0f) by template entity 68 (0x44ccd0 / 0x44e310 take
+    // the actor's first asset with +0x4e == 8). Every record is a whole TIM at u, v = 0 (63/63 levels, Inferred
+    // from the data: w, h = TIM size).
+    for (const ScriptItem& it : script.items) {
+        if (it.kind != ScriptItem::Kind::Chunk || it.code != 0x08 || !it.entityId || *it.entityId != 68) continue;
+        for (const ScriptTag& t : it.tags)
+            if (auto sp = t.id == 0x0f ? sprites.find(uint16_t(t.data[0] | t.data[1] << 8)) : sprites.end();
+                sp != sprites.end() && sp->second.first == 8 && s.overlayFont.empty())
+                for (const uint16_t id : sp->second.second) {
+                    const auto tx = b.tex.find(id);
+                    s.overlayFont.push_back(tx == b.tex.end() ? -1 : tx->second);
+                }
+        break;
+    }
     std::map<uint16_t, std::pair<uint16_t, std::span<const uint8_t>>> flipbooks;  // asset id -> (role, {record, ticks} pairs)
     for (const ScriptItem& it : script.items) {
         if (it.kind != ScriptItem::Kind::Chunk || it.code != 0x22) continue;
@@ -468,9 +482,10 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             if (it.position) for (int k = 0; k < 3; ++k) xf.t[k] = float((*it.position)[size_t(k)]);
             ++s.stats.worldModels;
             b.model(s4, le32(mdl, 0), le32(mdl, 4), xf, group, true, std::format("world{}", s.stats.worldModels));
-        } else if ((it.code == 0x07 || it.code == 0x08 || it.code == 0x0a) && it.position) {
+        } else if (it.code == 0x07 || it.code == 0x08 || it.code == 0x0a) {
             // Entity positions are in world units (not 20.12): L01a player (23700,-640,8830) lies inside the world bounds.
-            const auto& pos = *it.position;
+            // No position tag = origin (templates, and e.g. L01A's type-2 ambient actors whose TOD clips hold frame 0).
+            const std::array<int32_t, 3> pos = it.position ? *it.position : std::array<int32_t, 3>{};
             const float yaw = it.rotation ? angle((*it.rotation)[1]) : 0.0f;
             if (it.player && !s.spawn) {
                 s.spawn = std::array<float, 3>{float(pos[0]), -float(pos[1]), -float(pos[2])};
@@ -547,7 +562,7 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             for (const ScriptTag& t : it.tags)
                 if (t.id == 0x0f)
                     if (auto a = assets.find(uint16_t(t.data[0] | t.data[1] << 8)); a != assets.end()) ++statics, model = &a->second;
-            if (statics != 1) continue;
+            if (statics != 1 || !it.position) continue;
             const uint32_t nobj = In{s4, "prop model"}.u32(size_t(model->first) + 8);
             if (nobj != 1) {
                 s.stats.skippedActors += nobj > 1;  // nobj 0 = no geometry
@@ -562,6 +577,32 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             ++s.stats.props;
             uint32_t propGroup = 0x80000000u | s.stats.props;
             b.model(s4, model->first, model->second, xf, propGroup, false, std::format("prop{}", s.stats.props));
+        }
+    }
+
+    // Shadow models (0x44bb50): every entity's tag 0x46 names a template entity whose first role-6 model is drawn on
+    // the ground under it. Built as a one-object actor model (posed with a single identity part by the app).
+    for (const ScriptItem& it : script.items) {
+        if (it.kind != ScriptItem::Kind::Chunk || (it.code != 0x07 && it.code != 0x08 && it.code != 0x0a)) continue;
+        const auto t46 = tagData(it, 0x46);
+        const uint16_t sid = t46.size() >= 2 ? uint16_t(t46[0] | t46[1] << 8) : 0;
+        if (!sid || s.shadowModels.contains(sid)) continue;
+        for (const ScriptItem& e : script.items) {
+            if (e.kind != ScriptItem::Kind::Chunk || e.code != 0x08 || e.entityId.value_or(0) != sid)  // template list 0x4b2390
+                continue;
+            for (const ScriptTag& t : e.tags) {
+                const auto a = t.id == 0x0f ? all.find(uint16_t(t.data[0] | t.data[1] << 8)) : all.end();
+                if (a == all.end() || a->second.role != 6 || a->second.tag == 0x25) continue;
+                s.shadowModels[sid] = uint32_t(s.actorModels.size());
+                ActorModel& am = s.actorModels.emplace_back();
+                am.modelAsset = a->first;
+                b.actor = &am;
+                uint32_t objGroup = 0;
+                b.model(s4, a->second.off, a->second.size, Xform{}, objGroup, false, std::format("shadow{}", sid));
+                b.actor = nullptr;
+                break;
+            }
+            break;
         }
     }
 

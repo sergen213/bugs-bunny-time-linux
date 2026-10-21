@@ -6,8 +6,11 @@ add_library(bb_game STATIC
   src/lit_world.cpp
   src/lit_logic.cpp
   src/lit_actors.cpp
+  src/lit_overlay.cpp
+  src/lit_save.cpp
   src/tb_collision.cpp
   src/tb_world.cpp
+  src/tb_entities.cpp
 )
 target_include_directories(bb_game PUBLIC include)
 target_link_libraries(bb_game PUBLIC bb_core)
@@ -24,3 +27,16 @@ target_link_libraries(test_tb PRIVATE bb_game)
 target_compile_options(test_tb PRIVATE -UNDEBUG)
 add_test(NAME game.tb COMMAND test_tb)
 set_tests_properties(game.tb PROPERTIES TIMEOUT 600)
+
+add_executable(test_lit_save tests/test_lit_save.cpp)
+target_link_libraries(test_lit_save PRIVATE bb_game)
+target_compile_options(test_lit_save PRIVATE -UNDEBUG)
+# Real part: Wine-produced saves in BBTIME_SAVES or $BBTIME_DATA/../local/saves/lit (skipped without them).
+add_test(NAME game.lit_save COMMAND test_lit_save)
+
+add_executable(test_lit_overlay tests/test_lit_overlay.cpp)
+target_link_libraries(test_lit_overlay PRIVATE bb_game)
+target_compile_options(test_lit_overlay PRIVATE -UNDEBUG)
+# Real MERLIN data (BBTIME_DATA): the save prompt vs the Wine oracle; 77 = skipped.
+add_test(NAME game.lit_overlay COMMAND test_lit_overlay)
+set_tests_properties(game.lit_overlay PROPERTIES SKIP_RETURN_CODE 77)

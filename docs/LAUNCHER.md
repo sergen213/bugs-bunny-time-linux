@@ -9,7 +9,7 @@ smoke on KDE Wayland). The game does not depend on Qt: both share `apps/bbtime/s
 |---|---|---|
 | `$XDG_CONFIG_HOME/bbtime/settings.ini` (default `~/.config/…`) | launcher (Save / Play / close) | settings below |
 | `$XDG_DATA_HOME/bbtime/{lit,tb}/Datas/` | import wizard, only if "Copy" is chosen | copy of the original `Datas/` |
-| `$XDG_DATA_HOME/bbtime/saves/{lit,tb}/` | the game | native saves (`bbtime::saveDir()`) |
+| `$XDG_DATA_HOME/bbtime/saves/{lit,tb}/` | the game | native saves (`bbtime::saveDir()`); LiT: `Savegame<N>.dat`, `Savedata.dat` in the original format (+ `.bak` of the previous file; `docs/formats/SAVE_LIT.md`, `bbtime --slot N`, `--import-saves DIR`) |
 | `$XDG_DATA_HOME/bbtime/backups/<UTC stamp>/` | Saves tab | full copies of `saves/` |
 | `$XDG_DATA_HOME/bbtime/app/` | updater | see `docs/UPDATES.md` |
 | `$XDG_STATE_HOME/bbtime/logs/bbtime-*.log` | launcher | stdout+stderr of games started from the launcher |

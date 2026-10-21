@@ -84,6 +84,7 @@ std::optional<std::vector<PadInput>> parseAutoplay(std::string_view s) {
             case '2': in.buttons |= PadL2; break;
             case '3': in.buttons |= PadR1; break;
             case '4': in.buttons |= PadR2; break;
+            case 'H': in.help = true; break;  // LiT F1 (help screen toggle)
             case '-': break;
             default: return std::nullopt;
             }

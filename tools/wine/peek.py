@@ -4,6 +4,7 @@
 usage: peek.py lit|tb ADDR TYPE [COUNT]
   ADDR: 0x4b38c0 | [0x4b324c]+0xe4 (u32 pointer deref, then offset; nestable: [[A]+8]+4)
   TYPE: u8 s8 u16 s16 u32 s32 f32 f64 hex
+peek.py lit|tb ADDR poke HEXBYTES  test-only write through memsrv (e.g. 0x4b2271 poke 01 opens the LiT save prompt)
 peek.py --selftest  checks the address parser without a game.
 """
 import re, socket, struct, sys
@@ -76,8 +77,12 @@ if __name__ == '__main__':
         selftest()
         sys.exit()
     game, expr, typ = sys.argv[1:4]
-    count = int(sys.argv[4]) if len(sys.argv) > 4 else 1
     m = Mem(game)
     a = m.addr(expr)
+    if typ == 'poke':  # peek.py lit ADDR poke HEXBYTES  (test-only write, e.g. to open a menu)
+        n, = struct.unpack('<I', m._req(f'W {a} {sys.argv[4]}'))
+        print(f'{a:#x}: wrote {n} bytes')
+        sys.exit(0 if n else 1)
+    count = int(sys.argv[4]) if len(sys.argv) > 4 else 1
     size = struct.calcsize(FMT[typ]) * count
     print(f'{a:#x}: {decode(m.read(a, size), typ, count)}')

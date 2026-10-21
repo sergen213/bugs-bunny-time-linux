@@ -473,6 +473,11 @@ y = plat.y + plat.+0x52 + 4, local offset `+0x1a4..`, flags14 0x14; each tick `0
 pickup (sets the target's flags14 0x8000 "touched", §7.3), 0x900000 buoyant (swim bob), 0x80000 radial push.
 Pushable block (type 5 `0x445a60`): `+0x17c` (tag 0x1d) bits 1 allow X, 2 allow Z, 0x100/0x200 forbid −/+, 0x80 keep
 on floor (cancel when a corner would drop > 200). BBLIT: the stone's box is offset from its mesh (PS1 bug; keep).
+Runtime (RUNTIME_REFERENCE §11): the block runs in the platform group (flags8 8) before Bugs, so it applies the
+push he wrote on the previous tick; it traces each corner of its box (grown by inflation / 4) for the X then Z move,
+the leading face for walls unless flagsC 0x80, then moves Bugs by (moved − pushed) with a trace. The push branch
+needs his move flagsA 0x4000000 and the probe (0, −50, 150) inside the same block (else the face push stops him);
+the probe hit alone sets flags14 0x20000 (the R1 push rule). The radius `+0x2e` comes from the 4th u16 of tag 0x1c.
 
 Trigger volumes (section-1 chunk 0x09, 0x3c-B nodes, list `DAT_004b3238`; tags 0x10 pos, 0x11 rot, 0x16 flags,
 0x1c {sizeX, minY, sizeZ}, 0x1f zone, 0x33 32-B action entries): point-in-box test `0x434b00`, actions in
@@ -637,7 +642,13 @@ must contain `+0x26`, entry flag 1); `& 0x20` → on-screen test (projected cent
 reference, BBLIT H1 sites; multi-part actors test 8 box corners). Inactive actors with flags8 0x1000 also release
 their parts (`+0x15c |= 0x4000`). Active actors are linked through `+0x10` into `DAT_004b39ac` in this order: type 0x15 actors, flags8 0x20000
 actors, flags8 0x8 actors (platforms), **the player**, then the rest — and behaviours run in that order; then
-`+0x22` (tick counter) increments. Killed actors (flags14 0x100) are freed by `0x447a50`.
+`+0x22` (tick counter) increments. Killed actors (flags14 0x100) are freed by `0x447a50`. The distance test uses the 0x4078d0 estimate
+`max + (mid + min) >> 2`; the zone table is filled by drawing (empty for the load pass and the first tick). Spawned
+actors (0x448d40) go to the end of the live list **and of the running active list** (they update in the spawning tick).
+Animation frames carry sound records (asset tag 0x28 {sound, frame, repeat}) and logic events (tag 0x0d, 12 B {u16
+template, u8 flags, u8 flags, u16 frame, cond, A, B, act, u8 X, u8 Y}) run on the frame boundary by 0x4393e0 /
+0x438970 (R: L01A Bugs anim 72 → A19 G[176] = 3). Steering 0x437f40 picks its offset table by step **flagsB**
+0x80000; an open trace end is re-probed with GroundAt, whose result replaces the trace's (RUNTIME_REFERENCE §10).
 
 ### 7.2 Behaviour types `PTR_FUN_004ae098[actor+0x2c]` — O (roles H/M as marked)
 
@@ -683,6 +694,27 @@ Player attacks: flagsA 0x800000 body overlap / 0x10000 hand point (mask 0x80) se
 `+0x38 = 1` (held object: 0x6000000 and its step damage); landing on an actor sets its 0x80 (stomp), flagsB 0x10000000
 → player bounce (flags18 0x40 → state 91).
 
+Bugs vs actor boxes (0x43a880, runtime-verified on the L01A fight, RUNTIME_REFERENCE §10): his box x/z and radius are
+fixed at (−70, −40)..(70, 40) / 80 after every animation tick unless the move has flagsB 0x2000 (only the packet-9
+heights animate). An actor is touched only when 0x433500 reports a contact (a corner of his box past one of its
+faces, or its second test — the actor's corners inside his quad, whose call the decompile lost); its w.y result is the
+box top minus his new feet height. The face push is kept only for non-sensors when he is more than 30 below the top
+and the move lacks flagsA 0x40; a stomped type-14 actor (flags14 0x80) skips it. The hand attack tests his `+0x58`
+attach point (packet 10) with 0x433380 (radius² `+0x30`, box grown by inflation + 4 horizontally). Type 14 flagsA
+0x8000000 hops count bounces in `+0x194` (reset only by the first call): hop n steps the arc n × w[2]; at ≥ 0x400 the
+hop ends with flags14 0x800000.
+
+Carrying (item flag 0x20000000, R Verified on the L01a walk-in): the target (P2; Bugs = his entity id) becomes a child
+coordinate of the carrier (`+0xc4` = carrier `+0x7c`, `+0x70` = carrier, local offset `+0x11c` = 0, the carrier's
+`+0x6c` = target); the target's flags14 are not changed. Its world position is evaluated when it updates, so a carrier
+later in the update order leads it by one tick. Release (flag 0x4000): world position recomputed from the chain (=
+the carrier's current position), `+0xdc/+0xe0` cleared, flags14 `&= 0xfffff5f6, |= 0x1000`, `+0x70 = 0`.
+
+Ground shadows (R Verified visually, details RUNTIME_REFERENCE.md §7): tag 0x46 (`+0x3a`) names a template entity
+whose first role-6 model is drawn under each registered actor (0x44c4b0 → `0x4b21a0`, 0x44bb50 / 0x44ba00 /
+0x44b4f0): second-part origin, GroundAt with open-floor drop, clamp `0x4b2378`, x/z scale `(y − ground)·4 + 0x1000`
+(≥ 0x800), tilt from three box-corner probes (±0x22); PC ABR 2 = texel-luma alpha, SRC_ALPHA / 1 − SRC_ALPHA.
+
 ### 7.4 Collectibles — O/H (data validated over 51 LiT level files)
 
 Detection: the player's box collision (`0x433500`, mask 0x9a690a) marks touched actors with flags8 0x100 (pickup;
@@ -715,7 +747,7 @@ Per-level globals chunk 0x3b (O): tag 0x2b initial camera eye (L01A: (0,0,0); th
 walk-in director, §5; runtime: RUNTIME_REFERENCE.md §3); 0x3c `0x4b2378` (shadow/ground clamp) + two bytes;
 0x3d fog distance base (`0x4b38a0 = v/4`, `0x40cc80`; RESEARCH.md §2.7); 0x3e pool sizes (+100 each; vertex/part pools,
 arena limit `0x4b247c = v + 20000`, BZE size limit). Chunk 0x47 tag 0x48 = demo input stream (sets `G[0x0f] = 1`);
-chunk 0x49 tag 0x4a = 6 per-language `{offset, size}` pairs selected by `G[0x10]`.
+chunk 0x49 tag 0x4a = 6 per-language `{offset, size}` pairs selected by `G[0x10]`: the overlay text scripts (§7.6).
 
 **Reimplementation notes (entities).** Implement the actor record with the tag map above, live/template lists,
 activation radius/zone tests and the exact update order (directors → solids → platforms → player → rest). Implement
@@ -723,21 +755,86 @@ type 14, type 2 and the platform family as data interpreters; collectibles need 
 (route G writes through the golden-carrot-aware helper, HUD clamp 99, 30-tick player invulnerability). Keep logic
 visibility tests at the original 4:3, 512-wide reference.
 
+### 7.6 Overlay text (type 32) and speech status — O/H; save prompt Verified at runtime (RUNTIME_REFERENCE.md §9)
+
+**Scripts** (D, all LiT levels): chunk 0x49 tag 0x4a pairs index the decompressed **section 3**, languages EN FR DE
+ES IT NL; a block is a u16 offset table (entry count = first offset / 2; per level, 96–257 scripts; MERLIN EN 233,
+0x2a54 B) followed by NUL-terminated text with `>` commands. The loader keeps the `G[0x10]` block in `0x4b3a04`.
+
+**Spawner `0x44e310(script)`** (C55 / A49 X, A51 `S[Y]`, A52 `G[Y]`): spawns template entity **68** (type 32; 68
+levels have one, CC2A/CC2B/CC2C/CC3B/CC3C have scripts but no template → nothing happens), `+0x17e = script | 0x8000`,
+`+0x180 = 0`, zone = Bugs', flagsC `|= 0x40000000` if `S[12]` ∈ {1, 3}, then runs the interpreter at once and returns
+its status nibble (C55: stored in `0x4b3fc4`, true if `A & status`; C56 tests `A & 0x4b3fc4`).
+
+**Interpreter `0x44d100`**: pen (−200, −60), line width 0. A byte with a font glyph (table `0x4ae3a8`) appends
+`{font sprite +0x10·(glyph−1), s16 x, s8 y, u8 palette}` to the 2-D list `0x4b373c` and advances pen and width by
+`0x4ae4a8[byte]` × `0x4efb88` (1.0; 1.5 below a low-resolution threshold, `0x408100`); `' '` +6, `'\t'` +24, `'\n'`
+ends the line, y += 13, x = line x. Commands (one byte after each operand is skipped): `>CX n` pen and line x, `>CC n`
+the same + centre (at the line end the line's glyphs move left by width >> 1), `>CY n`, `>CP n` palette, `>CL` pen to
+the line start + status 0, `>P d` status bits of digit d, `>W n` (n ≠ 0: `+0x22 = 0`, `+0x17c = n`, the rest →
+`+0x180`, return 0; n = 0: status 4 if 0, `+0x17c = 2`), `>ID b` entity id `+0x1c` (for A50), `>B[G]b` decimal `S[b]`
+(u16 for 0x2b..0x35) / `G[b]` (7 = golden-carrot total), `>D n` / `>J n` / `>DJ n` key names (below). `0x44cfa0`
+draws each glyph's sprite record with the top-left at (x, y) of a 512×240 space centred on the screen, tinted by
+palette (R colours): 0 white, 1 yellow, 2 green, 3 blue, 4 red; glyphs 0x67–0x6e (button icons) use palettes 5–12.
+The list restarts at the top of `0x447d40`, so text shows on the tick it is emitted.
+
+**Font** (D 63/63 levels with template 68; R): `0x44ccd0` / `0x44e310` take template 68's first listed asset of class
+8 (`+0x4e`), a sprite-sequence model (chunk 0x22 tag 0x40) of 130 type-0x64 records, one per glyph, each naming a
+whole TIM (u, v 0; 16×16, icons 20×16 / 64×32 / 32×16). GL draw `0x40b130`: x = `__ftol(x · 0x4efb7c)`, y =
+`__ftol(y · 0x4efb80)` (width / 512, height / 240, from the centre) and size (w, h) × `0x4efb84`, which steps with
+the width scale (≥ 2 → 2, ≥ 1.5 → 1.5, ≥ 1 → 1, else 0.85 with advance scale `0x4efb88` 1.5; `0x408100`); colour =
+texel × palette mask (`0x40b130` +0x20, 0 = white).
+
+**Key names**: `>D n` / `>DJ n` = DIK name (table `0x45e030` {name[32], scan code}, `0x402250`) of `config.pc`
+kbdMap entry {11, 9, 8, 10, 6, 5, 7, 4}[n] (kick, crouch, look, jump, roll, camera W, action, camera Q); `>J n` =
+"BUTTON%i" of joyMap {3, 1, 0, 2, 4, 6, 5, 7}[n] (`0x403260`); `>DJ` appends " / " + " Button " + DIK name of scan
+code joyMap + 1 (a digit) when use-joystick (`config+0x38`) is on and the button is ≠ 0. Only glyph bytes are
+emitted (spaces vanish: "S/Button1"), at most 20, then the pen advances 6; `>D` uses the `>CP` palette, `>J` the
+last glyph's. C98 tests use-joystick (hint scripts pick `>D` or `>J`).
+
+**Pause / help** (`0x4065e0` step 7, window messages `0x40e4a1`): F1 (VK 0x70) with `S[12] = 0` requests help
+(`0x4b1a2c`), otherwise `S[12] = 2`; Esc requests the pause menu (`S[12] = 1`). Step 7 with `S[0] = 0`: from 0 the
+request opens 3 (help) / 1 (menu) unless the camera is scripted (flags 0x300 without 1), `G[0x36]` or speech
+`S[0x17]` blocks it; 2 → 0 once `0x4b3fc0` = 0. While `S[12] ≠ 0` `0x447d40` skips the camera and runs (and ticks)
+only actors with flagsC 0x40000000 — the help director (L01A entity 0x1d99b: C1 `S[12] = 3` → A49 210) and the
+overlays it spawns (`0x44e310` sets that flag while `S[12]` ∈ {1, 3}). R: F1 in L01A = 178 glyphs ("Help Menu" … with
+"S/Button1"; RUNTIME_REFERENCE.md §9).
+
+**Behaviour `0x4470e0`**: `+0x17c < 1` → redraw script `+0x17e` every tick; else when the timer reaches `+0x17c`
+resume `+0x180` (fresh pen) or free the actor, otherwise redraw from the script start (the first `>W` page; timer
+kept). The first call after the spawn only clears 0x8000. A `>W1` script re-spawned every tick by a director is thus
+steady text.
+
+**Save prompt** (D; R in MERLIN): the type-16 entity (chunk 0x0a) runs only while `S[17] = 1`: `S[11]` blink counter
+0..19; ← / → (C57) set `S[18]` = 1 / 2 with `S[20]` as debounce (C69 none-of clears it); scripts 68 "Do you want to
+save your game?" (yellow, centred, y 50), 69 / 71 Yes / No blue at x −50 / 30, y 70 (while `S[11]` ≤ 10 or not
+selected), 70 / 72 white (selected); ✕ → Yes: `S[0x0a] = 6` (save, §8.1), No: `S[3] = 0`, `S[17] = 20`. The save
+actors (MERLIN 0x104df, LS01 template 1316, type 14) start a speech (A81 47 / 50), enter state 129 once `S[0x17] = 4`
+and open the prompt with Yes selected (`S[17] = S[18] = 1`) on ✕ or when the speech ends (`S[0x17] = 0`); after the
+save `S[8] = 10` → `S[17] = 10` (entity 0x51c5) → "Game saved" (script 73).
+
+**Speech status `S[0x17]`** (A81 `0x42d750`, update `0x41e2b0` after `0x447d40` each tick; path without an audio
+device, as under Wine): A81 X > 1 → 8 (id `0x4b322e` = X), next update 2, then 4 with the clock started; length =
+table `0x45c338[G[0x10]·64 + X]` samples × 1000 / 44100 ms (MERLIN 47: 4824 ms); 0 once elapsed. X = 1 → 1, X = 0 → 0.
+
 ---
 
 ## 8. Save and config
 
-### 8.1 LiT files and the name mismatch — O/H
+### 8.1 LiT files and the name mismatch — O/H, Verified at runtime (RUNTIME_REFERENCE.md §9, formats/SAVE_LIT.md)
 
 The exe uses **`..\bin\Savegame%d.dat`** (320 B = `GAME_DATA[0..0x13f]`) and **`..\bin\Savedata.dat`** (360 B),
 plus `..\bin\config.pc` (128 B) and `..\bin\bugs.ini`. BugsDecomp's "Gamedata.dat / Gamesave%d.dat" names are wrong
 for v1.6. The slot number is **`G[0x9f]` (1-based, 1..6)** (`%d` = `*(u8*)(GD+0xdf)`, active-slot bit `1 << (slot−1)`),
-so the game reads/writes `Savegame1.dat … Savegame6.dat`; the shipped blank files `Savegame0..5.dat` include a
-`Savegame0.dat` that slot numbering never addresses (I/M: unless another path writes slot 0).
+so the game reads/writes `Savegame1.dat … Savegame6.dat` (R: title slot 2 → `Savegame2.dat`); the shipped blank files
+`Savegame0..5.dat` include a `Savegame0.dat` that only a `/bNN` direct boot (`G[0x9f]` = 0) would write (I).
+The save prompt ("Do you want to save your game?") is the type-16 menu entity of every playable level, opened by
+`S[17] = 1` (Merlin/LS01 save actors); Yes = `S[18] = 1` → `S[0x0a] = 6`. The pause menu has no save entry (R).
 
-* Writer `0x4074f0`: `GD+4 = Σ (s8) GD[0..0x13f]` (old checksum byte values included; **never verified on load**),
-  write 320 B; then update `Savedata.dat`: mask `0x4b28e4 |= bit`, slot summary (+8 + 0x2c·(slot−1)): `+0 u16`
-  golden-carrot total, `+2 u16` clocks `G[5]`; write 0x168 B from `0x4b28e0`. Failure → `S[0x1b] = 7`.
+* Writer `0x4074f0`: `GD+4 = Σ (s8) GD[0..0x13f]` (old checksum byte values included — R: 637 = 514 + 0x7a + 0x01;
+  **never verified on load**), write 320 B; then update `Savedata.dat`: mask `0x4b28e4 |= bit`, slot summary
+  (+8 + 0x2c·(slot−1)): `+0 u16` golden-carrot total, `+2 u16` clocks `G[5]` (R: `4d 01 7c 00` = 333/124 at +0x34);
+  write 0x168 B from `0x4b28e0`, then `mask ^= bit` in memory only (`0x4076cc`). Failure → `S[0x1b] = 7`.
 * Savedata reader `0x4076f0` (on the title, `S[3] == 1`): creates a zeroed file if missing; copies slot summaries into
   `S[0x2b..0x40]` for the title menu; `GD+0x50 = G[0x10]` = config language.
 * Requests via `S[0x0a]` (`0x407190`): **4 new game** (`G[] = 0`, `G[1] = G[2] = 6`, `G[0] = 3`, `G[0x10]` =
@@ -821,7 +918,7 @@ interpreter; abilities come from the class-template data.
 4. Animation: writer of part flag 0x400; packet types 0 and 6 consumers; logic-event flag gameplay meanings.
 5. Entities: carrot bits G[19..31]/G[146..151] reused across levels with no clear found (do carrots stay collected in
    levels sharing bits?); 10 golden carrots and 1 clock not found in the per-level maxima (333/124 vs 323/123);
-   consumer of type-10 flags18 8; type 9 role; `0x4377a0`, `0x44e310`/`0x44d100` overlay scripts (source chunk).
+   consumer of type-10 flags18 8; type 9 role; `0x4377a0`; pause-menu gate `0x4b3fc0`.
 6. Camera: exact names of flags 0x1/0x4/0x20; type 36 director item semantics beyond distance gates.
 7. Logic: C69 tail, A24 tail, C82/C83 B-byte bit map (LOGIC.md §8).
 8. Save: whether any path uses `Savegame0.dat`; `config.pc` unknown fields (RESEARCH.md §9.8).

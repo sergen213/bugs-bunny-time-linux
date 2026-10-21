@@ -78,17 +78,22 @@ def xcond(pl):
     return a, s
 
 
-# VM op 8 ('R'): {u16 flags, u8 pad, u8 cond index, s16 X, s16 Y}; TB condition table 0x4cd560 (decoded slots)
-RCOND = {0x01: "S[{y:#x}]=={x}", 0x05: "S[{y:#x}]>={x}", 0x07: "S[{y:#x}]<{x}",
-         0x10: "stateTicks>{t}", 0x18: "S[{y:#x}]&{x:#x}", 0x19: "GD[0x58+{y:#x}]&{x:#x}",
-         0x49: "depth+0x1a2 in [{x},{y}]"}
+# VM op 8 ('R'): {u16 flags, u8 cond index, u8 pad, u16 X, u16 Y}; TB condition table 0x4cd560 (X, Y compared
+# unsigned; GD(Y) = u16 at GD+0x58+Y for even Y < 0x31, else u8)
+RCOND = {0x01: "S[{y:#x}]=={x}", 0x02: "GD({y:#x})=={x}", 0x03: "S[{y:#x}]>{x}", 0x04: "GD({y:#x})>{x}",
+         0x05: "S[{y:#x}]>={x}", 0x06: "GD({y:#x})>={x}", 0x07: "S[{y:#x}]<{x}", 0x09: "S[{y:#x}]<={x}",
+         0x0d: "S[{y:#x}]==S[{x:#x}]", 0x0f: "stateTicks<{t}", 0x10: "stateTicks>{t}", 0x11: "stateTicks=={t}",
+         0x13: "stateTicks/30>{t}", 0x14: "stateTicks==30*{t}", 0x18: "S[{y:#x}]&{x:#x}",
+         0x19: "GD[0x58+{y:#x}]&{x:#x}", 0x1a: "S[{y:#x}]!={x}", 0x35: "sound {x} playing=={y}",
+         0x36: "focus has child", 0x37: "own sound {x} playing=={y}", 0x45: "GD+500 bit {x}=={y}",
+         0x48: "+0x128=={x}", 0x49: "depth+0x1a2 in [{x},{y}]", 0x4a: "false"}
 
 
 def rcond(pl):
-    _, ci, x, y = struct.unpack("<HHhh", pl)
+    _, ci, x, y = struct.unpack("<HHHH", pl)
     ci &= 0xff
     fmt = RCOND.get(ci)
-    return fmt.format(x=x, y=y, t=(y & 0xffff) << 8 | (x & 0xffff)) if fmt else f"R{ci:#x}({x},{y})"
+    return fmt.format(x=x, y=y, t=y << 8 | x) if fmt else f"R{ci:#x}({x},{y})"
 
 
 def logic(tg, pl):

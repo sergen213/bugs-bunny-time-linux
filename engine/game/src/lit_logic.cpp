@@ -1,8 +1,8 @@
 // LiT level-logic VM: TestLogicCond 0x42a7d0 (99 conditions, table 0x4ac550) and RunLogicAction 0x42c6d0
 // (129 actions, table 0x4ac6e0). Semantics: docs/re/LOGIC.md §4/§5. `self` = the actor running the item
-// (nullptr = Bugs); P = Bugs. Front-end/menu opcodes (C92-C98, A93, A100-A128) and the overlay-script
-// interpreter (C55/C56, A49/A51/A52) are not ported: they return false / do nothing and are listed in
-// LitWorld::unsupported, as are camera effects without a simulated counterpart.
+// (nullptr = Bugs); P = Bugs. Front-end/menu opcodes (C92-C98, A93, A100-A128) are not ported: they return false /
+// do nothing and are listed in LitWorld::unsupported, as are camera effects without a simulated counterpart.
+// C55/C56, A49/A51/A52 run overlay text scripts (lit_overlay.cpp).
 #include "bb/game/lit_world.h"
 
 #include <format>
@@ -81,6 +81,8 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 52: return (p.flags18 & 4) != 0;
     case 53: return (p.flags18 & 2) == 0;
     case 54: return (p.flags18 & 4) == 0;
+    case 55: overlayStatus_ = overlay(it.x); return (A & overlayStatus_) != 0;  // 0x42b450
+    case 56: return (A & overlayStatus_) != 0;
     case 57: return ((pad.raw | (pad.raw & PadStart ? PadCross : 0)) & padMask(A)) != 0;
     case 58: return me.reg == A;
     case 59: return int16_t(A) < me.reg;
@@ -117,6 +119,7 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 89: return s8(G[B]) < s8(A);
     case 90: return (pad.pressed & padMask(A)) != 0;
     case 91: return (pad.pressed & padMask(A)) == 0;
+    case 98: return joystick == (A != 0);  // 0x42c690: config use-joystick (selects >D vs >J hint scripts)
     default:
         unsupported.insert(std::format("C{}", it.cond));
         return false;  // out-of-table conditions also return false in the exe
@@ -193,6 +196,9 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 46: me.reg = sy; return;
     case 47: p.flags18 |= 1; return;
     case 48: if (G[1] < G[2]) ++G[1]; else gAdd(it.y, 1); return;  // gvcrt
+    case 49: overlayStatus_ = overlay(X); return;           // overlay script X / S[Y] / G[Y]
+    case 51: overlayStatus_ = overlay(sy); return;
+    case 52: overlayStatus_ = overlay(gy); return;
     case 50:                                                 // kill actor(s) with entity id X (0xff: all overlays)
         for (LitActor& a : actors)
             if (!a.dead && (X == 0xff ? a.type == 0x20 : a.entityId == X)) {
@@ -224,13 +230,20 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 78: cam.heightOffset = X * 100 + it.y; return;
     case 79: cam.eyeHeight = X * 100 + it.y; return;
     case 80: cam.distance = X * 100 + it.y; return;
-    case 81: case 82: return;                                // demo control (no demos), sound mode 2 = release a voice
+    case 81:  // speech XA control 0x42d750: status S[0x17] (8 start, 1 stop-all, 0 idle), advanced by speechTick
+        if (X > 1) S[0x17] = 8, speech_ = uint8_t(X);
+        else if (X == 1) speech_ = 0, S[0x17] = 1;
+        else speech_ = 0, S[0x17] = 0;
+        return;
+    case 82: return;                                         // sound mode 2 = release a voice
     case 83: cam.flags |= 0x8000; return;
     case 84: cam.flags &= ~0x8000u; return;
     case 86: p.flags14 |= 0x80000000; return;
     case 87: me.flags18 |= 0x400; return;
+    case 88: shadowMaxY = int8_t(X) * 100 + int8_t(it.y); return;  // 0x42d710 (movsx bytes)
     case 89: sy = uint8_t(angleDiff(ratan2(p.pos.x - me.pos.x, p.pos.z - me.pos.z), me.yaw) >> 4); return;
     case 90: cam.flags &= ~0x300u; return;
+    case 91: shadowMaxY = int32_t(uint32_t(X) << 8 | it.y); return;  // 0x42d730 (upper ecx bits Inferred zero)
     case 92: deathStateA92_ = X; return;
     case 94: cam.flags |= 1; return;
     case 95: cam.flags &= ~1u; return;
@@ -239,8 +252,8 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 98: cam.flags |= 0x20; return;
     case 99: cam.flags &= ~0x20u; return;
     case 101: cam.flags |= 4; return;
-    default: skip();  // A44 0x28, A49/A51/A52 overlays, A56, A59/A68 shake, A69, A70/A71 fades, A85 camera target,
-                      // A88/A91 shadow clamp, A93/A100/A102-A128 front end
+    default: skip();  // A44 0x28, A56, A59/A68 shake, A69, A70/A71 fades, A85 camera target,
+                      // A93/A100/A102-A128 front end
     }
 }
 

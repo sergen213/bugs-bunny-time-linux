@@ -8,7 +8,7 @@ Companion of [GAMEPLAY.md](GAMEPLAY.md) (actor struct, main loop). BugsDecomp (n
 
 | name | address | size | persistence | notes |
 |---|---|---|---|---|
-| `S[]` scratch | `0x4b2260` (global, **not** per entity) | 256 B | level runtime, not saved | engine also uses it: `S[0x00]` (`0x4b2260`, checked by the tick), `S[0x03]` (`0x4b2263`: 1 → load `Savedata.dat` on the title, blocks damage when ≠0), `S[0x08]`, `S[0x0a]` (`0x4b226a`: save/load request 4 new game / 5 load / 6 save, see GAMEPLAY.md §8), `S[0x0c]` (`0x4b226c`: pause state 0 run / 1 pause menu / 2 unpausing / 3 other), `S[0x17]` (`0x4b2277`: demo/extended-skip), `S[0x1b]` (`0x4b227b`: save/load status), `S[0x2b..0x40]` (title slot summaries) |
+| `S[]` scratch | `0x4b2260` (global, **not** per entity) | 256 B | level runtime, not saved | engine also uses it: `S[0x00]` (`0x4b2260`, checked by the tick), `S[0x03]` (`0x4b2263`: 1 → load `Savedata.dat` on the title, blocks damage when ≠0), `S[0x08]`, `S[0x0a]` (`0x4b226a`: save/load request 4 new game / 5 load / 6 save, see GAMEPLAY.md §8), `S[0x0c]` (`0x4b226c`: pause state 0 run / 1 pause menu / 2 unpausing / 3 other), `S[0x17]` (`0x4b2277`: speech XA status 8/2/4/0, A81, GAMEPLAY.md §7.6), `S[0x1b]` (`0x4b227b`: save/load status), `S[0x2b..0x40]` (title slot summaries) |
 | `G[]` globals | `GAME_DATA+0x40` = `*(0x52fd00)+0x10040` | 256 B | saved in `Savegame%d.dat` | `G[0]` 3 at new game (*inferred* lives), `G[1]` health (half-carrots) / `G[2]` max (6), `G[3]` carrots (HUD caps at 99), `G[5]` clocks, `G[7]` + `G[0xfc]<<8` golden-carrot total (every inc/dec/add/sub handler special-cases index 7), `G[0x0e]` next level id (A42), `G[0x0f]` input-disable (pad 0x4491c0 skips reading), `G[0x10]` language (= config+8), `G[0x25]` world 1..6, `G[0x36]` (`0x10076`) camera/cutscene lock, `G[0x9f]` save slot 1..6, `G[0xa7]` bit7 analog-pad flag |
 | self | the actor running the item (behaviour fn arg) | 0x1f4 B | — | timer `+0x22` (u16, +1 per tick in 0x447d40), `+0x1e` u16 general register (tag 0x1e), zone `+0x26`, flags `+0x14`/`+0x18` |
 | P | player actor `*(0x4b324c)` | | | state `+0x17c`, flags `+0x14` (`flags14`), `+0x18` (`flags18`) |
@@ -137,7 +137,7 @@ channels besides `S[]`/`G[]`.
 | C52 | 0x34 | 0x42b3f0 | player `flags18 & 4` |  | — |
 | C53 | 0x35 | 0x42b410 | player `!(flags18 & 2)` | CondTpmov | — |
 | C54 | 0x36 | 0x42b430 | player `!(flags18 & 4)` |  | — |
-| C55 | 0x37 | 0x42b450 | run overlay script X (`0x44e310`), store status in `0x4b3fc4`, test `A & status` |  | cond 34 (0.89) |
+| C55 | 0x37 | 0x42b450 | run overlay script X (`0x44e310`, GAMEPLAY.md §7.6), store status in `0x4b3fc4`, test `A & status` (status = `>P` digit bits, 4 for `>W0`; no LiT script has `>P`) |  | cond 34 (0.89) |
 | C56 | 0x38 | 0x42b480 | `A & status(0x4b3fc4)` |  | cond 35 (0.94); cond 66 [hash] |
 | C57 | 0x39 | 0x42b4a0 | raw-pad any-of A (mask byte: bits0-3 △○✕□, bits4-7 ↑→↓←; Start/Return also map to ✕; demo playback with any key → ✕) |  | — |
 | C58 | 0x3a | 0x42b560 | `self+0x1e == A` |  | cond 36 (0.75) |
@@ -237,7 +237,7 @@ channels besides `S[]`/`G[]`.
 | A46 | 0x2e | 0x42d0e0 | `self+0x1e = S[Y]` |  | act 29 (1.00) |
 | A47 | 0x2f | 0x42d100 | player `flags18 |= 1` |  | — |
 | A48 | 0x30 | 0x42d110 | gvcrt: health `G[1] < G[2]` ? `G[1]++` : `G[Y]++` | ActionGvcrt | — |
-| A49 | 0x31 | 0x42d150 | run overlay script X → status 0x4b3fc4 |  | act 30 (0.82) |
+| A49 | 0x31 | 0x42d150 | run overlay script X → status 0x4b3fc4 (spawns a type-32 text actor, template 68; GAMEPLAY.md §7.6) |  | act 30 (0.82) |
 | A50 | 0x32 | 0x42d170 | kill actor(s): X==0xff → all type-0x20 overlays, else first actor with entity id (`+0x1c`) == X |  | act 31 (0.95) |
 | A51 | 0x33 | 0x42d1c0 | overlay script `S[Y]` |  | act 32 (0.96) |
 | A52 | 0x34 | 0x42d1f0 | overlay script `G[Y]` |  | act 33 (0.96) |
@@ -269,7 +269,7 @@ channels besides `S[]`/`G[]`.
 | A78 | 0x4e | 0x42d6b0 | `0x4b215c = X*100 + Y` |  | act 59 (0.67) |
 | A79 | 0x4f | 0x42d6d0 | `0x4b2150 = X*100 + Y` |  | act 60 (0.67) |
 | A80 | 0x50 | 0x42d6f0 | `0x4b2154 = X*100 + Y` |  | act 61 (0.67) |
-| A81 | 0x51 | 0x42d750 | demo control: X>1 start demo playback (`S[0x17]=8`, id X); X=1 start; X=0 stop |  | act 62 (0.95); act 62 [fuzzy] |
+| A81 | 0x51 | 0x42d750 | **speech** XA control (not demo): X>1 start speech X (`S[0x17]=8`, id `0x4b322e`); X=1 `S[0x17]=1`; X=0 stop (`S[0x17]=0`). Status advanced by `0x41e2b0` each tick: 8 → 2 → 4 playing → 0 after the clip length (GAMEPLAY.md §7.6) |  | act 62 (0.95); act 62 [fuzzy] |
 | A82 | 0x52 | 0x42d7f0 | play sound X, mode 2 |  | act 63 (0.87) |
 | A83 | 0x53 | 0x42d830 | camera flags `|= 0x8000` (L2/R2 rotation disabled) |  | — |
 | A84 | 0x54 | 0x42d820 | camera flags `&= ~0x8000` |  | — |
@@ -340,6 +340,6 @@ Opcode numbers are game-specific; every TB opcode still needs semantic verificat
 ## 8. Residual unknowns
 
 * C69 tail (decompile truncated), A24 tail, exact bit map of C82/C83's B byte beyond bit 0.
-* 0x44e310 overlay-script interpreter `0x44d100` (scripts at `0x4b3a04`; source chunk not identified).
+* Overlay interpreter, font and key names: GAMEPLAY.md §7.6 (done); pause-menu opcodes C92–C97 / A100+ remain.
 * Semantics of 0x35 node fields `+8..+0xf`, 0x34 step fields; `0x4377a0` exact role.
 * Player flag names (flags14/18 bits) — see GAMEPLAY.md §3.
