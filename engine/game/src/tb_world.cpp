@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 #include <ranges>
+#include <utility>
 
 namespace bb::game {
 namespace {
