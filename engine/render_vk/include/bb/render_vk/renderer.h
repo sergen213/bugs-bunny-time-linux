@@ -124,7 +124,7 @@ private:
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
     std::filesystem::path pipelineCachePath_;
 
-    VkSampler samplers_[4]{};
+    VkSampler samplers_[5]{};
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descPool_ = VK_NULL_HANDLE;
     VkDescriptorSet set_ = VK_NULL_HANDLE;
@@ -162,6 +162,7 @@ private:
     std::vector<Vertex> actorVerts_;
     std::vector<uint32_t> actorIdx_;
     float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
+    bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps
 
     std::vector<V2> batch_;
 };

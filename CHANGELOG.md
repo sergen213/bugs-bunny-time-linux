@@ -3,6 +3,43 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## Unreleased / Wave 6
+
+- Enhanced fidelity: overlay text glyphs scale with the window height (the original's 2× sprite cap left glyphs tiny
+  and widely spaced at 4K); the debug overlay names LiT's Original Fidelity filter "linear".
+- Time Busters: the original in-play HUD (coin counter / lives / health sprites and spinning models, slide timing
+  matches the original tick for tick), overlay text (S30 / R 0x22 / R 0x23), screen fades (S51 / S52) and the
+  level-change fade (16-frame fade-out, fade-in at speed 200). RETRY shows the game-over prompt in the simulation;
+  YES loads GRANNY (`ctest game.tb`). The logic VM keeps S[0x1fe] per entity (+0x126) like the original.
+- Lost in Time: ropes and chains (swing, grab, hang, R1 pump, climb with limits, jump off) and floating in buoyant
+  columns (states 25/26: plunge, lift, bob, water jump); both match the original tick for tick (`ctest game.lit`).
+- Lost in Time, Original Fidelity: textures are bilinear-filtered like the PC exe (was nearest; removes the stray
+  texel blocks on near floors).
+- Lost in Time: the original 3-D HUD (carrots, golden carrots, clocks, health carrots fly in when a counter changes;
+  stopwatch timers, boss bar, item icons), drawn from the level's HUD template models in GL and Vulkan; matches the
+  Wine oracle at L01A (`local/wine/compare/lithud/w6/side_c43_gl.png`). The text counter line is gone.
+- Lost in Time: screen fades and colour flashes (logic actions A69/A70/A71), the level-change fade out, loading
+  screen (the target's loading picture, 3 s minimum where the original holds it) and fade in, tick-exact to the
+  original. Level entry now draws its first frame at the original's first presented tick, so app frame N shows
+  simulation tick N + 1.
+
+- Time Busters: NPCs, enemies, items and spawned objects are now drawn at their simulated position and pose (the
+  entities the view list ticks); rigid props the simulation owns leave the static scene, so removed ones disappear.
+  Placement matches the Wine oracle (`local/wine/compare/w6_tb_ARCA01_guard_*.png`).
+- Time Busters level changes: a level exit or game over reloads like the original (level GD+0, GAME_DATA kept);
+  game over loads the RETRY level, cut-scene exits continue (CCARIN01 → ARCA01). RETRY's continue dialog is not
+  drawn yet.
+- Time Busters combat: the attach point is cleared on every state change and mover contacts follow the original's
+  contact-list rule, so Taz's spin into the ARCA01 guard now plays out tick for tick as in the original (the guard
+  blocks it; `ctest -R game.tb`).
+- Time Busters pickups: walking into an item collects it like the original — the item's collision box now follows
+  its animation (it kept a degenerate box from the level tags), and the touched entity's program runs on contact,
+  so the GAME_DATA counters and collected bit update, the item plays its pick-up and rise and then vanishes, all on
+  the original's ticks (ARCA01 item 473 against a Wine oracle capture; `ctest -R game.tb`).
+- Time Busters thrown objects: the ARCA01 guard's boomerang (template 401) flies out along its animation, hurts the
+  player and comes back to the guard's hand; the guard's attack cycle after the throw now matches the original tick
+  for tick (including its random pick, checked with the original's rand() seeds; `ctest -R game.tb`).
+
 ## Unreleased
 
 - LiT overlay text in play: the original's script interpreter (C55/C56, A49/A51/A52) draws the level's text with

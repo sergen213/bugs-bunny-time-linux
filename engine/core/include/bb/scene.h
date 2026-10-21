@@ -137,12 +137,19 @@ struct Scene {
     float spawnYaw = 0.0f;       // radians, engine Camera convention
     std::vector<ActorModel> actorModels; // LiT TOD-animated actor models (bb/actor.h poses them)
     std::vector<ActorInstance> actors;
-    // LiT shadow models (0x44bb50): entity id named by an entity's tag 0x46 (+0x3a) -> actorModels index of that
-    // template entity's first role-6 model (L01a: entity 3 = a 200 x 200 quad, texture 133, ABR 2).
-    std::map<uint16_t, uint32_t> shadowModels;
-    // LiT overlay text font (0x44ccd0): template entity 68's class-8 sprite asset, one 0x64 record per glyph, each a
-    // whole 16x16 (icons up to 64x32) TIM. overlayFont[glyph - 1] = Scene::textures index, -1 if not loaded.
+    // One-object template models: template entity id -> actorModels index. LiT: its first role-6 model, built for
+    // every shadow template named by an entity's tag 0x46 (+0x3a; 0x44bb50, L01a: entity 3 = a 200 x 200 quad,
+    // texture 133, ABR 2) and every HUD element template present (0x44b370: digits 472-481, icons 483-496, 923-925,
+    // 961, 962; exe tables 0x4ae230 / 0x4ae248). TB: the role-13 model of each HUD element template (0x462430,
+    // table 0x4ced18: 32, 36, 37, 38, 41-44, 46, 47, 49).
+    std::map<uint16_t, uint32_t> templateModels;
+    // Overlay text font: LiT (0x44ccd0) template entity 68's class-8 sprite asset, TB (0x4660c0) template 0x18's
+    // class-0x17 sprite asset; one 0x64 record per glyph, each a whole 16x16 (icons up to 64x32) TIM.
+    // overlayFont[glyph - 1] = Scene::textures index, -1 if not loaded.
     std::vector<int32_t> overlayFont;
+    // TB HUD sprite sheet (0x462430): template 0x1f's class-0x17 sprite asset (ARCA01: 21 frames, digits 0-9 32x22,
+    // health panels 116x46 / 140x46, bars 80x8, icons). hudSheet[frame] = Scene::textures index, -1 if not loaded.
+    std::vector<int32_t> hudSheet;
     SceneStats stats;
     std::vector<std::string> notes; // short human-readable status lines for overlays (gaps, research state)
 };

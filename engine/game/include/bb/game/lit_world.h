@@ -123,6 +123,11 @@ struct Player : Mover {
     int32_t platform = -1;         // +0x70 actor ridden (LitWorld::actors index)
     int32_t carrier = -1;          // actor carrying Bugs (its +0x6c, item flag 0x20000000): Bugs follows it
     uint16_t contact = 0;          // +0x34 entity id of the last actor touched / hit
+    // Hanging on a type-8 rope (0x43a310 grab): +0x70 = the rope, +0xc0 -> local coordinate +0x18c whose super is the
+    // rope's root +0x7c; world position = rope matrix · local trans (+0x1a4..+0x1ac), local yaw +0x19e.
+    int32_t rope = -1;
+    V3 local;
+    int16_t localYaw = 0;
     AnimState animState;
     V3 hand;                   // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet
     bool handSet = false;
@@ -162,7 +167,21 @@ struct LitActor : Mover {
     V3 hand;                       // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet (+0x68)
     bool handSet = false;
     AnimState animState;
+    // type 8 rope (0x43efc0): +0x140 swing phase (degrees, table 0x4addc8), +0x144 amplitude, +0x14e segment length,
+    // +0x14c swing side (sound), +0x13c grabbed part (parts index, -1), root pitch +0xdc (kept out of rot[0], which
+    // stays the draw rotation) and root matrix +0x80 (RotMatrix Y·X·Z, TransMatrix +0xe4). Parts: animState.parts,
+    // part 0 = the dropped root node (draws the swing pitch), 1.. the chain top to bottom.
+    int32_t ropePhase = 0, ropeAmp = 0;
+    int16_t ropeSeg = 0, ropeSide = 0, ropeGrab = -1, ropePitch = 0;
+    Mat ropeM;
 };
+
+// Matrix of a rope node as the rope writes it each tick (0x407a50 with rotation (rx, 0, 0): exactly RotX).
+inline Mat ropePartMatrix(const TodPart& p) {
+    Mat m;
+    rotMatrixXYZ(m, p.rot[0], 0, 0);
+    return m;
+}
 
 // One overlay text glyph of this tick's 2-D sprite list (0x4b373c, 8 B {font sprite, s16 x, s8 y, u8 palette}),
 // emitted by the overlay interpreter 0x44d100 and drawn by 0x44cfa0: a 16x16 font cell with its top-left at (x, y)
@@ -174,6 +193,29 @@ struct OverlayGlyph {
     int16_t x = 0;
     int8_t y = 0;
     uint8_t pal = 0;
+};
+
+// One HUD element (slot table 0x4b23a0, 47 actor copies linked in 0x4b2164, drawn by 0x44b370): the first object of
+// template entity `tmpl`'s model (Scene::templateModels) under the part matrix (rot / scaleX), placed in view space
+// at depth z with its projected origin offset by (x, y) in the 512x240 screen space (origin at the centre; 0x408910:
+// pixel x = W/512 * (400 * vx / depth + x), y = H/384 * 400 * vy / depth + H/240 * y, PS1 axes, depth = z + vz).
+struct HudItem {
+    uint16_t tmpl = 0;             // +0x1c template entity id
+    bool shown = false;            // +4 bit 2 (drawn)
+    int16_t state = 0, hold = 0;   // +0x1e: 0 fly out once hold is 0, 1 fly in, 2 hide; +0x22 hold ticks
+    int16_t x = 0, y = 0;          // part +0xa8 / +0xac
+    int32_t z = 0;                 // part +0xb0: 1200 in place, past 8000 hidden
+    std::array<int16_t, 3> rot{};  // part matrix: slot 0xb spins (RotMatrixY), stopwatch hands 0x11/0x12 (RotMatrixZ)
+    int32_t scaleX = 0x1000;       // slot 0xc: boss energy bar (ScaleMatrix x)
+};
+
+// Screen fade 0x44be90 / 0x44bec0, advanced once per tick by 0x44bef0 (A69 colour, A70 fade, A71 flash).
+struct Fade {
+    uint8_t mode = 0;              // 0x4b3232: 1 from black, 2 to black, | 0x40 colour flash (then 2 back), 4 / 8 restart
+    int16_t speed = 0;             // 0x4b3236 per tick
+    int16_t level = 0;             // 0x4b2388 progress
+    int16_t dark = 0;              // 0x4b3738: 0x1000 = black (or full flash colour)
+    std::array<uint8_t, 3> rgb{};  // 0x4b2190 / 0x4b236b / 0x4b236a flash colour (A69)
 };
 
 struct Camera {
@@ -205,8 +247,10 @@ public:
     void start(V3 spawn, int16_t yaw, int16_t zone = -1);
     // The load-time actor update of 0x430f80 (one 0x447d40 call before the first frame, GAMEPLAY.md §1.2): initialises
     // the player behaviour, which resets the camera to the spawn (0x431160). Call after start() and any GAME_DATA
-    // restore (the start director reads G), before the first tick().
-    void loadUpdate() { cameraTick(); actorsTick(); }
+    // restore (the start director reads G), before the first tick(). It stands for counters 1 and 3 (tick t = counter
+    // 2t + 3): the HUD actor shows every counter in the load pass and runs again in the counter-3 tick (Wine: the
+    // elements fly out from counter 121 = after the 60-tick hold counted from counter 1).
+    void loadUpdate() { cameraTick(); actorsTick(); hudTick(); hudTick(); }
     const ActorModel* playerModel() const { return model_; }
 
     Heightfield hf;
@@ -225,6 +269,20 @@ public:
     std::vector<uint16_t> sfx;       // section-3 sound-bank blob indices started this tick (sound table, LOGIC §3)
     std::set<std::string> unsupported;  // logic conditions/actions/flags met but not interpreted (status/overlay)
     MsvcRand rand_;                  // exe rand() 0x4ae610 (tests sync it with the original's seed)
+    int level = -1;                  // GD+0 current level id (LitWorld::levelName), set by the caller (HUD hides in 3)
+    std::array<HudItem, 47> hud;     // HUD elements (lit_hud.cpp)
+    Fade fade;
+    // 0x44be90 (from black) / 0x44bec0 (to black); fadeTick is the per-tick 0x44bef0 that tick() ends with.
+    void fadeIn(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0, fade.dark = 0x1000; }
+    void fadeOut(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0x1000, fade.dark = 0; }
+    void fadeTick();
+    // Full-screen RGBA to alpha-blend over the frame: the fade's brightness multiply ((0x1000 - dark) >> 4) / 255 as a
+    // black veil, or the flash quad (0x40b980: colour rgb · f, alpha f, f = (0x1000 - dark) / 4096); alpha 0 = none.
+    std::array<uint8_t, 4> fadeOverlay() const;
+    // Exe level table +4 (0x430e60): loading-screen level id shown while `target` loads, 0 = none; LS01 (3) by world
+    // G[0x25]. holdsLoading: target ids with the 3000 ms minimum (0x4065e0).
+    static int loadingScreen(int target, uint8_t world);
+    static bool holdsLoading(int target);
     // Free sound channels (0x4b3260, 24 slots, freed by the mixer when a sample ends): -1 = always one free (with
     // audio, slots recycle); the audio-less Wine oracle never frees them (runtime: all 24 busy by counter 1739),
     // so tests replaying its traces set 24.
@@ -237,7 +295,7 @@ public:
     int32_t groundY() const { return p.groundBase + p.hoff; }
     const V3& checkpoint() const { return checkpoint_; }  // 0x4b2460 respawn point
 
-    // Ground shadow of one drawn actor (0x44bb50): Scene::shadowModels[entity] posed at Trans(pos) * RotMatrix(rot) *
+    // Ground shadow of one drawn actor (0x44bb50): Scene::templateModels[entity] posed at Trans(pos) * RotMatrix(rot) *
     // Scale(scale, 0x1000, scale), PS1 axes.
     struct Shadow { uint16_t entity = 0; V3 pos; std::array<int16_t, 3> rot{}; int32_t scale = 0x1000; };
     // This tick's shadows (0x44c4b0 registration, max 40): Bugs unless first person, then drawn actors with tag 0x46.
@@ -288,6 +346,18 @@ private:
     int32_t deathStateA92_ = 0;      // 0x4b39d8 (A92)
     int32_t camHold_ = 0;            // 0x4b3dac (A41)
     uint16_t playerShadow_ = 0;      // player +0x3a (tag 0x46)
+    // 0x43a880 float in buoyant actors (flags8 0x900000, flags14 0x400): 0x4b3b88 bob amplitude, 0x4b3c40 entry
+    // plunge speed, 0x4b3bc8 bob phase, 0x4b3c04 plunge / ramp phase.
+    int32_t swimAmp_ = 0, swimDrop_ = 0, swimPh_ = 0, swimRamp_ = 0;
+    void swim(int contact, V3& w);
+    // Ropes (type 8): 0x43a310 grab test (rope index, Bugs' local height out), 0x43a7b0 climb limit (0 inside, 1 past
+    // the bottom, 2 at the top), world position of Bugs' local coordinate, unlink (+0xc4 / +0x70, flags14 4; the
+    // callers set the yaw as their exe paths do).
+    int ropeGrab(int32_t& ly);
+    int ropeClimb(int32_t v);
+    V3 ropeWorld() const;
+    void dropRope();
+    void rope(size_t i);  // lit_actors.cpp: behaviour 0x43efc0
     int16_t playerInflate_ = 0;      // player +0x20 (tag 0x38) box inflation
     bool handHitsPlayer(const V3& h) const;
     bool boxPush(const LitActor& o, V3& w) const;
@@ -297,7 +367,7 @@ private:
     uint32_t todTick(const ActorModel& m, AnimState& st, uint16_t anim, uint32_t mode, std::vector<AnimFx>& fx, LitActor* self);
     void initPlayer();
     void playerTick();
-    void playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz);
+    int playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz);  // 0x433500 contact actor, -1 none
     void playerAttacks(const PlayerMove& mv);
     void moveActor(Mover& m, V3& delta, Ground& r, int16_t boxTop);
     void arcTick(Mover& m);
@@ -337,6 +407,22 @@ private:
     uint32_t speechStart_ = 0, speechMs_ = 0;  // 0x4b1c68 start (tick) / 0x4b1c60 length (ms)
     void speechTick();               // 0x41e2b0 status S[0x17] (lit_world.cpp)
     bool helpRequest_ = false;       // 0x4b1a2c F1 help request (consumed by tick step 7)
+
+    // lit_hud.cpp: HUD actor 0x44acc0 (type 6). Shown values start at 0xff / -1 (0x4474b0).
+    struct HudState {
+        uint8_t carrots = 0xff, golden = 0xff, clocks = 0xff;  // 0x4b3a9f / 0x4b39fc / 0x4b316c
+        int8_t health = -1;                                    // 0x4b3730
+        std::array<uint16_t, 4> timers{};                      // 0x4b39be / 0x4b3648 / 0x4b3168 / 0x4b3654
+        uint8_t boss = 0;                                      // 0x4b322a shown boss energy (S[1] target)
+        int16_t spin = 0;                                      // 0x4b3b78
+    } hudState_;
+    void hudTick();
+    void hudShow(size_t slot, uint16_t tmpl, size_t pos, bool instant);  // 0x449c00
+    bool hudCounter(size_t p, uint16_t value, bool instant);            // 0x44a9a0
+    void hudAnim(size_t p, int32_t speed);                              // 0x44ab70
+    void hudHealth(size_t p, bool instant);                             // 0x44a710
+    void hudTimer(size_t p, int32_t t, bool hide);                      // 0x44a800
+    void hudBoss(size_t p);                                             // 0x44a580
 };
 
 } // namespace bb::game

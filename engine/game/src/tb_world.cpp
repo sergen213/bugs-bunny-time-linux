@@ -177,7 +177,22 @@ void tbPadTick(TbPad& p, const PadInput& in, uint16_t edgeMask) {
     p.pressed = p.held & ~(p.prevHeld & edgeMask);
 }
 
-TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene) {
+std::string_view TbWorld::levelName(int index) {
+    static constexpr std::string_view kNames[96] = {
+        "TITLE", "LOADING", "LANGUAGE", "ZOO", "GRANNY", "RETRY", "AZCA01", "AZCASG01", "AZCASG02", "AZCASG03",
+        "AZCASG04", "AZCASG05", "AZR01", "AZQ01", "AZQ02", "AZBOSS01", "AZBOSS02", "VICA01", "VICASG01", "VICASG02",
+        "VICASG03", "VICASG04", "VICASG05", "VIR01", "VIQ01", "VIQ02", "VIBOSS01", "VIBOSS02", "ARCA01", "ARCA02",
+        "ARCA03", "ARCA04", "ARCA05", "ARCA06", "ARCASG01", "ARCASG02", "ARCASG03", "ARCASG04", "ARCASG05", "ARR01",
+        "ARQ01", "ARQ02", "ARBOSS01", "ARBOSS02", "FWCA01", "FWCASG01", "FWCASG02", "FWCASG03", "FWCASG04", "FWCASG05",
+        "FWR01", "FWQ01", "FWQ02", "FWBOSS01", "FWBOSS02", "TRCA01", "TRCA02", "TRCASG01", "TRCASG02", "TRCASG03",
+        "TRCASG04", "TRCASG05", "TRR01", "TRQ01", "TRQ02", "TRBOSS01", "TRBOSS02", "CCERACUT", "TEST01", "TEST02",
+        "TEST03", "TEST04", "TEST05", "SCREEN1", "SCREEN2", "SCREEN3", "MKSCR1", "MKSCR2", "MKSCR3", "DEMO1",
+        "DEMO2", "DEMO3", "DEMO4", "CCINTRO", "CCAZIN01", "CCAZBO02", "CCVIIN01", "CCVIBO02", "CCARIN01", "CCARBO02",
+        "CCTRIN01", "CCTRBO02", "CCEND", "CREDITS", "MUSIC", "SPEECHES"};
+    return index >= 0 && index < 96 ? kNames[index] : std::string_view();
+}
+
+TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<uint8_t, 0x300>* gd) {
     TbWorld w;
     w.col = TbCollision::fromLevel(bze);
     const int i1 = bze.find(1);
@@ -265,16 +280,17 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene) {
         a.id = eid;
         a.uid = player ? uint32_t(eid - 2) : w.nextUid_++;
         a.listPos = w.nextListPos_++;
+        a.chunk = ch.offset;
         loadEntity(a, chainOf(ch), w.globalBlocks_);
         for (const ActorInstance& ai : scene.actors)
             if (ai.scriptOffset == ch.offset && ai.model < scene.actorModels.size()) a.model = &scene.actorModels[ai.model];
-        if (!a.model && (a.ownModel = modelOf(ch, false))) a.model = a.ownModel.get();
+        if (!a.model && (a.ownModel = modelOf(ch, true))) a.model = a.ownModel.get();
     }
     if (!found[0] || !found[1]) throw FormatError("tb world: Bugs (id 2) and Taz (id 3) entities required");
     for (auto& [bid, items] : w.globalBlocks_) linkSkips(items);
     // Spawnable templates (V 0x10/0x800 targets) reachable from any logic: prototype entity (0x460b00 copies it
     // whole) with its model, rig and anims.
-    std::set<uint16_t> want, done;
+    std::set<uint16_t> want{0x18}, done;  // 0x18: the overlay text entity S30 / R 0x22 spawn (0x4680b0)
     for (TbActor* a : w.order())
         for (const auto& [bid, b] : a->blocks) spawnTemplates(b, want);
     for (const auto& [bid, b] : w.globalBlocks_) spawnTemplates(b, want);
@@ -291,8 +307,24 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene) {
         for (const auto& [bid, b] : proto.blocks) spawnTemplates(b, want);
         w.templates_.emplace(t, std::move(proto));
     }
+    // Overlay text block (chunk 0x48 tag 0x49/0x68, 7 x {off, size} into section 3; GD+0x93 language 0 = English)
+    // copied to 0x4d5b88, and the HUD sheet frame sizes (0x462430).
+    for (const TbChunk& ch : script.chunks) {
+        if (ch.type != 0x48) continue;
+        auto ref = ch.tag(0x49);
+        if (ref.empty()) ref = ch.tag(0x68);
+        if (ref.size() >= 8) {
+            const auto block = region(ch, ref);
+            w.textBlock_.assign(block.begin(), block.end());
+        }
+        break;
+    }
+    for (const int32_t t : scene.hudSheet)
+        w.hudFrames_.push_back(t >= 0 ? std::array<int16_t, 2>{int16_t(scene.textures[size_t(t)].width), int16_t(scene.textures[size_t(t)].height)}
+                                      : std::array<int16_t, 2>{1, 1});
     // End of load (0x4347c0): Bugs / Taz health from GAME_DATA +0xa5 / +0xa6 (new game: 6, lives 3).
-    w.GD[0xa0] = 3, w.GD[0xa5] = w.GD[0xa6] = 6;
+    if (gd) w.GD = *gd;
+    else w.GD[0xa0] = 3, w.GD[0xa5] = w.GD[0xa6] = 6;
     w.actors[0].hp = w.GD[0xa5], w.actors[1].hp = w.GD[0xa6];
     // §2.1: run speed S[0x66] (Bugs) / S[0x67] (Taz) = 25 in most level-logic setters (402/450, 150 setters);
     // preset in case the level's setter is never reached (M).
@@ -332,7 +364,6 @@ bool TbWorld::setState(int actor, uint16_t id) { return setState(actors[size_t(a
 bool TbWorld::setState(TbActor& a, uint16_t id) {
     for (size_t i = 0; i < a.states.size(); ++i)
         if (a.states[i].id == id) {
-            a.started = true;
             a.state = int32_t(i);
             a.seq = 0;
             a.curAnim = 0;
@@ -352,6 +383,7 @@ TbActor* TbWorld::entity(int32_t uid) {
 void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
     sounds.clear();
     effects.clear();
+    glyphs.clear(), textBoxes.clear();  // 0x45ee90: the overlay sprite / box lists restart every tick
     tbPadTick(pads[0], p1, edgeMask);
     if (A4 & 0x10) tbPadTick(pads[1], p2, edgeMask);
     else pads[1] = {};  // the P2 report is read only in 2-player mode (GAMEPLAY.md §2.3)
@@ -375,6 +407,11 @@ void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
             if (!(a.f28 & 0x20)) ++a.stateTicks;
         }
     }
+    // HUD: the class 6 entity 0x463170 (template 0x1f holder, spawned at the load: appended after the level's
+    // entities; the oracle's counter slides in on the pickup tick, hud/slide.csv).
+    hudTick();
+    textFlush();  // 0x4681c0: deferred (priority) overlay texts
+    if (ticks < 2) cameraNodes();  // load-mode frames: a model camera node places the view (RETRY)
     for (auto it = entities.begin(); it != entities.end();) {
         if (!(it->f20 & 0x2000)) { ++it; continue; }
         TbActor& d = *it;  // 0x45ecd0: dying program (mask 0x2000), detach, release children
@@ -395,6 +432,7 @@ void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
     for (TbActor* p : {&actors[0], &actors[1]})  // 0x453de0 tail: health mirrors GD+0xa5/+0xa6
         GD[p->id == 2 ? 0xa5 : 0xa6] = uint8_t(p->hp);
     ++ticks;
+    fadeTick();  // 0x464ef0, once per rendered tick
 }
 
 // ------------------------------------------------------------------------------------------------ switching
@@ -777,6 +815,8 @@ bool TbWorld::cond(TbActor& a, TbLogicItem& it, bool cur) {
         case 0x18: return Sv(y) & (x & 0xff);
         case 0x19: return gd8(y) & (x & 0xff);
         case 0x1a: return Sv(y) != x;
+        case 0x22: textStatus = textSpawn(uint16_t(x), 0); return x & textStatus;  // 0x430760: show text X, status & X
+        case 0x23: return x & textStatus;                                        // 0x4307a0: last text status & X
         case 0x35: case 0x37: return y != 1;  // sound X playing (any / own voice): no sound channels run here
         case 0x36: {                          // the focus carries an attached entity
             bool any = false;
@@ -1037,6 +1077,15 @@ uint32_t TbWorld::action(TbActor& a, const TbLogicItem& it) {
         case 16: a.stateTicks = 0; return 0;                             // 0x430fd0
         case 20: sounds.push_back(x); return 0;                          // 0x430ff0
         case 21: if (sv) *sv = uint8_t(*sv + int8_t(x)); return 0;      // 0x431010
+        case 22:                                                         // 0x431030 GD(Y) += X (u16 at even Y <= 0x30)
+            if ((y & 1) == 0 && y <= 0x30) {
+                const uint16_t s = uint16_t((GD[0x58u + y] | GD[0x59u + y] << 8) + x);
+                GD[0x58u + y] = uint8_t(s), GD[0x59u + y] = uint8_t(s >> 8);
+            } else if (gv) {
+                *gv = uint8_t(*gv + x);
+            }
+            return 0;
+        case 34: if (sv) a.yaw = int16_t(a.yaw + (int8_t(*sv) << 4)); return 0;  // 0x4311a0 yaw += (s8)S[Y] << 4
         case 76: case 77:                                                // 0x432100 / 0x432170: octant of target X
             if (TbActor* t = lookup(x, a); t && sv) {
                 const int32_t ang = id == 76 ? ratan2(t->pos.x - a.pos.x, t->pos.z - a.pos.z) - uint16_t(a.yaw)
@@ -1056,6 +1105,12 @@ uint32_t TbWorld::action(TbActor& a, const TbLogicItem& it) {
         case 126: music = x & 0xff; return 0;  // 0x432db0
         case 0: case 40: case 42: case 43: case 131: return 0;           // log stub / pad rumble (not ported)
         case 24: if (sv) *sv = uint8_t(*sv - int8_t(x)); return 0;      // 0x431070
+        case 30: textStatus = textSpawn(uint16_t(x), int16_t(y)); return 0;   // 0x4312f0: text X, priority Y
+        case 51:                                                         // 0x4319f0: X 0 fade in, 1 fade out (holds)
+            if (x == 0) fadeIn(1, 0x100);
+            else if (x == 1) fadeOut(2, 0x100);
+            return 0;
+        case 52: fadeIn(0x41, 0x400); return 0;                         // 0x431a30: dark-light-dark blink
         case 31:                                                         // 0x431320: remove class-31 entities
             forEachEntity([&](TbActor& e) { if (e.behaviour == 31 && (x == 0xffff || e.id == x)) e.f20 |= 0x2000; });
             return 0;
@@ -1187,6 +1242,16 @@ uint32_t TbWorld::runItems(TbActor& a, TbBlock& b) {
         return kFalse;
     }
     struct Guard { Guard() { ++depth; } ~Guard() { --depth; } } guard;
+    // Entity register +0x126 = the u16 S[0x1fe] (0x4d269e) while this entity's logic runs (0x45d7a0 entry / exit;
+    // a nested run first stores the live value into its owner, 0x45e78a).
+    auto s16 = [this]() -> uint16_t { return uint16_t(S[0x1fe] | S[0x1ff] << 8); };
+    auto set16 = [this](uint16_t v) { S[0x1fe] = uint8_t(v), S[0x1ff] = uint8_t(v >> 8); };
+    struct Reg {
+        TbWorld& w; TbActor& a; TbActor* prev; uint16_t saved; decltype(s16)& get; decltype(set16)& set;
+        ~Reg() { a.reg = get(), w.regOwner_ = prev, set(prev ? prev->reg : saved); }
+    } reg{*this, a, regOwner_, s16(), s16, set16};
+    if (regOwner_) regOwner_->reg = s16();
+    set16(a.reg), regOwner_ = &a;
     bool cur = true, stmt = false;
     int32_t skip = -1;
     for (size_t i = 0; i < b.size();) {
@@ -1320,6 +1385,7 @@ bool TbWorld::dispatch(TbActor& a, uint32_t ev) {
     }
     a.tr = tr;
     a.state = st;
+    a.attachPart = -1;  // 0x44d990 LAB_0044e53e: every state entry clears +0x84 (the next 0xa00 packet sets it)
     const TbStateRec& r = a.states[size_t(st)];
     if (!(r.mode & 0x40) || r.anim != oldAnim) a.curAnim = 0;  // restart the clip next tick
     if (r.flagsB & 0x800) a.f20 &= ~0x421u;
@@ -1357,8 +1423,7 @@ void TbWorld::actorStep(TbActor& a) {
         }
         a.f24 |= 0x8000;
         a.f20 |= 0x100;
-        if (!a.started) dispatch(a, 2);  // level start (no state yet)
-        a.started = true;
+        if (!a.rec()) dispatch(a, 2);  // level start (0x453de0: only while +0x17c is unset; a spawn given an event keeps it)
         if (a.flags1 & 0x200) S[1] = 0x80, a.maxHp = a.hp;
     }
     if ((a.flags0 & 0x4000000) && (a.f28 & 0x200)) {  // the player's 60-tick hit flash ran out
@@ -1442,6 +1507,15 @@ void TbWorld::actorStep(TbActor& a) {
         a.yaw = int16_t(wrap(a.yaw + step));
         a.turn = int16_t(a.turn - step);
     }
+    // 0x45643b: a state with flagsB 0x20000 follows its attach point. On a tick whose frame hold has expired the yaw
+    // turns by the attach part's yaw and the mover carries the entity to +0x7c (runtime: thrown template 401, capture
+    // tbnpc/B_guard_attack: next position = last tick's attach point).
+    if (!par && (r->flagsB & 0x20000) && a.attachPart >= 0 && size_t(a.attachPart) < a.anim.parts.size() && !a.anim.countdown) {
+        a.yaw = int16_t(a.yaw + a.anim.parts[size_t(a.attachPart)].rot[1]);
+        a.carry = {int16_t(a.carry[0] + a.attachPos.x - a.pos.x), int16_t(a.carry[1] + a.attachPos.y - a.pos.y),
+                   int16_t(a.carry[2] + a.attachPos.z - a.pos.z)};
+    }
+    if (r->flagsA & 1) a.carry = {};
     std::vector<TbActor*> touched;  // actor contacts of the mover (local_f8)
     if (!par) {
         // local -> world: R(yaw) (s << 5), (w + 0x10) >> 5 (§2.1; pitch/roll leave a forward vector unchanged here)
@@ -1494,6 +1568,13 @@ void TbWorld::actorStep(TbActor& a) {
                     if (t->packets[k].type == 0xa && t->packets[k].id) a.attachPart = int32_t(t->packets[k].id) - 1;
         }
         if (a.attachPart >= 0) a.attachPos = partWorld(a, a.attachPart);  // +0x7c
+        // 0x468280 packet 0x900 (without tag-0x61 records, +0x78 = 0): box = the frame's, x/z inflated by +0x3e.
+        if (a.boxes.empty() && a.anim.boxSet) {
+            const auto& t = a.anim.box;
+            a.box = {int16_t(t[0] - a.inflate), t[1], int16_t(t[2] - a.inflate), int16_t(t[3] + a.inflate), t[4],
+                     int16_t(t[5] + a.inflate)};
+            a.radius = a.anim.radius;
+        }
     }
     // Program triggers (0x453de0 tail): bits raised this tick & +0x14/+0x18/+0x1c run block +0x2c first (its event
     // wins), then logic A / B; a state without blocks only runs the program.
@@ -1525,8 +1606,11 @@ void TbWorld::actorStep(TbActor& a) {
 }
 
 // Mover 0x4450c0 (§1.5): gravity, k-shift smoothing, falling flags, ground grip, swept-shape slide, contact flags.
-void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target, std::vector<TbActor*>& touched) {
+void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vector<TbActor*>& touched) {
     const TbStateRec& r = *a.rec();
+    std::array<int32_t, 3> target = target0;  // + the carried displacement +0x58 (0x403c60), cleared (0x445c40)
+    for (size_t i = 0; i < 3; ++i) target[i] += a.carry[i];
+    a.carry = {};
     std::array<int32_t, 3> w{a.vel[0] >> 4, a.vel[1] >> 4, a.vel[2] >> 4};
     if (!(a.f24 & 0x200) && !(a.f20 & 0x200) && !(r.flagsA & 0xa2008601u) && !(r.flagsC & 1)) w[1] += 5 * dt;
     int k[3] = {0, 0, 0};
@@ -1563,17 +1647,14 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target, std::vector
         if (w[1] > 0) w[1] = std::max(0, w[1] - ((5 * dt * g + 0xfff) >> 12));
     };
     if (wasGrounded) applyGrip();
-    // Shape from the actor box +0x60.. (min x, max y, min z, max x, min y, max z), §1.5 step 1: tag-0x61 record
-    // (action 82) when the entity has records, else TOD packet 0x900 (applied only with +0x123 = 0xff, 0x468280).
+    // Shape from the actor box +0x60.. (min x, max y, min z, max x, min y, max z), §1.5 step 1: entities with tag-0x61
+    // records morph toward the selected one (action 82); the others take TOD packet 0x900 in actorStep's anim step.
     if (a.boxIdx >= 0 && size_t(a.boxIdx) < a.boxes.size()) {  // 0x450460: +-20 per tick toward the record
         for (size_t i = 0; i < 6; ++i) {
             const int16_t t = a.boxes[size_t(a.boxIdx)][i];
             a.box[i] = a.boxInstant ? t : int16_t(a.box[i] < t ? std::min(a.box[i] + 20, int32_t(t)) : std::max(a.box[i] - 20, int32_t(t)));
         }
         a.radius = boxRadius(a.box);
-    } else if (a.anim.boxSet) {
-        a.box = a.anim.box;
-        if (a.anim.radius) a.radius = a.anim.radius;
     }
     const auto& b = a.box;
     const int32_t hx = (b[3] - b[0] + 1) >> 1, hy = (b[1] - b[4] + 1) >> 1, hz = (b[5] - b[2] + 1) >> 1;
@@ -1616,6 +1697,20 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target, std::vector
     // |v| + 50 + r): ponytail: the moved shape against each candidate's box (its yaw only), pushed out of solid
     // ones (not flags0 0x2000000); landing on top grounds the mover (8 on flags0-8 platforms) and marks the
     // candidate stood on (+0x20 0x10, I). The original sweeps per shape (0x43cb60/0x449750/0x449960/0x43cdf0).
+    // The touched list (local_f8, max 15) gets a solid candidate the sweep runs into (approximated: moving into it
+    // or landing on it) and, from the per-shape overlap passes 0x447350/0x447490/0x4476e0/0x447a60, an overlapping
+    // candidate only when: it is non-solid (descriptor 0x80), the mover is non-solid and the candidate lacks
+    // flags0 0x40000000 (descriptor 0x200), mover +0x24 0x1000 vs candidate flags0 0x10000000, mover flags10
+    // 0x400000 vs a player, or a player mover vs candidate flags10 0x400000. Runtime (tbnpc/F_taz_spin): Taz
+    // spinning in place next to the ARCA01 guard never raises +0x20 0x40/0x80 on either side.
+    auto listed = [&](const TbActor& c) {
+        return (c.flags0 & 0x2000000) || ((a.flags0 & 0x2000000) && !(c.flags0 & 0x40000000)) ||
+               ((a.f24 & 0x1000) && (c.flags0 & 0x10000000)) || ((a.flags10 & 0x400000) && (c.flags0 & 0x4000000)) ||
+               ((a.flags0 & 0x4000000) && (c.flags10 & 0x400000));
+    };
+    auto touch = [&](TbActor& c) {
+        if (touched.size() < 15 && std::ranges::find(touched, &c) == touched.end()) touched.push_back(&c);
+    };
     const int32_t reach = isqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) + 50 + shape.r + shape.half;
     for (TbActor* cp : order()) {
         TbActor& c = *cp;
@@ -1635,14 +1730,14 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target, std::vector
         const double dx = l.x - px, dy = ly - cy, dz = l.z - pz;
         const double dd = std::sqrt(dx * dx + dy * dy + dz * dz);
         if (dd >= shape.r) continue;
-        touched.push_back(&c);
+        if (listed(c)) touch(c);
         if (c.flags0 & 0x2000000) continue;
         const bool top = l.y + shape.half <= c.box[4] + shape.r / 2;  // core above the box top: standing on it
         if (top) {
             const int32_t lift = l.y + shape.half + shape.r - c.box[4];
             if (lift > 0) centre.y -= lift;
             a.f20 = (a.f20 | (c.flags0 & 8 ? 8 : 2)) & ~0x421u;
-            if (w[1] > 0) w[1] = 0;
+            if (w[1] > 0) w[1] = 0, touch(c);
             c.f20 |= 0x10;
         } else if (dd > 0) {
             const double k = (shape.r - dd) / dd;
@@ -1652,7 +1747,7 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target, std::vector
             if (nl > 0) {  // drop the velocity component into the obstacle
                 const V3 n = rotY(c.yaw, int32_t(dx / nl * 4096), 0, int32_t(dz / nl * 4096));
                 const int64_t vn = int64_t(w[0]) * n.x + int64_t(w[2]) * n.z;
-                if (vn < 0) w[0] -= int32_t(vn * n.x / (4096 * 4096)), w[2] -= int32_t(vn * n.z / (4096 * 4096));
+                if (vn < 0) w[0] -= int32_t(vn * n.x / (4096 * 4096)), w[2] -= int32_t(vn * n.z / (4096 * 4096)), touch(c);
             }
             a.f20 |= 4;
         }
@@ -1690,6 +1785,7 @@ void TbWorld::cameraTick() {
         cameraSnap(F);
         cam.lastFocus = camFocus;
     }
+    if (camScript.flags & 0x300) return;  // held by a model camera node (0x405b50): no follow
     auto d2 = [](const V3& a, const V3& b) {
         const int64_t x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
         return x * x + y * y + z * z;

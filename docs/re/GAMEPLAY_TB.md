@@ -163,7 +163,12 @@ Every actor that moves calls it once per tick (type 14 characters, NPCs, objects
    position + R(actor rot) · box centre. Sphere radius = largest half extent; capsule: axis = longest extent,
    radius = largest of the other two, half segment = longest − radius (< 21 → becomes a sphere); radius ≥ 8;
    extents < 10 → sphere of 10. **Bugs** flags0 `0x05000181` → capsule; **Taz** `0x05000190` → sphere (O/H). The
-   box is written every animation frame by TOD packet 0x900 (§5.2; O/H).
+   box is written every animation frame by TOD packet 0x900 when the entity has no tag-0x61 records (`+0x78` = 0)
+   or `+0x123` = 0xff (§5.2; O/H; runtime: ARCA01 item gdBit 473 `+0x60..` = (−107, 0, −17 | 107, −215, 19), r 240,
+   from its anim, not tags 0x1b/0x1c (−107, 100, 0 | 0, 100, 17)). The mover adds the carried displacement `+0x58`
+   to its target (`0x403c60`) and clears it (`0x445c40`): a state with flagsB 0x20000 adds (`+0x7c` − pos) to it on
+   every tick whose frame hold `+0x153` has expired and turns the yaw by the attach part's yaw (`0x45643b`), so the
+   entity follows its TOD 0xa00 point (thrown boomerang 401: next position = last tick's attach point).
 2. **Velocity**: actor `+0x70/+0x72/+0x74` = velocity × 16. Work value `w = v >> 4`; airborne gravity first:
    `w.y += 5·DAT_004d26c4` unless actor `+0x24`/`+0x20` bit 0x200, state flagsA (`stateRec+0x20`) & 0xa2008601 or
    flagsC (`+0x28`) & 1. Then per axis with shift `k ≠ 0`: `w += ((target − w) << k) >> 12`, rounded away from
@@ -370,7 +375,8 @@ with id, 0x8000 nearest living entity with id; > 0x10 first living entity with i
 player (3D / xz), 10 the player recorded in `+0x24 & 0x3000000`, else focus (O/H).
 
 Actions: 'S' (7) table `0x4cd6ac` — 3/4 `S[Y]`/`GD` `|= X`, 5 `&=`, 7/8 `= rand() % X`, 10/11 `= X`, 12 `S[Y] = S[X]`,
-16 `+0x82 = 0`, 20 sound, 21 `S[Y] += (s8)X`, 76/77 octant bit of the bearing to/from target X, 79, 82, 126 (above);
+16 `+0x82 = 0`, 20 sound, 21 `S[Y] += (s8)X`, 22 `GD(Y) += X` (`0x431030`, u16 at even Y ≤ 0x30), 34 yaw `+= (s8)S[Y] << 4`
+(`0x4311a0`), 76/77 octant bit of the bearing to/from target X, 79, 82, 106 GAME_DATA +500 bit, 126 (above);
 'V' (0xb) `0x45ad70` `{u32 op, p1, p2, p3}` (non-0x80000000 branch): 0x810 spawn template p3 (p2 times) at the attach
 part or the actor (0x800 random yaw), on the spawned or selected target 0x40000 attach (to `+0x84`), 0x4000 event p1,
 0x20000 kill; 0x200 release children matching `+0x08 & p1` / `+0x0c & p2` (`+0x20 |= 0x10000`, program run);
@@ -747,12 +753,13 @@ Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
 | §4.1 switch | A4 0 → 12 on the R1 tick, camera target `0x4d5028` one tick later | Verified (tick order/latch); RUNTIME_REFERENCE.md §4: **Consistent** (A4 0 → 12 → 4) |
 | §2.2 gravity, §4.3 constants | vy +160 (×16) per tick; `B+0x118..0x148` = 1200 500 20 400 50 5000 800 300 300 30 10 15 400, `0x4d9ae0` 1200, `0x4d9acc` 0x1000, look-at T.y − 300 | Verified (RUNTIME_REFERENCE.md §4) |
 | §4.2 call friend | spot (326, 148) from Bugs for camYaw 490 = first candidate; cooldown 50 at level start, refused < 45; arrival (D, H `H_callfriend_carrier.csv`): carrier entity 169 at the floor spot, partner at its part 1432 above, descending 0, 95, 95, 103 … per tick, landed after 15 ticks, states 261 261 260 262 … 263 50 142 | Verified; **corrections**: `d ·= (\|d\| − 50)/\|d\|` comes **before** `d ·= 0.8` (q uses the 0.8-scaled cut vector); the floor query starts at the candidate (not 150 above) and the result is the floor point; the drop is the carrier's animation (§4.2 arrival), not gravity |
-| §1.5 collision box | `+0x60..` = tag-0x61 record 0 (Bugs −70 0 −60 \| 70 −400 80, Taz −85 0 −50 \| 85 −240 125) | **correction**: the box comes from tag 0x61 records (loader case 0x61, action 82 `0x432530` selects `+0x123`, `0x450460` morphs ±20/tick); TOD 0x900 applies only with `+0x123` = 0xff (all-zero packets for the players) |
+| §1.5 collision box | `+0x60..` = tag-0x61 record 0 (Bugs −70 0 −60 \| 70 −400 80, Taz −85 0 −50 \| 85 −240 125); item gdBit 473 (no records) = its TOD 0x900 box (−107 0 −17 \| 107 −215 19, r 240) | **correction**: the box comes from tag 0x61 records (loader case 0x61, action 82 `0x432530` selects `+0x123`, `0x450460` morphs ±20/tick); TOD 0x900 applies when `+0x78` = 0 or `+0x123` = 0xff (all-zero packets for the players); Verified for the item (`local/wine/tbnpc/H_item_pickup.pkl.gz`) |
+| §3.4 pickup by touch | Bugs poked 150 beside item 473: next tick the item is in its 2nd state, `+0x82` 1, GD+0x5a/+0x6c/+0x84 0 → 1, GD+0x22f 0 → 2 (bit 473), S[0xa8] 1; 31 ticks later its 3rd state, then up 150/tick, `+0x20` 0x2000 7 ticks later at y −1105 | **Verified** (`game.tb`): the mover's contact gives the touched entity `+0x20` 0x80 (player) / 0x40 and its program (`+0x2c`, masks `+0x14`/`+0x18`) runs at once (`0x457a07` → `0x45ea90`); global block 10026: S106 bit, ']' 373 (S22 GD(Y) += X) and 10032 (S11/S90 totals), event 0xdb |
 | §4.3 camera | D (`0x4d9ae0`) = 1200, flags `0x4d5200` = 0x1280 (1P) / 0x300 (2P), body `0x4d514c` = eye + 400·dir(L − eye), rest \|aim − eye\| = 1203; L follows T with f8 (xz) / f4 (y) exactly | **correction**: the spring error `(\|d\| − D) >> 2` is measured from the **eye** (B+4) to T − (0,400,0) and moves the body; no vertical dead band observed after landing; L2/R2 ramp 5, 9, 13 … as §4.3, L2 = +yaw orbit |
 | §4.3 2P framing | D +16, +28, +38, then +40/tick as the players separate; split at \|Δxz\| 2752 → snap to the focus, D −= (D − 1200) >> 2 | Verified; projection distance ≈ 248 for the ±190 × ±90 bounds (fit, I/M) |
 | §3.2 idle fidgets | trace G `G_idle_rng.csv` (100 s idle, rand seed `0x4cf26c` per tick): 8 → 20 21 22, 29 30 31, 26 27 28, 17 18 19, 23 (37 changes); `+0x82` 7, 8, 9 … not reset on state entry | **Verified**: replaying the traced seed per tick, all 37 changes on the original tick (`game.tb`); needs W mode 1/8, S7, S16 and the TB last-frame flag (§3.1). Open: state 23 hold (§8 item 1) |
 | §3.3 view list 0x45eee0 | guard 267 (+0x6e 0x41a, range 7500) not listed (+0x82 frozen at 390) with the camera ~7.3k away; listed again once Bugs was poked 1200 in front of it (`local/wine/tbnpc/B_guard_attack.pkl.gz`, full entity pool per tick) | Consistent |
-| §3.4 NPC logic (guard, template 265) | notice → 357 522 497 504 502 501 364 → 435 (throw) | Verified up to 364 (`game.tb`); Contradicted after (V 0x80100000 throw / template 401 projectile not ported) |
+| §3.4 NPC logic (guard, template 265) | notice → 357 522 497 504 502 501 364 435 502 501 364 (B); 364's block on anim frame 7 spawns 401 (+16 ticks) with event 0x100/0x101 (rand) → 394/395, 401 flies out and back (flagsB 0x20000 carry), hits Bugs (its program, block 397: S[0x7a] = 1), removes itself on its anim's last frame (+73); 364's last frame → event 300 (435, +78) since S[0x7a] = 1; F2 (spin, seeds): 394's last frame rand() % 2 → 435 (F: 500) | **Verified** (`game.tb`: B sequence and relative ticks 16/73/78/126/127/133, flight dy exact and dx ±1 per tick; F2 guard sequence for 240 ticks with the traced rand() seeds). There is no V 0x80100000 in ARCA01; the first-tick event 2 only applies while `+0x17c` is unset |
 | §3.5 damage | guard melee 394 (dmg 1, probe at TOD 0xa00 point) → Bugs hurt 208/189, health −1, flash 0x4d2058 0x40 → 0x7c (60 ticks); Bugs death → GD+0xa2 1, A4 4 (Taz), lives 3 kept (C/D captures) | Consistent (bbtime: health 6 → 5, state 189, flash; death → partner, then both down → lives 2, both 6 health) |
 
 ### 3.3–3.5 Entities, view list, combat (O/H code; runtime above)
@@ -778,3 +785,17 @@ Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
   1/2), control switches; both down → GD+0xa0 lives −1, checkpoint `0x4d26e0..ec`, both 6 health, forced call
   friend; no life → level 5 (RETRY), lives 3. V 0x80080000 = forced damage; V 2/8 (0x8… branch) and V 0x2000 set
   the checkpoint. Ported in `engine/game/src/tb_entities.cpp`.
+
+## 10. HUD, overlay text, fades (tb_hud.cpp) — Verified (runtime) / Implemented
+
+- S30 = 0x4312f0: `textStatus = 0x4680b0(X, priority Y)` (template-0x18 class-31 entity, interpreter 0x466d50 over the
+  chunk-0x48 language block); R 0x22 = 0x430760 (spawn text X, true if status & X), R 0x23 = 0x4307a0 (last status & X).
+- S51 = 0x4319f0: X 0 → 0x464e90(1, 0x100) fade in, X 1 → 0x464ec0(2, 0x100) fade out (holds black); S52 = 0x431a30:
+  0x464e90(0x41, 0x400), a dark–light–dark blink (TB has no flash colour; 0x464ef0 scales the light colours).
+- HUD 0x463170 (class 6, appended after the level's entities): see GAMEPLAY_STATUS / RUNTIME_REFERENCE §4 for the
+  oracle timings. The counter slot is GD+0x58+GD[0xa9]; ARCA01 sets GD[0xa9] = 20 in trigger zone block 10.
+- Trigger zones: chunk 0x09 aux items (0x30 B, list 0x4d2760: +0x10 origin, +0x18 rot, +0x20 x extent, +0x22 height,
+  +0x24 z extent, +8/+0xc flags, +0x28 blocks keyed by entity id; 10 any player, 8 Bugs, 9 Taz). 0x44f550 runs them for
+  class-14 entities with flags0 0x1000000 whose position lies in the (inverse-yaw) box (0x448780); id 0x15 with
+  flags1 & 2 removes the entity; flags +0xc 0x1000 = water (+0x1a2 depth, +0x24 0x40). Not ported (starts the intro).
+- VM register: S[0x1fe..0x1ff] is the running entity's +0x126 (0x45d7a0 entry/exit).

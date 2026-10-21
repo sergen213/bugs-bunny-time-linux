@@ -101,6 +101,7 @@ void TbWorld::classTick(TbActor& a) {
     case 35:  // 0x450cd0
         if (a.firstBlock) runBlock(a, a.firstBlock);
         return;
+    case 31: textTick(a); return;  // 0x450d00 overlay text
     case 0: case 6: case 7: case 20: return;
     default: unsupported.insert(std::format("class{}", a.behaviour)); return;
     }
@@ -165,7 +166,8 @@ bool TbWorld::hitIntake(TbActor& a) {
 // 0x453de0 contact loop over the mover's actor contacts: both sides remember each other (+0x54) and raise +0x20
 // 0x40 (touching a non-player) / 0x80 (a player); a contact attacker (+0x20 0x1000, state flagsA 0x1000000 with
 // 0x40000 vs players / 0x80000 vs others) hurts a hittable (flags0 0x80), vulnerable victim; standing on a
-// stompable state (flagsB 0x8000) hurts it, on a bouncy one (0x10000000) raises +0x24 8.
+// stompable state (flagsB 0x8000) hurts it, on a bouncy one (0x10000000) raises +0x24 8. The bits given to the
+// touched entity that its program masks (+0x14/+0x18) run its program at once (0x457a07 -> 0x45ea90): pickups.
 void TbWorld::contacts(TbActor& a, const std::vector<TbActor*>& touched) {
     const bool aPl = a.flags0 & 0x4000000;
     for (TbActor* cp : touched) {
@@ -174,7 +176,9 @@ void TbWorld::contacts(TbActor& a, const std::vector<TbActor*>& touched) {
         a.contact = int32_t(c.uid), c.contact = int32_t(a.uid);
         const uint32_t ab = cPl ? 0x80 : 0x40;
         a.f20 |= ab, a.trig[0] |= ab;
-        c.f20 |= aPl ? 0x80 : 0x40;
+        const uint32_t c20 = aPl ? 0x80 : 0x40;
+        uint32_t c24 = 0;
+        c.f20 |= c20;
         if ((c.f20 & 0x1000) && c.rec() && a.rec()) {
             const uint32_t ca = c.rec()->flagsA;
             if ((ca & 0x1000000) && (a.flags0 & 0x80) && (aPl ? (ca & 0x40000) : (ca & 0x80000)) &&
@@ -182,8 +186,9 @@ void TbWorld::contacts(TbActor& a, const std::vector<TbActor*>& touched) {
                 a.dmgIn = c.rec()->dmg;
                 a.f20 |= cPl ? 0x8000000 : 0x4000000;
                 if (cPl && c.id == 3) a.f28 |= 0x20000;
-                c.f24 |= aPl ? 2u : 0x100000u;
-                if (aPl && a.hp <= a.dmgIn) c.f24 |= 1;
+                c24 = aPl ? 2u : 0x100000u;
+                if (aPl && a.hp <= a.dmgIn) c24 |= 1;
+                c.f24 |= c24;
                 a.hitTr = c.rec()->hitTrans;
             }
         }
@@ -198,6 +203,7 @@ void TbWorld::contacts(TbActor& a, const std::vector<TbActor*>& touched) {
             }
             if (c.rec()->flagsB & 0x10000000) a.f24 |= 8, a.trig[1] |= 8;
         }
+        if (const uint32_t m20 = c20 & c.progMask[0], m24 = c24 & c.progMask[1]; m20 || m24) runProgram(c, m20, m24);
     }
 }
 
@@ -274,7 +280,7 @@ void TbWorld::playerDown(TbActor& a) {
     GD[0xa2] &= 0xcc;
     for (TbActor& p : actors) p.f20 &= ~0x2000000u, p.hp = 6;
     if (!GD[0xa0]) {
-        restart = true;  // GD+0 = 5, 0x4d593a = 1
+        restart = true, nextLevel = 5;  // GD+0 = 5 (RETRY), 0x4d593a = 1
         GD[0xa5] = GD[0xa6] = 6, GD[0xa0] = 3;
         return;
     }

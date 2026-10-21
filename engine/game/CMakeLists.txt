@@ -7,10 +7,12 @@ add_library(bb_game STATIC
   src/lit_logic.cpp
   src/lit_actors.cpp
   src/lit_overlay.cpp
+  src/lit_hud.cpp
   src/lit_save.cpp
   src/tb_collision.cpp
   src/tb_world.cpp
   src/tb_entities.cpp
+  src/tb_hud.cpp
 )
 target_include_directories(bb_game PUBLIC include)
 target_link_libraries(bb_game PUBLIC bb_core)

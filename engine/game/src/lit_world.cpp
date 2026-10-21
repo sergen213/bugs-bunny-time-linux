@@ -311,9 +311,7 @@ void LitWorld::tick(const PadInput& in) {
     }
     if (S[12] == 0) cameraTick();  // §1.1 step 3a: camera first, from the previous tick's player position
     actorsTick();   // §7.1: activation, then behaviours in active-list order (player among them)
-    // HUD actor 0x44acc0 (§3.6): health below 1 -> death state (A92 override, else the zone-trigger default).
-    if (S[12] == 0 && int8_t(G[1]) < 1 && !(p.flags14 & 0x1000000))
-        kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_));
+    hudTick();      // HUD actor 0x44acc0 (lit_hud.cpp; §3.6 health below 1 -> death state)
     speechTick();   // §1.1 step 5
     // §1.1 step 7 (0x4065e0): pause states. Help opens unless a scripted camera (0x300 without 1), the cutscene lock
     // G[0x36] or speech blocks it; 2 (resuming) returns to 0. ponytail: 0x4b3fc0 (also gates 2 -> 0) taken as 0.
@@ -325,6 +323,7 @@ void LitWorld::tick(const PadInput& in) {
         }
     }
     helpRequest_ = false;
+    fadeTick();     // §1.1 step 9: the render pass advances the fade (0x44c4b0 / 0x44bef0)
 }
 
 // XA speech status S[0x17] (0x41e2b0, the path without an audio device, which the Wine oracle takes): A81 start 8 ->
@@ -358,6 +357,7 @@ void LitWorld::initPlayer() {  // 0x43a880 first call (part list not built yet)
     p.anim = 0;
     p.flags14 = 0;
     vsX_ = vsZ_ = momX_ = momZ_ = 0;
+    swimDrop_ = 0;  // 0x4b3c40
     accelK_ = 0x800;
     safe_ = p.pos;
     turnErr_ = -1;
@@ -524,6 +524,7 @@ void LitWorld::kill(int16_t deathState) {  // 0x437b90(state, NULL)
 
 void LitWorld::respawn() {  // end of the death clip (0x43a880 tail): checkpoint, health 6, 30 ticks invulnerable
     p.flags14 = 0;
+    p.rope = -1;
     p.pos = checkpoint_;
     cam.yaw = int16_t(checkpointYaw_);
     p.yaw = cam.yaw;
@@ -593,10 +594,10 @@ void LitWorld::zoneTriggers(Mover& m, LitActor* self) {
             if (e.item.act) act(e.item, self);
             const V3 arg{e.arg[0], e.arg[1], e.arg[2]};
             if (e.flags & 0x80000000) forceState(uint16_t(e.arg[0]));
-            if (e.flags & 0x800) { p.pos = arg; p.platform = -1; p.flags14 &= ~0x14u; cameraSnap(arg); }  // 0x4379b0
+            if (e.flags & 0x800) { p.pos = arg; p.platform = p.rope = -1; p.flags14 &= ~0x14u; cameraSnap(arg); }  // 0x4379b0
             if (e.flags & 0x40000000) {  // teleport self
                 m.pos = arg;
-                if (!self && p.platform >= 0) { p.platform = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x202; }
+                if (!self && (p.platform >= 0 || p.rope >= 0)) { p.platform = p.rope = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x202; }
             }
             if (e.flags & 0x80000) nextLevel = e.arg[0];  // level exit: GD+0 = arg, DAT_004b39bc = 1
             if (e.flags & 0x200000) { kill(int16_t(e.arg[0])); G[1] = 0; }  // kill, death state arg0
@@ -610,6 +611,146 @@ void LitWorld::zoneTriggers(Mover& m, LitActor* self) {
             if (!(e.flags & 0x8000)) return;
         }
         return;
+    }
+}
+
+// ---- ropes (0x43a310 / 0x43a7b0) and floating (0x43a880 LAB_0043d6d3) ----
+
+// 0x43a310 (mask 0x400004): the first active collision-class-2 rope (flags8 0x400000 pole / 4 chain) in Bugs' zone,
+// not in an arc of its own, within its radius² (xz), whose frame (Ry(-yaw) only) holds his hands (feet - 300):
+// pole |x|, |z| <= inflation and 0..seg; chain: the node origins carried up to the top node's frame by each lower
+// node's matrix (the top node's own matrix is skipped, as the exe), then the root pitch; node j spans its origin to
+// the one below (the bottom node: seg down), the hands strictly inside in y and within inflation of the span in x/z;
+// that node becomes +0x13c (straight on the next swing). ly = his local height (feet).
+int LitWorld::ropeGrab(int32_t& ly) {
+    for (size_t i = 0; i < actors.size(); ++i) {
+        LitActor& o = actors[i];
+        if (!o.active || o.dead || o.def < 0 || defs[size_t(o.def)].cls != 2 || !(o.flags8 & 0x400004) || (o.flags14 & 1) ||
+            o.zone != p.zone || o.animState.parts.size() < 2)
+            continue;
+        const V3 rel{int16_t(int16_t(p.pos.x) - int16_t(o.pos.x)), int16_t(int16_t(p.pos.y) - int16_t(o.pos.y)),
+                     int16_t(int16_t(p.pos.z) - int16_t(o.pos.z))};
+        if (uint32_t(rel.z * rel.z + rel.x * rel.x) > o.radius2) continue;
+        Mat inv;
+        rotMatrixZYX(inv, 0, 0x1000 - o.yaw, 0);
+        const V3 l = apply(inv, rel);
+        const int32_t r = o.inflate, h = l.y - 300;
+        if (l.x < -r || l.x > r) continue;
+        if (o.flags8 & 0x400000) {
+            if (-r <= l.z && l.z <= r && h >= 0 && h <= o.ropeSeg) { ly = int16_t(l.y); return int(i); }
+            continue;
+        }
+        const auto& parts = o.animState.parts;
+        struct E { V3 v; int16_t dy = 0, dz = 0; size_t part = 0; };
+        std::vector<E> e;
+        for (size_t q = parts.size() - 1; q >= 1 && e.size() < 20; --q) {
+            e.push_back({{int16_t(parts[q].trans[0]), int16_t(parts[q].trans[1]), int16_t(parts[q].trans[2])}, 0, 0, q});
+            const size_t s = e.size() - 1;
+            if (s < 2) continue;
+            const Mat M = ropePartMatrix(parts[e[s - 1].part]);
+            const V3 a = e[s - 1].v;
+            for (size_t j = 0; j + 1 < s; ++j) {
+                const V3 v = apply16(M, e[j].v);
+                e[j].v = {int16_t(v.x + a.x), int16_t(v.y + a.y), int16_t(v.z + a.z)};
+            }
+        }
+        Mat pitch;
+        rotMatrixZYX(pitch, o.ropePitch, 0, 0);
+        for (E& x : e) x.v = apply16(pitch, x.v);
+        e[0].dy = o.ropeSeg;
+        for (size_t j = 0; j + 1 < e.size(); ++j)
+            e[j + 1].dy = int16_t(e[j].v.y - e[j + 1].v.y), e[j + 1].dz = int16_t(e[j].v.z - e[j + 1].v.z);
+        for (const E& x : e) {
+            const bool inZ = x.dz < 0 ? x.dz + x.v.z - r <= l.z && l.z <= x.v.z + r : l.z <= x.dz + x.v.z + r && x.v.z - r <= l.z;
+            if (inZ && x.v.y < h && h < x.dy + x.v.y) {
+                o.ropeGrab = int16_t(x.part);
+                ly = int16_t(l.y);
+                return int(i);
+            }
+        }
+    }
+    return -1;
+}
+
+// 0x43a7b0: v = the int read at the move vector +4 (its forward s16 + 0 above it); hands h = v - 300 + local y.
+int LitWorld::ropeClimb(int32_t v) {
+    if (p.rope < 0) return 1;
+    LitActor& o = actors[size_t(p.rope)];
+    const int32_t h = v - 300 + p.local.y;
+    if (o.flags8 & 0x400000) return h < 1 ? 2 : o.ropeSeg <= h ? 1 : 0;
+    const size_t n = o.animState.parts.size();
+    int16_t sum = 0;
+    size_t q = 1;
+    for (; q < n; ++q) {
+        sum = int16_t(sum + o.ropeSeg);
+        if (h < sum) break;
+    }
+    if (q < n && h > 0) { o.ropeGrab = int16_t(q); return 0; }
+    o.ropeGrab = 1;
+    return h < 1 ? 2 : 1;
+}
+
+// Bugs' coordinate chain: his local trans (origin of his own matrix) through the rope root +0x80.
+V3 LitWorld::ropeWorld() const {
+    const Mat& m = actors[size_t(p.rope)].ropeM;
+    const V3 v = apply(m, p.local);
+    return {v.x + m.t.x, v.y + m.t.y, v.z + m.t.z};
+}
+
+void LitWorld::dropRope() {
+    p.rope = -1;
+    p.flags14 &= ~4u;
+}
+
+// Floating (LAB_0043d6d3) with the 0x433500 contact c: a buoyant actor (flags8 0x100000 round: horizontal distance r
+// within its radius +0x2e; 0x800000: r = 0) holds Bugs unless he rises in an arc. Entering: flags14 0x404, plunge =
+// -dy/16 (0 below 5 or for 0x800000), bob amplitude 7 + rand & 7, phases 0x400. While plunging: w.y += sin(ramp)·
+// plunge, ramp += 0x40 up to 0x800. Then the lift w.y = -sin(ramp)·(base - k·base) with k = dy/top + r/radius (base
+// 0x50 round / 0x78), ramp 0 -> 0x400, then + sin(bob)·amp (bob += 100, new amp 9 + rand & 7 each 0x1000), applied
+// while dy + vy stays below top + 10. Leaving (no contact, outside, rising): flags14 0x400 -> free fall 0x200.
+// Runtime: L01D1 geyser (21040, -2000, 7280) after S[45] = 1 (RUNTIME_REFERENCE §13). The drop of a held actor on
+// entry is not modelled (carrying is not simulated).
+void LitWorld::swim(int c, V3& w) {
+    auto leave = [&] {
+        if (p.flags14 & 0x400) p.flags14 = (p.flags14 & 0xfffffbfb) | 0x200;
+    };
+    if (c < 0 || !(actors[size_t(c)].flags8 & 0x900000) || ((p.flags14 & 1) && !(p.flags14 & 8))) return leave();
+    LitActor& o = actors[size_t(c)];
+    o.flags14 |= 0x8000;
+    if (p.flags14 & 0x10) {
+        p.lean = 0;
+        p.platform = -1;
+        p.flags14 = (p.flags14 & 0xfffffdeb) | 2;
+    }
+    const int32_t dx = int16_t(p.pos.x - o.pos.x), dy = int16_t(p.pos.y - o.pos.y), dz = int16_t(p.pos.z - o.pos.z);
+    const int32_t r = (o.flags8 & 0x100000) ? int16_t(isqrt(dx * dx + dz * dz)) : 0;
+    if (int32_t(o.radius) < r) return leave();
+    if (!(p.flags14 & 0x400)) {
+        swimAmp_ = (rand_() & 7) + 7;
+        swimDrop_ = -dy >> 4;
+        if (swimDrop_ < 5 || (o.flags8 & 0x800000)) swimDrop_ = 0;
+        swimPh_ = swimRamp_ = 0x400;
+        p.flags14 = (p.flags14 & 0xfffffdf6) | 0x404;
+    }
+    if (swimDrop_ == 0) {
+        const int32_t base = (o.flags8 & 0x100000) ? 0x50 : 0x78, top = o.box[4], rad = o.radius;
+        // ponytail: the exe divides by the box top and radius unguarded (a zero-size float box crashes it: runtime,
+        // L01D1 geyser poked in its idle state 2); a zero term here instead.
+        const int32_t k = (top ? (dy << 12) / top : 0) + (rad ? (r << 12) / rad : 0);
+        int16_t vy = int16_t((-(rsin(swimRamp_) * (base - ((k * base) >> 12)))) >> 12);
+        if (swimRamp_ < 0x400) swimRamp_ += 0x40;
+        else vy = int16_t(vy + int16_t((rsin(swimPh_) * swimAmp_) >> 12));
+        if (top + 10 < dy + vy) w.y += vy;
+        swimPh_ += 100;
+        if (swimPh_ > 0x1000) {
+            swimAmp_ = (rand_() & 7) + 9;
+            swimPh_ -= 0x1000;
+        }
+    } else if (swimRamp_ < 0x800) {
+        w.y += (rsin(swimRamp_) * swimDrop_) >> 12;
+        swimRamp_ += 0x40;
+    } else {
+        swimDrop_ = swimRamp_ = 0;
     }
 }
 
@@ -635,6 +776,10 @@ void LitWorld::playerTick() {
         p.seq = 0;
         moveId = st->moves[0];
         p.anim = 0;
+        if (p.rope >= 0 && (p.flags14 & 2)) {  // parent flags8 4 (a rope) and grounded: let go, yaw = local yaw
+            p.yaw = p.localYaw;
+            dropRope();
+        }
     }
     const PlayerMove* mv = findMove(uint16_t(moveId));
     p.flags18 = (mv->flagsB & 0x1000) ? p.flags18 | 2 : p.flags18 & ~2u;
@@ -685,10 +830,21 @@ void LitWorld::playerTick() {
             const int16_t q = int16_t(turnErr_ >> 2);
             if (q == 0) turnErr_ = -1;
             else { turnErr_ = int16_t(turnErr_ - q); s = q; }
-            p.yaw = int16_t(p.yaw + s);
+            int16_t& yaw = p.rope >= 0 ? p.localYaw : p.yaw;  // *(+0xc0) + 0x12: the local yaw while attached
+            yaw = int16_t(yaw + s);
         }
     }
-    if (mv->flagsB & 0x10) p.yaw = int16_t(ratan2(cam.eye.x - p.pos.x, cam.eye.z - p.pos.z));  // face camera
+    if (mv->flagsB & 0x10) {  // face camera (attached: the local yaw takes the difference)
+        const int16_t t = int16_t(ratan2(cam.eye.x - p.pos.x, cam.eye.z - p.pos.z));
+        if (p.rope < 0) {
+            p.yaw = t;
+        } else {
+            int32_t d = p.yaw - wrapSigned(t);
+            if (d > 0x800) d -= 0x1000;
+            if (d < -0x800) d += 0x1000;
+            p.localYaw = int16_t(p.localYaw - d);
+        }
+    }
     if (!(p.flags14 & 2)) p.lean = 0;
     // Variable jump height (§3.3): ✕ released in 0x600 < ph < 0x800 -> apex now.
     if ((mv->flagsA & 0x10) && !(mv->flagsB & 0x40000000) && !(pad.held & PadCross) && !(p.flags14 & 8) &&
@@ -698,6 +854,19 @@ void LitWorld::playerTick() {
         int16_t m = int16_t(std::min(isqrt(pad.sx * pad.sx + pad.sy * pad.sy), 0x7f));
         if (mv->flagsA & 0x400) m = int16_t(-m);
         ly = int16_t(ly + int16_t((mv->speed * m * kDt) >> 7));
+    }
+    // Climbing on the rope (move flagsA 0x200): local x/z reset, 0x43a7b0 limits (top: no climbing up; past the
+    // bottom: let go, yaw = local yaw, next move). ponytail: the attached stick steering of 0x43a880 (+0xc4 path of
+    // the flagsA 2 branch) is not ported: no rope move steers.
+    if ((mv->flagsA & 0x200) && p.rope >= 0) {
+        p.local.x = p.local.z = 0;
+        const int lim = ropeClimb(int32_t(uint16_t(lz)));
+        if (lim == 2 && (mv->flagsA & 0x400)) ly = 0;
+        if (lim == 1) {
+            p.yaw = p.localYaw;
+            dropRope();
+            ++p.seq;
+        }
     }
     V3 w = rotY(p.yaw, lx, ly, lz);
 
@@ -764,10 +933,46 @@ void LitWorld::playerTick() {
         p.phase = 0x400;
         p.vy = 0;
         p.flags14 = (p.flags14 & 0xeffff9f1) | 1;
+        if (p.rope >= 0) {  // jumping off the rope: world yaw = local yaw + rope yaw
+            p.yaw = int16_t(p.localYaw + actors[size_t(p.rope)].yaw);
+            dropRope();
+        }
     }
     if ((p.flags14 & 1) && (!(p.flags14 & 0x200) || (p.flags14 & 0x400)) && !frozen) arcTick(p);
     p.flags14 = (mv->flagsA & 0x810000) ? p.flags14 | 0x40 : p.flags14 & ~0x40u;  // attack active
     playerAttacks(*mv);
+    // Pumping the swing: climbing move + R1 adds 4 to a chain's amplitude (+0x144, before its own update).
+    if ((mv->flagsA & 0x200) && (pad.pressed & PadR1) && p.rope >= 0 && !(actors[size_t(p.rope)].flags8 & 0x400000))
+        actors[size_t(p.rope)].ropeAmp += 4;
+    // Rope grab (move flagsA 0x100, falling / descending / gliding, no support): attached at his local height,
+    // local rotation 0, world position from the rope's current matrix, move cleared, flags14 4.
+    if ((mv->flagsA & 0x100) && (p.flags14 & 0x10208) && p.rope < 0 && p.platform < 0) {
+        int32_t ly0 = 0;
+        if (const int r0 = ropeGrab(ly0); r0 >= 0) {
+            p.rope = r0;
+            p.local = {0, ly0, 0};
+            p.localYaw = 0;
+            p.pos = ropeWorld();
+            w = {};
+            p.flags14 = (p.flags14 & 0xfffffdf6) | 4;
+        }
+    }
+    const V3 wMove = w;  // psVar6 + 0x14
+    if (p.rope >= 0) {  // attached: world yaw from the chain, the step to the chain's origin clamped by the trace
+        Mat local;
+        rotMatrixXYZ(local, 0, p.localYaw, 0);
+        const V3 dir = apply16(actors[size_t(p.rope)].ropeM, apply16(local, {0, 0, 0x1000}));
+        const V3 o = ropeWorld();
+        int32_t dx = o.x - p.pos.x, dz = o.z - p.pos.z;
+        const int16_t dx0 = int16_t(dx), dz0 = int16_t(dz);
+        Ground g;
+        g.zone = p.zone;
+        V3 a = p.pos;
+        hf.trace(a, dx, dz, g);
+        w.x += dx - dx0;
+        w.z += dz - dz0;
+        p.yaw = int16_t(ratan2(dir.x, dir.z));
+    }
 
     // 5. Collision move (§4.4 reimplementation notes): X-only, Z-only, then MoveActor with the clamped delta.
     const int32_t sum0 = w.z + w.x;
@@ -788,10 +993,30 @@ void LitWorld::playerTick() {
     }
     if ((p.flags14 & 0x81000000) == 0) moveActor(p, w, r, boxTop());
     if (sum0 != w.z + w.x) p.flags14 |= 0x100000;  // blocked by a wall this tick
-    playerContacts(w, mv->flagsA, lz);  // 0x433500 mask 0x9a690a: solids, platforms, pushables, pickups
-    p.pos.x += w.x;
-    p.pos.y += w.y;
-    p.pos.z += w.z;
+    if (mv->flagsA & 0x200) {  // climbing moves keep the pre-trace move; blocked or out of every zone: let go, fall
+        w = wMove;
+        if (p.rope >= 0 && ((p.flags14 & 0x100000) || r.zone == -1)) {
+            dropRope();
+            p.flags14 = (p.flags14 & 0xffffffe9) | 0x200;
+        }
+    }
+    swim(playerContacts(w, mv->flagsA, lz), w);  // 0x433500 mask 0x9a690a: solids, platforms, pushables, pickups
+    if (mv->flagsA & 0x200) {  // climbing: only the local height moves (unattached: his own coordinate, no move)
+        if (p.rope >= 0) {
+            p.local.y += w.y;
+            p.pos = ropeWorld();
+        }
+    } else if (p.rope >= 0) {  // attached, other moves: the move in the rope's yaw frame
+        Mat inv;
+        rotMatrixXYZ(inv, 0, -actors[size_t(p.rope)].yaw, 0);
+        const V3 d = applyLV(inv, w);
+        p.local = {p.local.x + d.x, p.local.y + d.y, p.local.z + d.z};
+        p.pos = ropeWorld();
+    } else {
+        p.pos.x += w.x;
+        p.pos.y += w.y;
+        p.pos.z += w.z;
+    }
     if (!(prevFlags & 0x200) && (prevFlags & 0x12) && (p.flags14 & 0x200)) p.flags18 |= 0x200;  // walked off a ledge
 
     // 6. Transitions (§3.1 step 3): first passing rule of group move.link.
@@ -800,7 +1025,8 @@ void LitWorld::playerTick() {
         for (const PlayerRule& ru : rules) {
             if (ru.group != mv->link) continue;
             if (ru.heldMask) continue;  // needs a held actor (carrying is not simulated)
-            if (ru.parentMask && !(p.platform >= 0 && (actors[size_t(p.platform)].flags8 & ru.parentMask)) &&
+            const int support = p.rope >= 0 ? p.rope : p.platform;  // +0x70
+            if (ru.parentMask && !(support >= 0 && (actors[size_t(support)].flags8 & ru.parentMask)) &&
                 !((ru.parentMask & 0x8000) && (p.flags18 & 0x40)))
                 continue;
             if (ru.flags14Mask && (((p.flags14 & ru.flags14Mask) != 0) == bool(ru.invert & 2))) continue;
@@ -1142,7 +1368,7 @@ std::vector<LitWorld::Shadow> LitWorld::shadows() const {
     auto one = [&](uint16_t entity, const Mover& m, const ActorModel* model, const AnimState& st,
                    std::array<int16_t, 3> rot, std::array<int32_t, 3> scale, const std::array<int16_t, 6>& box,
                    const LitActor* support) {
-        if (!entity || !model || st.parts.empty() || out.size() >= 40 || !scene_->shadowModels.contains(entity)) return;
+        if (!entity || !model || st.parts.empty() || out.size() >= 40 || !scene_->templateModels.contains(entity)) return;
         // 0x44ba00: one part -> the actor position, else the origin of the second part of the list; skipped when that
         // part is not drawn (+0xb4).
         const auto o = partOrigin(*model, st, st.parts.size() > 1 ? 1 : 0, {m.pos.x, m.pos.y, m.pos.z}, rot, scale);

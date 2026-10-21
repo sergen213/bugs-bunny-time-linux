@@ -27,6 +27,8 @@
 #include <map>
 #include <optional>
 #include <print>
+#include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -264,6 +266,8 @@ struct App {
     int players = 1;                      // TB 1 or 2 players (Options, --players)
     bbtime::KeyMap tbKeys[2] = {bbtime::tbKeyMap(0), bbtime::tbKeyMap(1)};
     size_t autoplay2At = 0;
+    std::optional<std::array<uint8_t, 0x300>> tbCarry;  // TB GAME_DATA for the next enterLevel (reload 0x4014c0 keeps it)
+    int tbLevel = -1;                     // current TB level-table index (GD+0), -1 = not in the table
     std::string playStatus;               // why a LiT level stayed in viewer mode
     std::vector<bb::AiffSound> litSfx;    // LiT in-level sound bank (LitWorld::sfx indexes it)
     bbtime::KeyMap keys;
@@ -272,8 +276,16 @@ struct App {
     // entered without carried globals, and keeps GD+0x08..+0x3f and the checksum chain for the next save.
     std::optional<bb::game::LitSaveGame> litSave;
     int litLevel = 0;                     // current LiT level id (GD+0), for saves
+    // LiT level change (GAMEPLAY §1.2): 0x44bec0 fade out while the world keeps ticking, then the loading screen
+    // (the loading BZE's TIM) while the target loads (+ the 3000 ms minimum of LitWorld::holdsLoading), then two
+    // unrendered ticks and the 0x44be90 fade in (litEnter; also on the first entry, like the exe's /b boot path).
+    struct LitLoading { int next = -1; std::array<uint8_t, 256> G{}; uint32_t image = 0; uint64_t startMs = 0; bool loaded = false; };
+    std::optional<LitLoading> litLoading;
+    bool litFadingOut = false, litEnter = false;
     std::vector<uint32_t> fontImages;     // per Scene::overlayFont entry (0 = missing), built by drawOverlayText
     Fidelity fontFidelity = Fidelity::Original;
+    std::map<std::array<int16_t, 5>, uint32_t> hudImages;  // TB HUD sprite crops {frame, u, v, w, h} -> image
+    bool tbFadingOut = false;             // TB level change: 0x401910 fade-out running before the load
 
     Game& game() { return games[gameIdx]; }
 
@@ -281,7 +293,6 @@ struct App {
     void enterLevel(const std::string& level, const std::array<uint8_t, 256>* globals = nullptr) {
         bb::BzeFile bze;
         scene = bb::loadLevelScene(game().id, game().root, level, &bze);
-        r.uploadScene(scene);
         freeFont();
         actorAnim.assign(scene.actors.size(), {});
         play.reset();
@@ -310,6 +321,7 @@ struct App {
                 litLevel = 0;
                 for (int id = 0; !bb::game::LitWorld::levelName(id).empty(); ++id)
                     if (iequals(bb::game::LitWorld::levelName(id), level)) { litLevel = id; break; }
+                w.level = litLevel;
                 // >D overlay key names: the first key bound to each config kbdMap action, in the exe's DIK spelling
                 // for the default keys (letters as is, arrows / Tab / Return as KEY_*).
                 static constexpr const char* kKeyActions[8] = {"kick", "crouch", "look", "jump", "roll", "camera_right", "action", "camera_left"};
@@ -325,18 +337,54 @@ struct App {
                 w.joystick = pad != nullptr;  // config use-joystick: on with a connected gamepad (">DJ" adds "/Button<n>")
                 w.loadUpdate();  // as 0x430f80: player + camera initialised before the first rendered frame
                 play.emplace(std::move(w));
+                litEnter = true, litFadingOut = false;
             } catch (const std::exception& e) {
                 playStatus = std::format("viewer only: {}", e.what());
             }
         }
         if (game().id == GameId::TimeBusters && !scene.placeholder) {
             try {
-                tbPlay.emplace(bb::game::TbWorld::load(bze, scene));
+                tbPlay.emplace(bb::game::TbWorld::load(bze, scene, tbCarry ? &*tbCarry : nullptr));
                 tbPlay->world.setTwoPlayer(players == 2);
+                // Debug (first TB level entered; smokes compared with the oracle's pokes): BBTIME_TB_START="x,y,z,yaw"
+                // (PS1 units, 4.12) places Bugs (+0xfc/+0xf6); BBTIME_TB_GD="a0=0,a2=2,a5=1" writes GAME_DATA bytes
+                // (hex offset = value: lives, down flags, health) before the first tick.
+                static bool tbStartUsed = false;
+                if (!tbStartUsed) {
+                    tbStartUsed = true;
+                    bb::game::TbWorld& w = tbPlay->world;
+                    int x = 0, y = 0, z = 0, yaw = 0;
+                    if (const char* s = std::getenv("BBTIME_TB_START"); s && std::sscanf(s, "%d,%d,%d,%d", &x, &y, &z, &yaw) >= 3)
+                        w.actors[0].pos = {x, y, z}, w.actors[0].yaw = int16_t(yaw);
+                    unsigned off = 0, val = 0;
+                    int n = 0;
+                    for (const char* s = std::getenv("BBTIME_TB_GD"); s && std::sscanf(s, "%x=%u%n", &off, &val, &n) == 2; s += n + (s[n] == ','))
+                        if (off < w.GD.size()) w.GD[off] = uint8_t(val);
+                    w.actors[0].hp = w.GD[0xa5], w.actors[1].hp = w.GD[0xa6];
+                }
+                // Rigid props the simulation draws itself (an entity with its own mesh model) leave the static scene,
+                // so collected / removed ones disappear; mesh names "prop<n>@<chunk offset>/..." (buildTbScene).
+                std::set<uint32_t> live;
+                for (bb::game::TbActor* e : tbPlay->world.list())
+                    if (e->chunk && e->model && !e->model->meshes.empty()) live.insert(e->chunk);
+                std::erase_if(scene.meshes, [&](const bb::Mesh& m) {
+                    unsigned off = 0;
+                    return std::sscanf(m.name.c_str(), "prop%*u@%x", &off) == 1 && live.contains(off);
+                });
             } catch (const std::exception& e) {
                 playStatus = std::format("viewer only: {}", e.what());
             }
+            tbCarry.reset();
+            tbLevel = -1;
+            for (int i = 0; !bb::game::TbWorld::levelName(i).empty(); ++i)
+                if (iequals(bb::game::TbWorld::levelName(i), level)) { tbLevel = i; break; }
+            tbFadingOut = false;
+            if (tbPlay) {  // load 0x4018a0: GD+0 = the level, then the fade in from black at speed 200
+                if (tbLevel >= 0) tbPlay->world.GD[0] = uint8_t(tbLevel);
+                tbPlay->world.fadeIn(1, 200);
+            }
         }
+        r.uploadScene(scene);
         sceneTris = 0;
         glm::vec3 lo(1e30f), hi(-1e30f);
         for (const bb::Mesh& m : scene.meshes) {
@@ -388,6 +436,23 @@ struct App {
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
         screen = Screen::Game;
+        if (litLoading) r.destroyImage(litLoading->image), litLoading.reset();
+        litFadingOut = false;
+    }
+
+    // Fade-out over: the loading screen of the target (LitWorld::loadingScreen; "<name>_<language G[0x10]>.bze", plain
+    // LOADING.bze for id 1) with the PC texel curve in Original Fidelity, as the TIM upload does.
+    void startLitLoading(int next) {
+        LitLoading l{.next = next, .G = play->world.G, .startMs = SDL_GetTicks()};
+        if (const int id = bb::game::LitWorld::loadingScreen(next, l.G[0x25])) {
+            const std::string stem = id == 1 ? "LOADING" : std::format("{}_{}", bb::game::LitWorld::levelName(id), l.G[0x10]);
+            bb::Texture t = bb::loadLitLoadingImage(game().root, stem);
+            if (const float gamma = s.texGamma(scene.pcTexGamma); gamma != 1.0f)
+                for (size_t i = 0; i < t.rgba.size(); ++i)
+                    if (i % 4 != 3) t.rgba[i] = uint8_t(std::floor(256.0f * std::pow(float(t.rgba[i]) / 256.0f, gamma)));
+            l.image = r.createImage(t);
+        }
+        litLoading = l;
     }
 
     // S[0x0a] request from level logic, as 0x407190 each tick. 6 = save (the "Do you want to save your game?" yes,
@@ -523,24 +588,46 @@ struct App {
         if (screen != Screen::Level) return;
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
-            if (a.chunk == 8 || ((play || tbPlay) && a.player)) continue; // templates are not placed; players are simulated
+            if (a.chunk == 8 || (play && a.player) || tbPlay) continue;  // templates are not placed; play mode simulates
             bb::animTick(scene.actorModels[a.model], actorAnim[i], a.anim, actorAnim[i].parts.empty() ? bb::AnimLoop : 0);
         }
-        if (play) {
-            bb::game::PadInput in;
-            if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
-            else if (!play->freeFly) in = bbtime::readPad(keys, pad);
-            in.help = in.help || std::exchange(helpKey, false);
-            play->tick(in);
+        if (play || litLoading) {
+            auto input = [&] {
+                bb::game::PadInput in;
+                if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
+                else if (!play->freeFly) in = bbtime::readPad(keys, pad);
+                in.help = in.help || std::exchange(helpKey, false);
+                return in;
+            };
+            if (litLoading) {  // the loading screen stays the presented frame while the target loads
+                if (!litLoading->loaded) {
+                    litLoading->loaded = true;
+                    const auto globals = litLoading->G;  // GAME_DATA persists across levels
+                    const std::string name = bb::game::LitWorld::levelName(litLoading->next);
+                    std::printf("level change -> %d %s (app tick %u; the loading screen is the frame before)\n",
+                                litLoading->next, name.c_str(), simTick);
+                    try { enterLevel(name, &globals); } catch (const std::exception& e) { play.reset(); playStatus = e.what(); }
+                    return;
+                }
+                if (bb::game::LitWorld::holdsLoading(litLoading->next) && SDL_GetTicks() - litLoading->startMs < 3000) return;
+                r.destroyImage(litLoading->image);
+                litLoading.reset();
+                if (!play) return;
+            }
+            if (litEnter) {  // 0x4065e0 after the load: the second unrendered tick (counter 5; loadUpdate stood for the
+                litEnter = false;  // load pass and counter 3), update 1 of the fade in, then tick + draw (counter 7)
+                play->tick(input());
+                play->world.fadeIn(1, 0x100);
+                play->world.fadeTick();
+            }
+            play->tick(input());
             if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice())
                 for (uint16_t b : play->world.sfx)
                     if (b < litSfx.size() && !litSfx[b].pcm.empty()) dev->playSfx(litSfx[b]);
             if (uint8_t& req = play->world.S[0x0a]; req) litRequest(req);
-            if (const int next = play->world.nextLevel; next >= 0) {  // level change request (GAMEPLAY §1.2)
-                const auto globals = play->world.G;                   // GAME_DATA persists across levels
-                const std::string name = bb::game::LitWorld::levelName(next);
-                std::printf("level change -> %d %s\n", next, name.c_str());
-                try { enterLevel(name, &globals); } catch (const std::exception& e) { play.reset(); playStatus = e.what(); }
+            if (const int next = play->world.nextLevel; next >= 0) {  // level change request: fade out first
+                if (!litFadingOut) litFadingOut = true, play->world.fadeOut(2, 0x100), play->world.fadeTick();
+                else if (!play->world.fade.mode) litFadingOut = false, startLitLoading(next);  // never drawn bright
                 return;
             }
             if (!play->freeFly) return;
@@ -552,6 +639,23 @@ struct App {
             if (autoplay2At < args.autoplay2.size()) p2 = args.autoplay2[autoplay2At++];
             else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
             tbPlay->tick(p1, p2);
+            // Reload 0x4014c0 (level GD+0, GAME_DATA kept) after 0x401910's fade-out: fadeOut(2, 0x100) on the request
+            // tick, the world keeps ticking, and the load follows the tick that reaches level 0 (16 frames; trace
+            // local/wine/tbnpc/hud/fade_trace.csv). enterLevel then fades in at speed 200.
+            if (bb::game::TbWorld& w = tbPlay->world; w.restart) {
+                if (!tbFadingOut) {
+                    tbFadingOut = true;
+                    w.fadeOut(2, 0x100);
+                    w.fadeTick();
+                }
+                if (w.fade.level > 0) return;
+                const int next = w.nextLevel >= 0 ? w.nextLevel : tbLevel;
+                const std::string name(bb::game::TbWorld::levelName(next));
+                std::printf("level change -> %d %s\n", next, name.c_str());
+                tbCarry = w.GD;
+                try { enterLevel(name); } catch (const std::exception& e) { tbPlay.reset(); playStatus = e.what(); }
+                return;
+            }
             if (!tbPlay->freeFly) return;
         }
         const bool* key = SDL_GetKeyboardState(nullptr);
@@ -641,6 +745,13 @@ struct App {
             break;
         }
         case Screen::Level: {
+            if (litLoading || litEnter) {  // loading screen (0x423bd0: the TIM stretched over the 4:3 client) / not drawn
+                if (litLoading && litLoading->image) {
+                    const auto v = bb::render::fitAspect(r.width(), r.height(), 4.0f / 3.0f);
+                    r.drawImage(litLoading->image, float(v.x), float(v.y), float(v.w), float(v.h), s.fidelity == Fidelity::Enhanced);
+                }
+                break;
+            }
             // Original Fidelity: no interpolation (the exe renders the tick's state); Enhanced: lerp between ticks.
             const bool lerp = s.fidelity == Fidelity::Enhanced;
             bb::render::Camera c = cam;
@@ -651,9 +762,14 @@ struct App {
                 c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
                 c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             }
-            poseActors(lerp, c.pos);
+            poseActors(lerp, c);
             r.drawScene(c, s);
-            if (play) drawOverlayText();  // game text (save prompt, hints): drawn with --no-hud too
+            if (play || tbPlay) {
+                drawOverlayText(play ? play->world.glyphs : tbPlay->world.glyphs);  // game text: drawn with --no-hud too
+                if (tbPlay) drawTbSprites();  // the HUD sheet sprites (game HUD)
+                if (const auto f = play ? play->world.fadeOverlay() : tbPlay->world.fadeOverlay(); f[3])
+                    r.drawRect(0, 0, W, H, f.data());  // fade (LiT also the A71 flash)
+            }
             if (play && !args.noHud) drawHud();
             if (tbPlay && !args.noHud) drawTbHud();
             if (scene.placeholder) {
@@ -672,7 +788,8 @@ struct App {
     }
 
     // Live actors (not spawn templates); in play mode Bugs at the simulated position and collected pickups hidden.
-    void poseActors(bool lerp, glm::vec3 eye) {
+    void poseActors(bool lerp, const bb::render::Camera& c) {
+        const glm::vec3 eye = c.pos;
         actorMeshes.clear();
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
@@ -690,9 +807,14 @@ struct App {
                               {0, v.yaw, v.lean}, a.scale, actorMeshes);
                 continue;
             }
-            if (play) continue;  // the simulation's actors are drawn below
+            if (play || tbPlay) continue;  // the simulation's actors are drawn below
             bb::poseActor(scene.actorModels[a.model], actorAnim[i], a.pos, a.rot, a.scale, actorMeshes);
         }
+        if (tbPlay)  // listed entities (view list 0x45eee0; the shadow pass 0x464480 draws from it too, I), not removed
+            for (const bb::game::TbActor& e : tbPlay->world.entities)
+                if (e.active && e.drawn() && e.model && !e.anim.parts.empty())
+                    bb::poseActor(*e.model, e.anim, {e.pos.x, e.pos.y, e.pos.z}, {e.pitch, e.yaw, e.roll},
+                                  {e.scale[0], e.scale[1], e.scale[2]}, actorMeshes);
         if (play)
             for (const bb::game::LitActor& a : play->world.actors) {
                 const int32_t m = play->world.defs[size_t(a.def)].model;
@@ -710,7 +832,7 @@ struct App {
             rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
             for (const bb::game::LitWorld::Shadow& s : play->world.shadows()) {
                 const size_t first = actorMeshes.size();
-                bb::poseActor(scene.actorModels[scene.shadowModels.at(s.entity)], rigid, {s.pos.x, s.pos.y, s.pos.z}, s.rot,
+                bb::poseActor(scene.actorModels[scene.templateModels.at(s.entity)], rigid, {s.pos.x, s.pos.y, s.pos.z}, s.rot,
                               {s.scale, 0x1000, s.scale}, actorMeshes);
                 for (size_t k = first; k < actorMeshes.size(); ++k)
                     for (bb::Vertex& v : actorMeshes[k].vertices) {
@@ -719,29 +841,51 @@ struct App {
                     }
             }
         }
+        if (play) poseHud(c, play->world.hud);
+        if (tbPlay) poseHud(c, tbPlay->world.hud);
         r.setActorMeshes(actorMeshes);
     }
 
-    // Simple text HUD (the original HUD actor 0x44acc0 draws carrots / health sprites: not ported).
+    // HUD (LiT 0x44b370 over LitWorld::hud, TB 0x463ef0 over TbWorld::hud): each shown element's template model on one
+    // identity part under its rotation / scale, at screen offset (x, y) of the 512x240 space and view depth z through
+    // the exe's projection (0x408910, focal 400 in 384-line units). Each vertex is rebuilt on this frame's camera ray
+    // at depth·k (k = 2·zNear/1000): the same pixels at any FOV, in front of the world (the exe forces the HUD's depth
+    // to the near plane).
+    void poseHud(const bb::render::Camera& c, std::span<const bb::game::HudItem> items) {
+        const glm::mat4 toWorld = glm::inverse(c.view());
+        const float f = 192.0f / std::tan(s.vfovRad() * 0.5f), k = s.zNear * 2.0f / 1000.0f;
+        bb::AnimState rigid;
+        rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
+        for (const bb::game::HudItem& h : items) {
+            const auto m = scene.templateModels.find(h.tmpl);
+            if (!h.shown || m == scene.templateModels.end()) continue;
+            const size_t first = actorMeshes.size();
+            bb::poseActor(scene.actorModels[m->second], rigid, {0, 0, 0}, h.rot, {h.scaleX, 0x1000, 0x1000}, actorMeshes);
+            for (size_t i = first; i < actorMeshes.size(); ++i)
+                for (bb::Vertex& v : actorMeshes[i].vertices) {
+                    const float d = std::max(float(h.z) - v.pos[2], 1.0f);  // PS1 z = -engine z
+                    const float sx = 400.0f * v.pos[0] / d + float(h.x), sy = -400.0f * v.pos[1] / d + float(h.y) * 1.6f;
+                    const float dd = d * k;
+                    const glm::vec4 w = toWorld * glm::vec4(sx * dd / f, -sy * dd / f, -dd, 1.0f);
+                    v.pos[0] = w.x, v.pos[1] = w.y, v.pos[2] = w.z;
+                }
+        }
+    }
+
+    // Debug notes (the game HUD is LitWorld::hud, posed by poseHud).
     void drawHud() {
-        const bb::game::LitWorld& w = play->world;
         const int sc = uiScale();
-        const float W = float(r.width()), H = float(r.height());
-        const std::string t = std::format("HEALTH {}/{}  CARROTS {:2}  GOLDEN {}  CLOCKS {}", w.health(), w.G[2],
-                                          w.carrots(), w.goldenCarrots(), w.clocks());
-        const float tw = float(t.size() * size_t(R::kGlyph * sc * 2)), x = (W - tw) * 0.5f, y = H - float(28 * sc);
-        r.drawRect(x - float(6 * sc), y - float(4 * sc), tw + float(12 * sc), float(24 * sc), kPanel);
-        r.drawText(x, y, sc * 2, t, kYellow);
-        if (!w.playerModel()) // no decoded actor model for Bugs: say so instead of drawing nothing silently
-            r.drawText(x, y - float(14 * sc), sc, "PLACEHOLDER: Bugs model not decoded", kRed);
-        if (play->freeFly) r.drawText(x, y - float(26 * sc), sc, "F5 FREE-FLY (debug camera)", kRed);
+        const float x = float(8 * sc), y = float(r.height()) - float(14 * sc);
+        if (!play->world.playerModel()) // no decoded actor model for Bugs: say so instead of drawing nothing silently
+            r.drawText(x, y, sc, "PLACEHOLDER: Bugs model not decoded", kRed);
+        if (play->freeFly) r.drawText(x, y - float(12 * sc), sc, "F5 FREE-FLY (debug camera)", kRed);
     }
 
     // Overlay text (LitWorld::glyphs, sprite list drawn by 0x44cfa0 / GL 0x40b130): each glyph's font TIM
     // (Scene::overlayFont) at its pen position, w x h in the exe's 512x240 2-D space (origin at the centre) on the
     // centred 4:3 view, texels times the palette's channel mask (0 white, 1 yellow, 2 green, 3 blue, 4 red, 5+
     // untinted). Original Fidelity applies the PC texel curve (Scene::pcTexGamma) like the 3-D textures.
-    void drawOverlayText() {
+    void drawOverlayText(const std::vector<bb::game::OverlayGlyph>& glyphs) {
         static constexpr uint8_t kPal[5][4] = {
             {255, 255, 255, 255}, {255, 255, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 0, 0, 255}};
         if (fontImages.size() != scene.overlayFont.size() || fontFidelity != s.fidelity) {
@@ -760,8 +904,9 @@ struct App {
         // 0x408100: position scale 0x4efb7c = view width / 512 (x), 0x4efb80 = height / 240 (y); sprite size scale
         // 0x4efb84 steps with the width scale: >= 2 -> 2, >= 1.5 -> 1.5, >= 1 -> 1, else 0.85 (640x480: 16x16 px).
         const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
-        const float ss = sx >= 2.0f ? 2.0f : sx >= 1.5f ? 1.5f : sx >= 1.0f ? 1.0f : 0.85f;
-        for (const bb::game::OverlayGlyph& g : play->world.glyphs) {
+        // Enhanced: glyphs follow the position scale so text stays legible and evenly spaced above ~768 px height.
+        const float ss = s.fidelity == Fidelity::Enhanced ? sx : sx >= 2.0f ? 2.0f : sx >= 1.5f ? 1.5f : sx >= 1.0f ? 1.0f : 0.85f;
+        for (const bb::game::OverlayGlyph& g : glyphs) {
             if (!g.glyph || g.glyph > fontImages.size() || !fontImages[g.glyph - 1u]) continue;
             const bb::Texture& tx = scene.textures[size_t(scene.overlayFont[g.glyph - 1u])];
             r.drawImage(fontImages[g.glyph - 1u], W * 0.5f + std::trunc(float(g.x) * sx), H * 0.5f + std::trunc(float(g.y) * sy),
@@ -772,23 +917,48 @@ struct App {
     void freeFont() {
         for (const uint32_t i : fontImages) r.destroyImage(i);
         fontImages.clear();
+        for (const auto& [key, i] : hudImages) r.destroyImage(i);
+        hudImages.clear();
     }
 
-    // TB text HUD: who has the camera/control, mode, call-friend readiness (the original sprite HUD is not ported).
+    // TB HUD sprites (TbWorld::hudSprites, POLY_FT4s of the Scene::hudSheet frames): top-left (x, y) in the 512x240
+    // space placed like the overlay text, w x h from texel (u, v) (the health bar crop) stretched by the space's scale
+    // (H/384 x H/240 on the centred 4:3 view). Crops are cached per {frame, u, v, w, h}; Original Fidelity applies the
+    // PC texel curve. Call after drawOverlayText (it frees the caches on a fidelity change).
+    void drawTbSprites() {
+        const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
+        const float gamma = s.texGamma(scene.pcTexGamma);
+        for (const auto& sp : tbPlay->world.hudSprites) {
+            if (!sp.shown || sp.frame >= scene.hudSheet.size() || scene.hudSheet[sp.frame] < 0) continue;
+            const int cw = sp.w + 1, ch = sp.h + 1;  // the prim spans texels u..u+w
+            auto [it, fresh] = hudImages.try_emplace({sp.frame, sp.u, sp.v, sp.w, sp.h}, 0u);
+            if (fresh) {
+                const bb::Texture& src = scene.textures[size_t(scene.hudSheet[sp.frame])];
+                bb::Texture t;
+                t.name = src.name;
+                t.width = uint32_t(std::max(0, std::min<int>(cw, int(src.width) - sp.u)));
+                t.height = uint32_t(std::max(0, std::min<int>(ch, int(src.height) - sp.v)));
+                t.rgba.resize(size_t(t.width) * t.height * 4);
+                for (uint32_t y = 0; y < t.height; ++y)
+                    std::copy_n(&src.rgba[((size_t(sp.v) + y) * src.width + size_t(sp.u)) * 4], size_t(t.width) * 4, &t.rgba[size_t(y) * t.width * 4]);
+                if (gamma != 1.0f)
+                    for (size_t i = 0; i < t.rgba.size(); ++i)
+                        if (i % 4 != 3) t.rgba[i] = uint8_t(std::floor(256.0f * std::pow(float(t.rgba[i]) / 256.0f, gamma)));
+                it->second = t.width && t.height ? r.createImage(t) : 0;
+            }
+            if (it->second)
+                r.drawImage(it->second, W * 0.5f + std::trunc(float(sp.x) * sx), H * 0.5f + std::trunc(float(sp.y) * sy),
+                            float(cw) * sx, float(ch) * sy, s.fidelity == Fidelity::Enhanced);
+        }
+    }
+
+    // TB debug notes (the game HUD is TbWorld::hud / hudSprites).
     void drawTbHud() {
-        const bb::game::TbWorld& w = tbPlay->world;
         const int sc = uiScale();
-        const float W = float(r.width()), H = float(r.height());
-        const char* who[2] = {"BUGS", "TAZ"};
-        const std::string t = w.twoPlayer()
-            ? std::format("2P  CAM {}  CALL {}", w.cam.flags & 0x80 ? (w.camFocus ? "TAZ" : "BUGS") : "MIDPOINT",
-                          w.cooldown >= 45 ? "READY" : "WAIT")
-            : std::format("{}  (R1/S SWITCH  L1/A CALL {})", who[w.focus()], w.cooldown >= 45 ? "READY" : "WAIT");
-        const float tw = float(t.size() * size_t(R::kGlyph * sc * 2)), x = (W - tw) * 0.5f, y = H - float(28 * sc);
-        r.drawRect(x - float(6 * sc), y - float(4 * sc), tw + float(12 * sc), float(24 * sc), kPanel);
-        r.drawText(x, y, sc * 2, t, kYellow);
-        if (!w.actors[0].model || !w.actors[1].model) r.drawText(x, y - float(14 * sc), sc, "PLACEHOLDER: actor model missing", kRed);
-        if (tbPlay->freeFly) r.drawText(x, y - float(26 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
+        const float x = float(8 * sc), y = float(r.height()) - float(14 * sc);
+        const bb::game::TbWorld& w = tbPlay->world;
+        if (!w.actors[0].model || !w.actors[1].model) r.drawText(x, y, sc, "PLACEHOLDER: actor model missing", kRed);
+        if (tbPlay->freeFly) r.drawText(x, y - float(12 * sc), sc, "F1 FREE-FLY (debug camera)", kRed);
     }
 
     void drawOverlay() {
@@ -798,7 +968,8 @@ struct App {
             "{} | {}\n{}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
             "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (GAMEPLAY 1.1)  alpha {:.2f}",
             r.glVendor(), r.glRenderer(), r.glVersion(), 1.0 / frameTime, frameTime * 1000.0, r.drawCalls(), r.width(),
-            r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy()) : "nearest",
+            r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy())
+                                                          : scene.game == bb::GameId::LostInTime ? "linear" : "nearest",
             enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", glm::degrees(s.vfovRad()),
             !enh && s.pillarbox ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
         if constexpr (requires { r.diagnostics(); }) text += std::format("\n{}", r.diagnostics());

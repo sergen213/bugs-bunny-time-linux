@@ -267,7 +267,8 @@ void arca(const fs::path& dir) {
         assert(run() == run());
     }
     {  // ARCA01 entities: guard 267 (template 265) patrols, spots a player in front within 2500 and attacks (runtime
-       // capture local/wine/tbnpc/B_guard_attack.pkl.gz: 357 522 -> 497 504 502 501 364; Bugs hurt, health 6 -> 5).
+       // capture local/wine/tbnpc/B_guard_attack.pkl.gz: 357 522 -> 497 504 502 501 364 435 502 501 364; Bugs hurt by
+       // the thrown template 401, health 6 -> 5).
         Level f = load(dir / "ARCA01.bze");
         TbWorld& w = f.w;
         TbActor* g = nullptr;
@@ -278,29 +279,68 @@ void arca(const fs::path& dir) {
         TbActor& b = w.actors[0];
         b.pos = {g->pos.x + 1200, g->pos.y - 30, g->pos.z};  // as the capture: Bugs poked 1200 in front of it
         g->yaw = 1024;                                         // facing +x
-        std::vector<uint16_t> seen;
-        int hurt = -1;
+        std::vector<std::pair<uint16_t, int>> seen;            // guard state, entry tick
+        int thrown = -1, gone = -1, hit = -1;
+        std::vector<V3> path;                                  // the thrown 401 per tick from its spawn
         for (int i = 0; i < 300; ++i) {
             w.tick({});
-            if (g->rec() && (seen.empty() || seen.back() != g->rec()->id)) seen.push_back(g->rec()->id);
+            if (g->rec() && (seen.empty() || seen.back().first != g->rec()->id)) seen.emplace_back(g->rec()->id, i);
+            const TbActor* p = nullptr;
+            for (const TbActor& e : w.entities)
+                if (e.id == 401) p = &e;
+            if (p && thrown < 0) thrown = i;
+            if (p && gone < 0 && thrown >= 0) path.push_back(p->pos);
+            if (!p && thrown >= 0 && gone < 0) gone = i;
+            if (hit < 0 && b.hp < 6) hit = i;
         }
         std::string s;
-        for (uint16_t id : seen) s += " " + std::to_string(id);
-        std::printf("  guard 267 states:%s\n", s.c_str());
-        // Capture B: 357 522 497 504 502 501 364 (notice, turn, wind up, throw) — Verified; then the original goes
-        // 435 (its thrown template-401 projectile, V 0x80100000, is not ported): Contradicted from there on.
-        const std::vector<uint16_t> want = {357, 522, 497, 504, 502, 501, 364};
-        assert(std::ranges::search(seen, want).begin() != seen.end());
+        for (auto [id, at] : seen) s += std::format(" {}@{}", id, at);
+        std::printf("  guard 267 states:%s; 401 thrown @%d, gone @%d, Bugs hurt @%d (health %d)\n", s.c_str(), thrown, gone,
+                    hit, b.hp);
+        // Capture B per tick: 364 @55, its block 364 spawns 401 on anim frame 7 (@71) and sends it event 0x101 ->
+        // 395 (the first-tick event 2 only applies without a state); 395 (flagsB 0x20000) follows its TOD 0xa00
+        // point (0x45643b carry +0x58: next position = last tick's attach point) out and back to the hand and
+        // removes itself on its anim's last frame (V 0x400) @128; hitting Bugs ran its program (block 397: S[0x7a]
+        // = 1), so on 364's last frame the guard picks event 300 -> 435 @133, 502 @181, 501 @182, 364 @188.
+        const std::vector<uint16_t> want = {357, 522, 497, 504, 502, 501, 364, 435, 502, 501, 364};
+        std::vector<uint16_t> ids;
+        for (auto [id, at] : seen) ids.push_back(id);
+        const auto m = std::ranges::search(ids, want);
+        assert(m.begin() != ids.end());
+        const int t364 = seen[size_t(m.begin() - ids.begin()) + 6].second;
+        const auto at = [&](size_t k) { return seen[size_t(m.begin() - ids.begin()) + k].second - t364; };
+        assert(thrown - t364 == 16 && gone - t364 == 73 && at(7) == 78 && at(8) == 126 && at(9) == 127 && at(10) == 133);
+        // Flight (B, guard yaw 1006; ticks 71..127, the removal tick unseen): per-tick dy exact, dx along the facing
+        // within 1 (ours yaw 1024: 104 where B has 104 · sin(1006) = 103.96 truncated).
+        const int dyB[] = {0, 0, -33, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, -1, -2, -3, -3, -4, -5, -5, -6, -6, -6, -6, -6, -6, -6,
+                           -6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -3, -2, -1, 0, 0, 1, 2, 2, 4, 5, 6, 7, 8, 10, 11, 13, 14,
+                           8, 0};
+        const int dxB[] = {0, 0, 103, 110, 105, 100, 96, 91, 86, 81, 76, 72, 67, 63, 58, 54, 50, 45, 41, 37, 33, 29, 25, 21,
+                           17, 12, 8, 4, 1, -2, -7, -13, -19, -24, -29, -33, -38, -42, -46, -50, -54, -57, -60, -63, -66,
+                           -69, -71, -73, -74, -76, -77, -79, -79, -80, -80, -19};
+        assert(path.size() == std::size(dyB) + 1);
+        for (size_t k = 0; k < std::size(dyB); ++k)
+            assert(path[k + 1].y - path[k].y == dyB[k] && std::abs(path[k + 1].x - path[k].x - dxB[k]) <= 1);
+        // Both throws hit Bugs (B: health 6 -> 5 @83, -> 4 @221); the hit ticks depend on where Bugs stands.
+        assert(hit > thrown && hit < gone && b.hp == 4 && w.S[0x7a] == 1);
         // Melee (capture C: Bugs poked next to it -> 502 394, Bugs hurt state 208, health -1, 60-tick flash).
         b.pos = {g->pos.x + rotY(g->yaw, 0, 0, 300).x, g->pos.y - 30, g->pos.z + rotY(g->yaw, 0, 0, 300).z};
+        const int bugsHp = b.hp;
+        int hurt = -1;
         for (int i = 0; i < 200 && hurt < 0; ++i) {
             w.tick({});
-            if (b.hp < 6) hurt = i;
+            if (b.hp < bugsHp) hurt = i;
         }
         std::printf("  melee: Bugs health %d after %d ticks (state %u, guard %u)\n", b.hp, hurt, b.rec()->id, g->rec()->id);
-        assert(b.hp == 5 && w.GD[0xa5] == 5 && (b.f28 & 0x200) && w.flash[0] >= 0x40);
-        // Taz spin (states 135/136: contact damage 1 vs players and others) into the guard once it faces a player
-        // (502, flagsA 0x10000 = vulnerable to player hits; the patrol states are not) costs it one health.
+        assert(b.hp == bugsHp - 1 && w.GD[0xa5] == b.hp && (b.f28 & 0x200) && w.flash[0] >= 0x40);
+        // Taz spin into the facing guard (oracle local/wine/tbnpc/F2_taz_spin_rng.pkl.gz, RUNNER=wine, script
+        // spin_rng_capture.py there; F_taz_spin.pkl.gz is the same run without seeds): Taz poked 173 in front of the
+        // guard on its 502 tick, □ held 40 ticks, rand() (0x46afe0) replayed from the traced seed per tick. The spin
+        // reaches the guard through Taz's TOD 0xa00 probe once the spin anim set it (state entry clears +0x84, so the
+        // idle anim's hand point is not used on the first spin tick), not through mover contacts (neither side is in
+        // the other's 0x447490 list); the hit runs the guard's block 377 -> event 0x12a -> 433, which is not
+        // vulnerable, so the guard keeps its 5 health; its melee 394 then hurts Taz (190). 394's last frame draws
+        // S[0x1fe] = rand() % 2 (block 404): 0 -> 435 (F2), 1 -> 500 (F); 364 throws 401, which hurts Taz again.
         Level h = load(dir / "ARCA01.bze");
         TbWorld& w2 = h.w;
         for (TbActor& e : w2.entities)
@@ -314,13 +354,161 @@ void arca(const fs::path& dir) {
         for (int i = 0; i < 300 && !(g->rec()->id == 502); ++i) w2.tick({});
         assert(g->rec()->id == 502);
         const int hp0 = g->hp;
-        for (int i = 0; i < 60 && g->hp == hp0; ++i) {
-            const V3 front = rotY(g->yaw, 0, 0, 150);
-            if (i == 0) t.pos = {g->pos.x + front.x, t.pos.y, g->pos.z + front.z}, w2.setState(t, 136), t.stateTicks = 0;
-            w2.tick(keys(PadSquare));
+        const V3 front = rotY(g->yaw, 0, 0, 173);
+        t.pos = {g->pos.x + front.x, g->pos.y, g->pos.z + front.z};
+        const char* draws =  // rand() calls per tick (F2 seeds), from seed 0xa2b04f55 before the press tick
+            "1325141212152514121413243212141212352512123444122212132332341614121212141432131425123412121212323234121632"
+            "5414122324252526141432141213321432121345252233421322351412123234121212161224123414142343432323321214123412"
+            "1616321215122512542738442514";
+        assert(std::strlen(draws) == 240);
+        uint32_t seed = 0xa2b04f55;
+        std::vector<uint16_t> gs, ts;
+        for (int i = 0; i < 240; ++i) {
+            w2.rng.seed = seed;
+            w2.tick(keys(i < 40 ? PadSquare : 0));
+            for (int k = draws[i] - '0'; k > 0; --k) seed = seed * 214013u + 2531011u;
+            gs.push_back(g->rec()->id), ts.push_back(t.rec()->id);
         }
-        // Open (GAMEPLAY_STATUS TB "combat"): the spin does not yet land through the simplified actor contacts.
-        std::printf("  Taz spin: guard health %d -> %d, state %u (Taz state %u) [open]\n", hp0, g->hp, g->rec()->id, t.rec()->id);
+        auto runs = [](std::initializer_list<std::pair<uint16_t, int>> r) {
+            std::vector<uint16_t> v;
+            for (auto [id, n] : r) v.insert(v.end(), size_t(n), id);
+            return v;
+        };
+        // The guard's draws land in its own register (+0x126 = S[0x1fe], 0x4d269e); its second pick at 364's end (tick
+        // 177: oracle 6 rand() calls, ours 5, the Taz fidget draws already differ) takes another call index, so the
+        // guard is compared through tick 176.
+        const auto gWant = runs({{394, 2}, {433, 17}, {502, 1}, {394, 24}, {435, 48}, {502, 1}, {501, 6}, {364, 78}});
+        // Taz: the oracle's idle fidget picks (20/21/22 from tick 48) come from rand() draws that follow the sounds and
+        // effects the original draws first in the same tick (2-5 calls per tick against our 0-1), so its states are
+        // compared through tick 47 and for the second hit, the thrown 401 @120 like the oracle.
+        const auto tWant = runs({{135, 6}, {136, 12}, {140, 5}, {190, 13}, {10, 12}});
+        auto show = [](const std::vector<uint16_t>& v) {
+            std::string r;
+            for (size_t k = 0; k < v.size(); ++k)
+                if (!k || v[k] != v[k - 1]) r += std::format(" {}@{}", v[k], k);
+            return r;
+        };
+        const bool tazOk = std::equal(tWant.begin(), tWant.end(), ts.begin()) && ts[119] != 190 &&
+                           std::all_of(ts.begin() + 120, ts.begin() + 133, [](uint16_t s) { return s == 190; }) && ts[133] != 190;
+        const bool gOk = std::equal(gWant.begin(), gWant.end(), gs.begin());
+        std::printf("  Taz spin: guard health %d -> %d, Taz %d; guard%s (%s), Taz%s (%s the oracle)\n", hp0, g->hp, t.hp,
+                    show(gs).c_str(), gOk ? "match" : "DIFFER", show(ts).c_str(), tazOk ? "match" : "DIFFER from");
+        assert(gOk && tazOk && g->hp == hp0 && t.hp == 4);
+    }
+    {  // item pickup by touch = oracle local/wine/tbnpc/H_item_pickup.pkl.gz (RUNNER=wine, item_capture.py there): Bugs
+       // poked 150 beside item gdBit 473 (its box comes from TOD packet 0x900, (-107,0,-17)-(107,-215,19) r 240, not
+       // tags 0x1b/0x1c). Next tick: Bugs' contact gives it +0x20 0x80, its program (global block 10026) runs at once:
+       // GD+0x5a/+0x6c/+0x84 = 1, collected bit GD+0x22f 2, S[0xa8] 1, state 2nd record, +0x82 1; 31 ticks later the
+       // 3rd record, rising 150 per tick from the next tick, removed (+0x20 0x2000) 7 ticks after that at y -1105.
+        Level f = load(dir / "ARCA01.bze");
+        TbWorld& w = f.w;
+        TbActor* it = nullptr;
+        for (TbActor& e : w.entities)
+            if (e.gdBit == 473) it = &e;
+        assert(it);
+        for (int i = 0; i < 30; ++i) w.tick({});
+        std::printf("  item 473 box %d %d %d %d %d %d r %u\n", it->box[0], it->box[1], it->box[2], it->box[3], it->box[4],
+                    it->box[5], it->radius);
+        assert(it->box == (std::array<int16_t, 6>{-107, 0, -17, 107, -215, 19}) && it->radius == 240);
+        const auto st = [&]() { return int(it->state); };
+        const int s0 = st();
+        w.actors[0].pos = {it->pos.x + 150, -10, it->pos.z};
+        std::array<uint8_t, 0x300> gd0 = w.GD;
+        const uint8_t s168 = w.S[0xa8];
+        w.tick({});
+        std::printf("  item 473: state %d -> %d ticks %u GD", s0, st(), it->stateTicks);
+        for (size_t i = 0; i < gd0.size(); ++i)
+            if (gd0[i] != w.GD[i]) std::printf(" +%#zx %u->%u", i, gd0[i], w.GD[i]);
+        std::printf(" S[0xa8] %u->%u state id %u\n", s168, w.S[0xa8], it->rec()->id);
+        assert(st() == s0 + 1 && it->stateTicks == 1 && w.GD[0x5a] == 1 && w.GD[0x6c] == 1 && w.GD[0x84] == 1 &&
+               w.GD[0x22f] == 2 && w.S[0xa8] == 1);
+        std::vector<int> ys;
+        int removed = -1;
+        for (int i = 1; i <= 40 && removed < 0; ++i) {
+            w.tick({});
+            if (i == 31) assert(st() == s0 + 2);
+            if (i < 31) assert(st() == s0 + 1);
+            ys.push_back(it->pos.y);
+            if (it->f20 & 0x2000) removed = i;
+        }
+        std::printf("  item 473 removed %d ticks after the pickup at y %d\n", removed, it->pos.y);
+        assert(removed == 38 && it->pos.y == -1105 && ys[31] == -205 && ys[36] == -955);
+    }
+    {  // HUD coin counter (0x463170 slot 2 = GD+0x58+GD[0xa9], slide record 4): the item-473 pickup slides the coin and
+       // its digits in from x+120 with overshoot, holds 60 ticks, slides out = oracle local/wine/tbnpc/hud/slide.csv
+       // (RUNNER=wine, slide_capture.py: slide x per tick from the pickup tick; 999 = off screen, flag 0x200 clear).
+        Level f = load(dir / "ARCA01.bze");
+        TbWorld& w = f.w;
+        w.GD[0] = 28;     // ARCA01 (the app sets GD+0 on load)
+        w.GD[0xa9] = 20;  // oracle state: set by the ARCA01 intro trigger zone (chunk 09, block 10), not ported
+        TbActor* it = nullptr;
+        for (TbActor& e : w.entities)
+            if (e.gdBit == 473) it = &e;
+        for (int i = 0; i < 30; ++i) w.tick({});
+        assert(!w.hud[2].shown && !w.hudSprites[11].shown);  // nothing at idle
+        w.actors[0].pos = {it->pos.x + 150, -10, it->pos.z};
+        std::vector<int> xs, digit;
+        for (int i = 0; i < 100; ++i) {
+            w.tick({});
+            xs.push_back(w.hud[2].shown ? w.hud[2].x - 215 : 999);
+            if (i == 40) digit = {w.hudSprites[11].shown, w.hudSprites[11].frame, w.hudSprites[11].x, w.hudSprites[11].y};
+        }
+        const int in[] = {86, 52, 18, -16, -41, -57, -64, -62, -55, -43, -26, -4, 16, 27, 29, 22, 10, -4, -9, -5, 1, 2, -3};
+        const int out[] = {-12, -19, -21, -18, -10, 3, 21, 44, 72, 105};
+        std::vector<int> want(100, 999);
+        std::ranges::copy(in, want.begin());
+        std::fill(want.begin() + 23, want.begin() + 84, 0);  // 60-tick hold (0x3c) once at rest
+        std::ranges::copy(out, want.begin() + 84);
+        std::printf("  hud coin: slide in %d ticks, out at %d, gone at %d; digit %d frame %d at (%d, %d)\n", 23,
+                    int(std::ranges::find(xs, -12) - xs.begin()), int(std::ranges::find(xs, 999) - xs.begin()), digit[0], digit[1],
+                    digit[2], digit[3]);
+        assert(xs == want);
+        assert(digit[0] && digit[1] == 1);  // GD+0x6c = 1
+    }
+    {  // level-change fade (0x401910 / 0x4018a0, 0x464ef0) = oracle local/wine/tbnpc/hud/fade_trace.csv (counter +2 per
+       // tick): request tick fadeOut(2, 0x100) + one step = level 3840; the world keeps ticking, level -256 per tick to 0
+       // (dark 3840) on the 16th frame, then the load; there fadeIn(1, 200): dark 4096, 3896 .. 96, mode 0 at counter 45.
+        Level f = load(dir / "ARCA01.bze");
+        TbWorld& w = f.w;
+        for (int i = 0; i < 5; ++i) w.tick({});
+        w.fadeOut(2, 0x100);
+        w.fadeTick();
+        std::vector<int> lv{w.fade.level}, dk{w.fade.dark};
+        while (w.fade.level > 0) w.tick({}), lv.push_back(w.fade.level), dk.push_back(w.fade.dark);
+        assert(lv.size() == 16 && lv.front() == 3840 && lv.back() == 0 && dk.front() == 0 && dk.back() == 3840);
+        for (size_t k = 0; k < lv.size(); ++k) assert(lv[k] == 3840 - 256 * int(k) && dk[k] == 256 * int(k));
+        Level g = load(dir / "ARCA01.bze");
+        g.w.fadeIn(1, 200);
+        std::vector<int> in;
+        for (int i = 0; i < 22; ++i) g.w.tick({}), in.push_back(g.w.fade.dark);
+        for (int k = 0; k < 21; ++k) assert(in[size_t(k)] == 4096 - 200 * k);  // counters 3 .. 43
+        assert(in[21] == 0 && g.w.fade.mode == 0 && g.w.fade.level == 4096);  // counter 45
+        std::puts("  fade: out 16 frames 3840..0, in 4096..96 then mode 0 (oracle)");
+    }
+    {  // RETRY (level 5) = oracle local/wine/tbnpc/retry/G0..G2: Daffy's close-up (instance 0x77: states 3 -> 348 ->
+       // 394) spawns the controller 0xe3 (its register S[0x1fe] is 0: the players' block left 6 in theirs), which fades
+       // out, respawns Daffy, fades in and shows "GAME OVER / DO YOU WANT TO CONTINUE? YES NO" (S30 0x7d / 0x7e); left /
+       // right set S[0x7a] 1 / 2, ✕ on YES with era GD+0xf6 = 0 loads GRANNY (4).
+        Level f = load(dir / "RETRY.bze");
+        TbWorld& w = f.w;
+        w.GD[0] = 5;
+        w.fadeIn(1, 200);
+        int shown = -1;
+        for (int i = 0; i < 400 && shown < 0; ++i) {
+            w.tick({});
+            if (!w.glyphs.empty()) shown = i;
+        }
+        std::string text;
+        for (const OverlayGlyph& g : w.glyphs) text += char(g.ch);
+        std::printf("  RETRY prompt @%d: '%s' S[0x7a] %u fade %u\n", shown, text.c_str(), w.S[0x7a], w.fade.mode);
+        assert(shown > 0 && text == "gameoverdoyouwanttocontinue?yesno" && w.S[0x7a] == 1);
+        auto press = [&](uint16_t b) { w.tick(keys(b)), w.tick({}), w.tick({}); };
+        press(PadRight);
+        assert(w.S[0x7a] == 2);
+        press(PadLeft);
+        assert(w.S[0x7a] == 1 && !w.restart);
+        press(PadCross);
+        assert(w.restart && w.nextLevel == 4 && TbWorld::levelName(4) == "GRANNY");
     }
     {  // death and respawn: the focus at 1 health dies (state 382), the partner takes over (GD+0xa2 1); then the
        // partner dies too -> a life is spent and both return at the checkpoint with 6 health (0x44ea50).
@@ -343,6 +531,15 @@ void arca(const fs::path& dir) {
             if (k == 0) assert((w.GD[0xa2] & 1) && w.focus() == 1);
         }
         assert(w.GD[0xa0] == 2 && !(w.GD[0xa2] & 3) && w.actors[0].hp == 6 && w.actors[1].hp == 6);
+        // No life left: GD+0 = 5 and the reload flag 0x4d593a (0x44ea50); the app then loads RETRY (level 5), whose
+        // "Game over / continue?" screen the original shows (oracle: local/wine/tbnpc/retry/G0..G2, YES -> GRANNY).
+        w.GD[0xa0] = 0;
+        for (int k = 0; k < 2 && !w.restart; ++k) {
+            TbActor& p = w.actors[size_t(w.focus())];
+            p.hp = 1, p.dmgIn = 1, p.f20 |= 0x4000000, p.hitTr = 3;
+            for (int i = 0; i < 200 && !w.restart; ++i) w.tick({});
+        }
+        assert(w.restart && w.nextLevel == 5 && TbWorld::levelName(5) == "RETRY" && w.GD[0xa0] == 3);
     }
     std::puts("tb ARCA01 ok");
 }

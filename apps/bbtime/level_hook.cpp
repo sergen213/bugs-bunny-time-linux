@@ -3,6 +3,7 @@
 #include "bb/level.h"
 #include "bb/tb_actor.h"
 #include "bb/tb_level.h"
+#include "bb/tim.h"
 
 #include <algorithm>
 #include <array>
@@ -155,6 +156,18 @@ Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& l
         Scene s = placeholderScene(game, level);
         s.notes.push_back(std::format("PLACEHOLDER - not original data: decode failed: {}", e.what()));
         return s;
+    }
+}
+
+Texture loadLitLoadingImage(const fs::path& gameRoot, const std::string& stem) {
+    const fs::path file = findPath(gameRoot, {"Datas", "bze", stem + ".bze"});
+    if (file.empty()) return {};
+    try {
+        const BzeFile bze = loadBze(file);
+        const int i3 = bze.find(3);
+        return i3 < 0 ? Texture{} : decodeTim(bze.payload(size_t(i3)), 0, stem);
+    } catch (const std::exception&) {
+        return {};
     }
 }
 

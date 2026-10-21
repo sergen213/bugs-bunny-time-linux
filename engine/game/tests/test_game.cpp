@@ -258,11 +258,66 @@ std::vector<V3> replayL01a(const BzeFile& bze, const Scene& scene) {
     return trace;
 }
 
+// HUD actor 0x44acc0 (Wine, local/wine/compare/lithud/w6b/trace.csv): the load-time update shows every counter at
+// z 1200 (carrots 00 = templates 486 / 472 / 472, golden 03 and clocks 03 = G[G[0xb6]] / G[G[0xb8]] = G[0], three
+// full health carrots); after the 60-tick hold they fly out from counter 121 (tick 59): z 1700, 2325, 3106, 4082,
+// 5302, 6827, then hidden. Fades 0x44bef0: the forced L01A -> L01B change (dark 0, 256 .. 3840 over 16 ticks, then
+// mode 0), the fade in after the load (update 1 then dark 3840 .. 256) and the A71 flash 0x41 / 0x400 (dark 4096,
+// 3072, 2048, 1024, 0 then mode 0x42: 0, 1024, 2048, 3072, then off) all match the trace tick for tick.
+void testHud(const BzeFile& bze, const Scene& scene) {
+    for (uint16_t t : {472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 485, 486, 487, 489, 490, 491})
+        assert(scene.templateModels.contains(t) && !scene.actorModels[scene.templateModels.at(t)].meshes.empty());
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.level = 4;
+    w.loadUpdate();
+    const size_t slots[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 14, 15, 16};
+    const uint16_t tmpl[] = {486, 472, 472, 485, 472, 475, 487, 472, 475, 489, 489, 489};
+    for (size_t i = 0; i < std::size(slots); ++i)
+        assert(w.hud[slots[i]].shown && w.hud[slots[i]].tmpl == tmpl[i] && w.hud[slots[i]].z == 1200);
+    assert(w.hud[0].x == -228 && w.hud[0].y == -80 && w.hud[9].x == 228 && w.hud[9].y == 90);
+    const int32_t out[] = {1700, 2325, 3106, 4082, 5302, 6827};
+    for (int t = 1; t <= 65; ++t) {
+        w.tick({});
+        const int32_t z = w.hud[0].z;  // tick t = counter 2t + 3
+        if (t < 59) assert(z == 1200);
+        else if (t < 65) assert(z == out[t - 59] && w.hud[0].shown);
+        else assert(!w.hud[0].shown);
+    }
+    w.fadeOut(2, 0x100);  // the level-change fade (and A70 X=1)
+    for (int k = 0; k < 16; ++k) {
+        w.fadeTick();
+        assert(w.fade.mode == 2 && w.fade.dark == k * 256);
+    }
+    w.fadeTick();
+    assert(w.fade.mode == 0 && w.fade.dark == 0 && w.fadeOverlay()[3] == 0);
+    w.fadeIn(1, 0x100);  // after the load (and A70 X=0)
+    for (int k = 0; k < 16; ++k) {
+        w.fadeTick();
+        assert(w.fade.mode == 1 && w.fade.dark == 4096 - k * 256);
+    }
+    w.fadeTick();
+    assert(w.fade.mode == 0 && w.fade.dark == 0);
+    w.act({.act = 69, .x = 255, .y = 2}, nullptr);
+    w.act({.act = 71}, nullptr);
+    const int16_t flash[] = {4096, 3072, 2048, 1024, 0, 0, 1024, 2048, 3072};
+    for (int k = 0; k < 9; ++k) {
+        w.fadeTick();
+        assert(w.fade.dark == flash[k] && w.fade.mode == (k < 4 ? 0x41 : 0x42));
+    }
+    w.fadeTick();
+    assert(w.fade.mode == 0);
+    w.fadeIn(0x41, 0x400);
+    for (int k = 0; k < 5; ++k) w.fadeTick();
+    assert((w.fadeOverlay() == std::array<uint8_t, 4>{0, 0, 255, 255}));  // full A69 colour (0, 0, 255)
+    assert(LitWorld::loadingScreen(5, 0) == 106 && LitWorld::levelName(106) == "L_SARUN" && !LitWorld::holdsLoading(5));
+    assert(LitWorld::loadingScreen(3, 2) == 0x5f && LitWorld::holdsLoading(0x45));
+}
+
 // Bugs' ground shadow (0x44bb50): template entity 3 (tag 0x46) = one 200 x 200 subtractive quad textured 133; on flat
 // ground it lies at the ground height with scale 0x1000 and Bugs' yaw; in the air it shrinks 4/4096 per unit of height.
 void testShadow(const BzeFile& bze, const Scene& scene) {
-    assert(scene.shadowModels.contains(3));
-    const ActorModel& sm = scene.actorModels[scene.shadowModels.at(3)];
+    assert(scene.templateModels.contains(3));
+    const ActorModel& sm = scene.actorModels[scene.templateModels.at(3)];
     assert(sm.meshes.size() == 1 && sm.meshes[0].mesh.blend == Blend::Subtract && sm.objects[0].size() == 4);
     LitWorld w = LitWorld::load(bze, &scene);
     w.loadUpdate();
@@ -377,6 +432,95 @@ void testPushL01a(const BzeFile& bze, const Scene& scene) {
                block()->pos == (V3{a.blockX, -640, 10430}) && (block()->flags14 & 0x8000));
     }
     std::printf("L01A pushable block: push 217-301 matches the original (block x 25215 -> 25610)\n");
+}
+
+// L02A1's chain (type 8 at (13039, -5569, 23412), 0x43efc0) and Bugs on it vs the original (RUNTIME_REFERENCE §13,
+// local/wine/compare/litrope/r3.csv, Proton-GE /b09): Bugs poked onto the jetty at counter 301 (the chain starts
+// swinging once active), into the air at the chain at 601; falls (14), grabs it at 605 (31, local height 700), rides
+// the swing, R1 681-685 pumps the amplitude 128 -> 137, ↑ 701-739 climbs 32/tick to the top limit (local 284), ↓
+// 761-799 climbs down 31/tick, ✕ 821-841 jumps off (state 7, released at the jump start, rope yaw kept) and the
+// descending arc re-grabs it at 843 (local 532). Every counter 603-999 of Bugs' position / yaw / state / flags14 /
+// local height and the chain's pitch / phase / amplitude / radius² matched; the rows below are a selection.
+void testRopeL02a1(const std::filesystem::path& file) {
+    const BzeFile bze = loadBze(file);
+    const Scene scene = buildLitScene(bze, "L02A1");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfxChannels = 24;
+    w.loadUpdate();
+    size_t ri = 0;
+    while (ri < w.actors.size() && w.actors[ri].type != 8) ++ri;
+    assert(ri < w.actors.size());
+    struct At { int cnt; V3 bugs; int16_t yaw; uint16_t state; uint32_t f14; int32_t local; int16_t pitch; int32_t phase, amp; uint32_t r2; };
+    const At want[] = {{321, {13039, -3920, 22900}, 0, 1, 2, 0, -92, 320, 128, 31238},
+                       {603, {13039, -4869, 23412}, 0, 14, 0x200, 0, 120, 164, 128, 52194},
+                       {605, {13066, -4881, 23536}, 141, 31, 4, 700, 123, 168, 128, 63110},
+                       {661, {13037, -4870, 23406}, 141, 31, 4, 700, -14, 280, 128, 15665},
+                       {685, {13015, -4879, 23303}, 141, 31, 4, 700, -112, 328, 137, 53489},
+                       {727, {13030, -5288, 23372}, 141, 32, 4, 284, -86, 52, 128, 53489},
+                       {739, {13034, -5286, 23391}, 141, 32, 4, 284, -40, 76, 128, 30754},
+                       {799, {13074, -4713, 23575}, 141, 33, 4, 873, 125, 196, 128, 68651},
+                       {821, {13061, -4703, 23513}, 141, 7, 4, 873, 71, 240, 128, 37322},
+                       {823, {13061, -4742, 23513}, 141, 7, 1, 873, 64, 244, 128, 45218},
+                       {841, {13061, -5037, 23513}, 141, 7, 1, 873, -14, 280, 128, 17058},
+                       {843, {13036, -5038, 23400}, 141, 31, 4, 532, -23, 284, 128, 15642},
+                       {999, {13053, -5042, 23479}, 141, 31, 4, 532, 78, 236, 128, 45482}};
+    const std::pair<int, uint16_t> pads[] = {{681, PadR1}, {687, 0}, {701, PadUp}, {741, 0}, {761, PadDown}, {801, 0}, {821, PadCross}, {843, 0}};
+    uint16_t buttons = 0;
+    size_t k = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        for (const auto& [c, b] : pads)
+            if (c == cnt) buttons = b;
+        if (cnt == 303) w.p.pos = {13039, -3920, 22900}, w.p.yaw = 0;
+        if (cnt == 603) w.p.pos = {13039, -4869, 23412}, w.p.yaw = 0;
+        w.tick({.buttons = buttons});
+        if (cnt != want[k].cnt) continue;
+        const At& a = want[k++];
+        const LitActor& r = w.actors[ri];
+        assert(w.p.pos == a.bugs && w.p.yaw == a.yaw && w.p.state == a.state && w.p.flags14 == a.f14 &&
+               (a.f14 != 4 || (w.p.rope == int(ri) && w.p.local.y == a.local)) && r.ropePitch == a.pitch &&
+               r.ropePhase == a.phase && r.ropeAmp == a.amp && r.ropeSeg == 332 && r.radius2 == a.r2);
+    }
+    std::printf("L02A1 chain: grab, swing, pump, climb, jump off and re-grab (counters 603-999) match the original\n");
+}
+
+// L01D1's float column (type 14 at (21040, -2000, 7280), flags8 0x101000, state 2 until S[45] & 1) vs the original
+// (RUNTIME_REFERENCE §13, local/wine/compare/litswim/s2.csv): S[45] = 1 poked after counter 351 (state 1 -> 142, its
+// TOD box radius 540..584, top -2000 then -1280), Bugs poked into it at 401: float state 25 (flags14 0x404), plunge
+// 6/tick decaying over 16 ticks, lift to the column top with the random bob, ✕ 601-619 water jump (26: H80/60 at
+// 629), re-entry from above at 665 (plunge 86). The oracle's other actors draw rand() differently from ours, so its
+// seed is replayed before the four ticks where Bugs draws (entry 403 / 665, bob amplitude 497 / 579). Every counter
+// 403-759 matched (one torn oracle row at 475); the rows below are a selection.
+void testFloatL01d1(const std::filesystem::path& file) {
+    const BzeFile bze = loadBze(file);
+    const Scene scene = buildLitScene(bze, "L01D1");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfxChannels = 24;
+    w.loadUpdate();
+    size_t gi = 0;
+    while (gi < w.actors.size() && !(w.actors[gi].flags8 & 0x100000)) ++gi;
+    assert(gi < w.actors.size() && w.actors[gi].pos == (V3{21040, -2000, 7280}));
+    struct At { int cnt; int32_t y; uint16_t state; uint32_t f14; };
+    const At want[] = {{403, -2094, 25, 0x404}, {435, -2045, 25, 0x404}, {439, -2053, 25, 0x404}, {507, -3154, 25, 0x404},
+                       {581, -3269, 25, 0x404}, {601, -3209, 26, 0x404}, {629, -3305, 26, 1},     {647, -3881, 26, 9},
+                       {665, -3185, 25, 0x404}, {695, -2362, 25, 0x404}, {759, -3200, 25, 0x404}};
+    const std::pair<int, uint32_t> seeds[] = {{403, 0xf8fed105}, {497, 0xd94260cd}, {579, 0xe7a6acdd}, {665, 0x7f5c04de}};
+    size_t k = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        if (cnt == 303) w.p.pos = {21040, -2000, 6600}, w.p.yaw = 0;
+        if (cnt == 353) w.S[45] = 1;
+        if (cnt == 403) w.p.pos = {21040, -2100, 7280}, w.p.yaw = 0;
+        for (const auto& [c, s] : seeds)
+            if (c == cnt) w.rand_.seed = s;
+        w.tick({.buttons = uint16_t(cnt >= 601 && cnt <= 619 ? PadCross : 0)});
+        const LitActor& g = w.actors[gi];
+        if (cnt == 355) assert(w.defs[size_t(g.def)].states[size_t(g.state)].id == 142 && g.radius == 551 && g.box[4] == -2000);
+        if (cnt != want[k].cnt) continue;
+        const At& a = want[k++];
+        assert(w.p.pos == (V3{21040, a.y, 7280}) && w.p.state == a.state && w.p.flags14 == a.f14);
+    }
+    std::printf("L01D1 float column: entry, plunge, lift, bob, water jump and re-entry (counters 403-759) match the original\n");
 }
 
 // Health 0 -> death state (HUD 0x44acc0), clip end -> respawn at the checkpoint with health 6 (§3.6). L01a's
@@ -619,8 +763,11 @@ int main() {
     sweep(file.parent_path());
     assert(replayL01a(bze, scene) == replayL01a(bze, scene));  // deterministic
     testShadow(bze, scene);
+    testHud(bze, scene);
     testEnemyL01a(bze, scene);
     testPushL01a(bze, scene);
+    testRopeL02a1(file.parent_path() / "L02A1.bze");
+    testFloatL01d1(file.parent_path() / "L01d1.bze");
     testDeath(bze, scene);
     std::printf("ok\n");
     return 0;

@@ -425,6 +425,21 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
         s.stats.skyDomes += models.back().octree;
         if (!id.empty()) assetModel[le16(id, 2)] = models.size() - 1;
     }
+    // Overlay font (0x4660c0: template 0x18) and HUD sheet (0x462430: template 0x1f): the template's first linked
+    // class-0x17 sprite sequence, one whole TIM per record (u, v 0; w, h = TIM size in all 49 levels' data).
+    for (const TbChunk& ch : script.chunks) {
+        const auto id = ch.tag(0x27);
+        if (ch.type != 0x08 || id.empty() || (le16(id, 0) != 0x18 && le16(id, 0) != 0x1f)) continue;
+        std::vector<int32_t>& out = le16(id, 0) == 0x18 ? s.overlayFont : s.hudSheet;
+        for (const TbTag& t : ch.tags) {
+            const auto sp = t.id == 0x0f ? sprites.find(le16(t.data, 0)) : sprites.end();
+            if (sp == sprites.end() || sp->second.cls != 0x17 || !out.empty()) continue;
+            for (const uint32_t tid : sp->second.ids) {
+                const auto tx = b.tex.find(tid);
+                out.push_back(tx == b.tex.end() ? -1 : tx->second);
+            }
+        }
+    }
 
     // Texture links (TEXTURE_GAP.md): entity tag 0x0b {u16 link id, 0} makes the entity write its current sprite
     // frame's texture id into alias[link id] at run time (FUN_00408410 at load, FUN_00465c80 per frame).
@@ -533,7 +548,7 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level) {
         if (const auto sc = ch.tag(0x12); !sc.empty())
             for (size_t k = 0; k < 3; ++k) xf.s[k] = float(int16_t(le16(sc, 4 * k))) / 4096.0f;
         ++s.stats.props;
-        b.actor(model->model, xf, std::format("prop{}", s.stats.props));
+        b.actor(model->model, xf, std::format("prop{}@{:x}", s.stats.props, ch.offset));  // @offset: TbActor::chunk
     }
     uint32_t unplaced = 0;
     for (const Asset& a : models)

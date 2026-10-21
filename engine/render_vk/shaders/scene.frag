@@ -2,7 +2,7 @@
 #extension GL_EXT_nonuniform_qualifier : require
 // Mirrors kFs3D of the GL renderer.
 layout(set = 0, binding = 0) uniform texture2D uTex[];
-layout(set = 0, binding = 1) uniform sampler uSamp[4];
+layout(set = 0, binding = 1) uniform sampler uSamp[5];
 layout(push_constant) uniform P {
     mat4 viewProj;
     vec4 viewZ;

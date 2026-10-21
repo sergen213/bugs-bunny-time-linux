@@ -144,6 +144,7 @@ void applyTbFrame(AnimState& st, const Tod& tod, size_t frame) {
             else
                 for (size_t i = 0; i < 6; ++i) st.box[i] = int16_t(pk.v[i]);
             st.radius = uint16_t(pk.v[f & 0x1000 ? 3 : 6]);
+            st.boxSet = true;
             continue;
         }
         if (t == 0xa00) continue;
@@ -310,6 +311,19 @@ void addTbActors(Scene& s, const BzeFile& bze) {
     std::map<uint16_t, const TbChunk*> templates;
     for (const TbChunk& ch : c.script.chunks)
         if (const auto id = ch.tag(0x27); ch.type == 0x08 && !id.empty()) templates.emplace(le16(id, 0), &ch);
+    // HUD element templates (0x462430 copies table 0x4ced18's templates; 0x463ef0 draws their model in view space).
+    for (const uint16_t tid : {32, 36, 37, 38, 41, 42, 43, 44, 46, 47, 49}) {
+        const auto t = templates.find(tid);
+        if (t == templates.end() || s.templateModels.contains(tid)) continue;
+        for (const TbTag& tg : t->second->tags) {
+            const auto a = tg.id == 0x0f ? assets.find(le16(tg.data, 0)) : assets.end();
+            if (a == assets.end() || a->second.role != 13 || a->second.model.empty()) continue;
+            s.templateModels[tid] = uint32_t(s.actorModels.size());
+            s.actorModels.push_back(buildTbActorModel(s, a->second.model));
+            s.actorModels.back().modelAsset = a->first;
+            break;
+        }
+    }
     std::map<std::vector<uint16_t>, uint32_t> modelOf;  // link list -> Scene::actorModels index
     std::map<uint16_t, Tod> todCache;
     for (const TbChunk& ch : c.script.chunks) {

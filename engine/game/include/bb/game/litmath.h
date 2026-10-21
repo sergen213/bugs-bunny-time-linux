@@ -57,6 +57,61 @@ inline V3 rotY(int32_t yaw, int32_t x, int32_t y, int32_t z) {
     return {(c * sx + s * sz) >> 12, (0x1000 * sy) >> 12, (-s * sx + c * sz) >> 12};
 }
 
+// PsyQ MATRIX (Q12 s16 rows, TransMatrix t) with the exe's integer rotation builders: each product is >> 12 and
+// truncated to s16 before the sum, as 0x407c30 (X) / 0x407da0 (Y) / 0x407f00 (Z) left-multiply the matrix.
+struct Mat {
+    std::array<int16_t, 9> m{4096, 0, 0, 0, 4096, 0, 0, 0, 4096};
+    V3 t;
+};
+namespace detail {
+// rows (a, b) := (c·a - s·b, s·a + c·b) per column (sign -1: (c·a + s·b, c·b - s·a)), with s16 terms.
+inline void rotRows(Mat& M, int32_t ang, int a, int b, int sign) {
+    const int32_t c = rcos(ang), s = rsin(ang);
+    for (int j = 0; j < 3; ++j) {
+        const int32_t x = M.m[size_t(a * 3 + j)], y = M.m[size_t(b * 3 + j)];
+        const int16_t sy = int16_t((s * y) >> 12), sx = int16_t((s * x) >> 12);
+        M.m[size_t(a * 3 + j)] = int16_t(int16_t((c * x) >> 12) - sign * sy);
+        M.m[size_t(b * 3 + j)] = int16_t(int16_t((c * y) >> 12) + sign * sx);
+    }
+}
+} // namespace detail
+inline void mulRotX(Mat& M, int32_t a) { detail::rotRows(M, a, 1, 2, 1); }
+inline void mulRotY(Mat& M, int32_t a) { detail::rotRows(M, a, 0, 2, -1); }
+inline void mulRotZ(Mat& M, int32_t a) { detail::rotRows(M, a, 0, 1, 1); }
+// 0x407a50 RotMatrix: Rx·Ry·Rz (Z built first). 0x407af0: Ry·Rx·Rz. 0x407b90: Rz·Ry·Rx. Translation untouched.
+inline void rotMatrixXYZ(Mat& M, int32_t x, int32_t y, int32_t z) {
+    M.m = {int16_t(rcos(z)), int16_t(-rsin(z)), 0, int16_t(rsin(z)), int16_t(rcos(z)), 0, 0, 0, 4096};
+    mulRotY(M, y);
+    mulRotX(M, x);
+}
+inline void rotMatrixYXZ(Mat& M, int32_t x, int32_t y, int32_t z) {
+    M.m = {int16_t(rcos(z)), int16_t(-rsin(z)), 0, int16_t(rsin(z)), int16_t(rcos(z)), 0, 0, 0, 4096};
+    mulRotX(M, x);
+    mulRotY(M, y);
+}
+inline void rotMatrixZYX(Mat& M, int32_t x, int32_t y, int32_t z) {
+    M.m = {4096, 0, 0, 0, int16_t(rcos(x)), int16_t(-rsin(x)), 0, int16_t(rsin(x)), int16_t(rcos(x))};
+    mulRotY(M, y);
+    mulRotZ(M, z);
+}
+// 0x408a60 / 0x408120 ApplyMatrix: s16 vector, int32 row sums >> 12 (no translation).
+inline V3 apply(const Mat& M, const V3& v) {
+    const int32_t x = int16_t(v.x), y = int16_t(v.y), z = int16_t(v.z);
+    const auto& m = M.m;
+    return {(m[0] * x + m[1] * y + m[2] * z) >> 12, (m[3] * x + m[4] * y + m[5] * z) >> 12, (m[6] * x + m[7] * y + m[8] * z) >> 12};
+}
+// 0x408260 ApplyMatrixLV: int32 vector.
+inline V3 applyLV(const Mat& M, const V3& v) {
+    const auto& m = M.m;
+    return {(m[0] * v.x + m[1] * v.y + m[2] * v.z) >> 12, (m[3] * v.x + m[4] * v.y + m[5] * v.z) >> 12,
+            (m[6] * v.x + m[7] * v.y + m[8] * v.z) >> 12};
+}
+// 0x4081c0 ApplyRotMatrix / GTE MVMVA (0x408d50): as apply, results stored as s16.
+inline V3 apply16(const Mat& M, const V3& v) {
+    const V3 r = apply(M, v);
+    return {int16_t(r.x), int16_t(r.y), int16_t(r.z)};
+}
+
 // MSVC rand() (thunk 0x450810 -> CRT): LCG 214013/2531011, 15-bit result. Seed 1 = CRT default (no srand
 // call was looked for: Research Required).
 struct MsvcRand {

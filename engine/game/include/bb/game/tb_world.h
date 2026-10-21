@@ -7,6 +7,7 @@
 #pragma once
 #include "bb/actor.h"
 #include "bb/bze.h"
+#include "bb/game/lit_world.h"  // HudItem, Fade, OverlayGlyph: the HUD / fade / overlay-text drawing is shared
 #include "bb/game/litmath.h"
 #include "bb/game/pad.h"
 #include "bb/game/tb_collision.h"
@@ -19,6 +20,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bb::game {
@@ -52,6 +54,7 @@ struct TbActor {
     uint16_t behaviour = 0;                  // tag 0x13 (+0x31) class: 14 = character 0x453de0, 16 director, 0x21 held item
     uint32_t uid = 0;                        // entity handle: 0 Bugs, 1 Taz, others >= 2
     uint32_t listPos = 0;                    // position in the entity list 0x4d4fd0 (file order; spawns appended)
+    uint32_t chunk = 0;                      // section-1 offset of its instance chunk (0 = spawned)
     uint32_t flags0 = 0, flags1 = 0, flags10 = 0;  // tag 0x16 words -> +0x08, +0x0c (pad bits 0x400/0x800), +0x10
     uint16_t progBlock = 0;                  // tag 0x16 word 3 -> +0x2c entity program (logic block id)
     std::array<uint32_t, 3> progMask{};      // tag 0x16 words 4..6 -> +0x14/+0x18/+0x1c (+0x20/+0x24/+0x28 triggers)
@@ -68,6 +71,7 @@ struct TbActor {
     int16_t pitch = 0, yaw = 0, roll = 0, spawnYaw = 0;  // +0xf4 / +0xf6 / +0xf8
     std::array<int16_t, 3> scale{4096, 4096, 4096};       // tag 0x12 (+0xec, drawing only)
     std::array<int32_t, 3> vel{};            // +0x70 velocity x16
+    std::array<int16_t, 3> carry{};          // +0x58 displacement added to the mover's target once (then cleared)
     uint32_t f20 = 0, f24 = 0, f28 = 0;      // runtime flags
     int32_t state = -1, tr = -1;             // indices into states / trans (+0x17c / +0x178)
     uint16_t seq = 0;                        // +0x188
@@ -89,7 +93,6 @@ struct TbActor {
                                              // kept through the loop-restart tick (trace G; AnimState's flag is a tick late)
     int32_t parent = -1;                     // +0x90: uid of the entity this one is attached to
     int32_t parentPart = -1;                 // +0xe8: the parent's part it hangs on (-1 = parent root)
-    bool started = false;
     // View list 0x45eee0: tag 0x39 @0 +0x6e flags (0x20 never listed, 0x40 always, 2 range test, 4/8 frustum, 0x10
     // kept while out of view), @2 +0x76 range, @4 +0x118 activation block; +0x50 sleep after a range cull.
     uint16_t view = 0, range = 0, actBlock = 0;
@@ -104,6 +107,11 @@ struct TbActor {
     int32_t contact = -1;                    // +0x54 uid of the last touching / hit entity
     int32_t link = -1;                       // +0x1ac uid (V 0x100 target, selector 0xd)
     std::array<uint32_t, 3> trig{};          // +0x20/+0x24/+0x28 bits raised this tick (program triggers & +0x14..)
+    uint16_t reg = 0;                        // +0x126 entity register: the u16 S[0x1fe] (0x4d269e) while its logic runs
+    // Class 31 overlay text (template 0x18, S30 0x4680b0, behaviour 0x450d00): script +0x17a (0x8000 = drawn by
+    // the spawner this tick), display time +0x178 (0 = until removed), priority +0x42 (> 0: deferred, lowest wins).
+    uint16_t textScript = 0;
+    int16_t textTime = 0, textPrio = 0;
     const TbStateRec* rec() const { return state >= 0 ? &states[size_t(state)] : nullptr; }
     int padIndex() const { return (flags1 >> 11) & 1; }  // flags1 0x800 -> pad record 1
     bool drawn() const { return !(f20 & 0x2000) && !(rec() && (rec()->flagsC & 0x20000)); }  // 0x464480 skip
@@ -126,7 +134,11 @@ class TbWorld {
 public:
     // Throws FormatError without a chunk-0x35 collision mesh or without both characters. scene supplies the actor
     // models (addTbActors) for animation and the collision box (TOD packet 0x900); may lack them (no animation).
-    static TbWorld load(const BzeFile& bze, const Scene& scene);
+    // Entities without a scene model get their own (mesh, rig, anims) from their tag-0x0f links. gd: GAME_DATA
+    // carried from the previous level (the reload 0x4014c0 keeps the global block); none = new game (3 lives, 6 health).
+    static TbWorld load(const BzeFile& bze, const Scene& scene, const std::array<uint8_t, 0x300>* gd = nullptr);
+    // Level table 0x4cd998 (96 entries) index -> file stem ("ARCA01"); "" when out of range.
+    static std::string_view levelName(int index);
 
     void tick(const PadInput& p1, const PadInput& p2 = {});
     void setTwoPlayer(bool on);              // GD+0xA4 0x10 (menu "2 Players" 0x4370c0)
@@ -159,8 +171,8 @@ public:
     std::array<uint8_t, 2> flash{};          // 0x4d2058/9 Bugs/Taz hit flash (+0x28 0x200 while < 0x3c)
     std::array<uint32_t, 2> deathEvent{};    // 0x4d2720 / 0x4d5948 death transition overrides (V 0x80002000)
     std::array<uint32_t, 2> deathEvent2{};   // 0x4d5944 / 0x4d273c (V 0x80001000)
-    bool restart = false;                    // 0x4d593a: level reload requested (game over: GD+0 = 5 RETRY)
-    int32_t nextLevel = -1;                  // GD+0 written by V 0x1000 (level index; 5 = RETRY), -1 = unchanged
+    bool restart = false;                    // 0x4d593a: level reload requested (loads GD+0 = nextLevel, else the same level)
+    int32_t nextLevel = -1;                  // GD+0 written by V 0x1000 / game over (level index; 5 = RETRY), -1 = unchanged
     int32_t lastSpawn = -1;                  // 0x4d5eb8 uid (V 0x200000; V 0x80000001 teleports it)
     struct CamScript { uint32_t flags = 0; V3 look, eye; } camScript;  // '_' op 0x15 (B+0x3c, +0x48, +0x58)
     // CRT rand 0x46afe0 (seed 0x4cf26c, srand(1) once at start-up 0x401000): logic 'W' chances, action 7/8, spawn
@@ -174,6 +186,27 @@ public:
     int lastCallFriend = 0;                  // 1 placed, -1 refused/failed, 0 not requested (this tick)
     std::set<std::string> unsupported;       // logic conditions/actions met but not interpreted
 
+    // ---- tb_hud.cpp: screen fade, overlay text, HUD (draw data in the LiT HUD / overlay conventions) ----
+    // Fade 0x464e90 (from black) / 0x464ec0 (to black), advanced by 0x464ef0 once per rendered tick (tick() ends
+    // with it): S51 X=0 fadeIn(1, 0x100), X=1 fadeOut(2, 0x100) (holds black); S52 flash fadeIn(0x41, 0x400). The
+    // level change (0x401910) is fadeOut(2, 0x100) + 16 world ticks, after the load (0x4018a0) fadeIn(1, 200).
+    Fade fade;
+    void fadeIn(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0, fade.dark = 0x1000; }
+    void fadeOut(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0x1000, fade.dark = 0; }
+    void fadeTick();
+    std::array<uint8_t, 4> fadeOverlay() const;  // RGBA to blend over the frame (as LitWorld::fadeOverlay)
+    // Overlay text (0x466d50 over the level's language block, chunk 0x48): glyph sprites 0x4d5af4 and box rects
+    // 0x4d5af8 {x, y, w, h}, 512x240 space centred; both lists restart at the top of each tick (0x45ee90).
+    std::vector<OverlayGlyph> glyphs;
+    std::vector<std::array<int16_t, 4>> textBoxes;
+    // HUD (class 6 entity 0x463170): 15 template models (0x4d5ca0, table 0x4ced18; x/y = view translation = screen
+    // offset, z depth, as LiT's 0x408910) and 32 HUD-sheet sprites (0x4d5d00, POLY_FT4 of Scene::hudSheet frames in
+    // the 512x240 space: x, y top-left, w x h texels from u, v).
+    struct HudSprite { uint8_t frame = 0; bool shown = false; int16_t x = 0, y = 0, w = 0, h = 0, u = 0, v = 0; };
+    std::array<HudItem, 15> hud{};
+    std::array<HudSprite, 32> hudSprites{};
+    uint32_t textStatus = 0;                 // 0x4d9b40: status of the last S30 / R 0x22 text (0x4680b0)
+
 private:
     int16_t lookYaw_ = 0;                    // DAT_004d5972 (stale look-mode yaw given to the called partner)
     std::map<uint16_t, TbActor> templates_;  // spawnable templates (chunk 0x08) referenced by V 0x10 actions
@@ -182,6 +215,7 @@ private:
     V3 prevEye_;                             // DAT_004d2750: camera position of the previous list build
     const TbWorld* listOwner_ = nullptr;     // list_ is rebuilt when stale (spawn/erase) or the world was moved
     uint32_t nextUid_ = 2, nextListPos_ = 0;
+    TbActor* regOwner_ = nullptr;            // entity whose register +0x126 S[0x1fe] holds (runItems)
     std::vector<TbActor*>& order();
     void viewList();                         // 0x45eee0 list build: activation (+0x6e/+0x76/+0x118/+0x50)
     void classTick(TbActor& a);              // dispatch table 0x4cea60 by +0x31
@@ -218,6 +252,57 @@ private:
     void cameraSnap(const TbActor& t);
     int16_t camYaw() const;
     const TbPad& padOf(const TbActor& a, int override = -1) const { return pads[size_t(override >= 0 ? override : a.padIndex())]; }
+
+    // tb_hud.cpp internals
+    struct Slide {  // 16-byte slide record 0x4d5da0 + i*16 (stepped by 0x461840)
+        std::array<int16_t, 2> cur{};        // +0 x, +2 y (offset of the element group)
+        int16_t in = 0, out = 0;             // +4 / +6 targets of the moving axis (flags 1 x, 2 y)
+        uint16_t flags = 0;                  // 4 moving in, 8 out, 0x200 on screen, 0x10/0x20 start reversed, 0x40/0x80 overshoot
+        int8_t maxv = 0, vel = 0, acc = 0, back = 0, decel = 0;  // +0xa .. +0xe
+    };
+    struct HealthRec {  // 16-byte bar record 0x4ced78 + i*16 (0x462820)
+        uint8_t bar = 0, panel = 0;          // sprite indices: clipped bar, its panel
+        int16_t shown = -1;                  // displayed value (scaled), -1 = not yet shown
+        uint16_t timer = 0;
+        uint8_t flags = 0, dx = 0, dy = 0, max = 1, scale = 0, frame = 0;  // flags 1 right-aligned, 2 changed, 4 laid out
+        int8_t link = -1;                    // +0xc: the other bar of the same panel (its flag 2 shows this one)
+    };
+    struct HudState {
+        bool init = false;                   // 0x4d5ce8
+        uint8_t cea = 0;                     // 0x4d5cea: shown S[4] mode bits (1 show all briefly, 2 panel)
+        std::array<Slide, 11> slide{};
+        std::array<HealthRec, 5> health{};   // Bugs, Taz, S[6] bar, Bugs S[0x6d], Taz S[0x6e]
+        std::array<std::array<int16_t, 2>, 32> pos{};  // 0x4cebc0 sprite positions
+        std::array<uint16_t, 15> timer{};    // model entity +0x82: on-screen countdown
+        std::array<std::array<int16_t, 3>, 10> ang{}, spd{};  // 0x4d5e60 angles, 0x4cedc8 speeds per tick
+        int16_t lives = -1;                  // 0x4d5d84 (s8)
+        int32_t slot1 = 0xffff, slot2 = 0xffff;  // 0x4d5c88 / 0x4d5c80
+        uint8_t focusId = 0xff;              // 0x4d5d80
+        uint8_t callTicks = 0, callBusy = 0; // 0x4d5d82 / 0x4d5e54 call-friend icon frame switch
+        uint8_t s7 = 0;                      // 0x4d5eb0
+        int16_t iconX = -160, iconY = -104;  // 0x4cec28 / 0x4cec2a
+        uint16_t watchTicks = 0, watchPrev = 0;  // 0x4d203e / 0x4d203c stopwatch
+    } hud_;
+    std::vector<std::array<int16_t, 2>> hudFrames_;  // HUD sheet frame sizes (w, h)
+    std::vector<uint8_t> textBlock_;         // language block 0x4d5b88 (GD+0x93 = 0: English): u16 offsets + scripts
+    struct TextJob { uint32_t uid; uint16_t script; };
+    std::vector<TextJob> textQueue_;         // 0x4d5b20: deferred scripts of the lowest priority (0x4681c0)
+    int16_t textQueuePrio_ = 32000;          // 0x4d5b28
+    uint8_t blink_ = 0;                      // 0x4cf188: palette 9 = white for 16 runs, yellow for 14
+    bool camNodeDone_ = false;
+    void hudSetup();                         // 0x462430
+    void hudTick();                          // 0x463170
+    bool slideStep(Slide& s);                // 0x461840
+    void hudSetSprite(size_t i, uint8_t frame, const std::array<int16_t, 4>* clip = nullptr);  // 0x461a00
+    void hudMove(size_t i, int16_t x, int16_t y);  // the prim move blocks: top-left to (x, y)
+    void hudDigits(uint32_t value, size_t desc, const Slide& at);  // 0x461b20
+    void hudCounter(Slide& s, size_t slot, size_t desc, uint32_t value, bool changed);  // 0x462d70
+    void hudHealth(size_t h, Slide& s, int32_t value);  // 0x462820
+    uint32_t textRun(TbActor* e, uint16_t script, int16_t prio);  // 0x466d50
+    uint32_t textSpawn(uint16_t script, int16_t prio);  // 0x4680b0 with a new class-31 entity
+    void textTick(TbActor& a);               // class 31 behaviour 0x450d00
+    void textFlush();                        // 0x4681c0: the deferred scripts of the lowest priority, then reset
+    void cameraNodes();                      // 0x405b50: a model camera node (TOD part flag 0x40) drives the view
 };
 
 } // namespace bb::game

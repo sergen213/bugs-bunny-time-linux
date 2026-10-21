@@ -580,25 +580,33 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
         }
     }
 
-    // Shadow models (0x44bb50): every entity's tag 0x46 names a template entity whose first role-6 model is drawn on
-    // the ground under it. Built as a one-object actor model (posed with a single identity part by the app).
+    // One-object template models, built as one-object actor models (posed with a single identity part by the app):
+    // shadows (0x44bb50) take the template's first role-6 model; HUD templates (0x44b370, the actor's +0x74 model)
+    // take their first static model (tag 0x24; role 7 in the data: digits list role-7 model + two TODs).
+    constexpr size_t kHudTemplates = 28;
+    std::vector<uint16_t> templates = {472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 483, 485, 486, 487, 488,
+                                       489, 490, 491, 492, 493, 494, 495, 496, 923, 924, 925, 961, 962};
     for (const ScriptItem& it : script.items) {
         if (it.kind != ScriptItem::Kind::Chunk || (it.code != 0x07 && it.code != 0x08 && it.code != 0x0a)) continue;
         const auto t46 = tagData(it, 0x46);
-        const uint16_t sid = t46.size() >= 2 ? uint16_t(t46[0] | t46[1] << 8) : 0;
-        if (!sid || s.shadowModels.contains(sid)) continue;
+        if (t46.size() >= 2) templates.push_back(uint16_t(t46[0] | t46[1] << 8));
+    }
+    for (size_t ti = 0; ti < templates.size(); ++ti) {
+        const uint16_t sid = templates[ti];
+        if (!sid || s.templateModels.contains(sid)) continue;
         for (const ScriptItem& e : script.items) {
             if (e.kind != ScriptItem::Kind::Chunk || e.code != 0x08 || e.entityId.value_or(0) != sid)  // template list 0x4b2390
                 continue;
             for (const ScriptTag& t : e.tags) {
                 const auto a = t.id == 0x0f ? all.find(uint16_t(t.data[0] | t.data[1] << 8)) : all.end();
-                if (a == all.end() || a->second.role != 6 || a->second.tag == 0x25) continue;
-                s.shadowModels[sid] = uint32_t(s.actorModels.size());
+                if (a == all.end() || !(ti < kHudTemplates ? a->second.tag == 0x24 : a->second.role == 6 && a->second.tag != 0x25))
+                    continue;
+                s.templateModels[sid] = uint32_t(s.actorModels.size());
                 ActorModel& am = s.actorModels.emplace_back();
                 am.modelAsset = a->first;
                 b.actor = &am;
                 uint32_t objGroup = 0;
-                b.model(s4, a->second.off, a->second.size, Xform{}, objGroup, false, std::format("shadow{}", sid));
+                b.model(s4, a->second.off, a->second.size, Xform{}, objGroup, false, std::format("template{}", sid));
                 b.actor = nullptr;
                 break;
             }

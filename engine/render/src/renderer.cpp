@@ -169,8 +169,8 @@ Renderer::~Renderer() {
         freeScene();
         GLuint objs[] = {white_, font_};
         glDeleteTextures(2, objs);
-        GLuint samplers[] = {sampNearest_, sampTrilinear_, sampUiNearest_, sampUiLinear_};
-        glDeleteSamplers(4, samplers);
+        GLuint samplers[] = {sampNearest_, sampTrilinear_, sampUiNearest_, sampUiLinear_, sampLinear_};
+        glDeleteSamplers(5, samplers);
         glDeleteBuffers(1, &vbo2D_);
         glDeleteVertexArrays(1, &vao2D_);
         glDeleteProgram(prog3D_);
@@ -232,6 +232,7 @@ std::string Renderer::init(const WindowConfig& cfg) {
     uScreen_ = glGetUniformLocation(prog2D_, "uScreen");
 
     sampNearest_ = makeSampler(GL_NEAREST, GL_NEAREST, GL_REPEAT, 1.0f);
+    sampLinear_ = makeSampler(GL_LINEAR, GL_LINEAR, GL_REPEAT, 1.0f);
     sampTrilinear_ = makeSampler(GL_LINEAR_MIPMAP_LINEAR, GL_LINEAR, GL_REPEAT, maxAniso_);
     sampUiNearest_ = makeSampler(GL_NEAREST, GL_NEAREST, GL_CLAMP_TO_EDGE, 1.0f);
     sampUiLinear_ = makeSampler(GL_LINEAR, GL_LINEAR, GL_CLAMP_TO_EDGE, 1.0f);
@@ -313,6 +314,7 @@ void Renderer::uploadScene(const Scene& scene) {
     freeScene();
     colorScale_ = scene.colorScale;
     texGamma_ = scene.pcTexGamma;
+    linearOriginal_ = scene.game == GameId::LostInTime;
     for (const Texture& t : scene.textures) {
         const bool valid = t.width && t.height && t.rgba.size() == size_t(t.width) * t.height * 4;
         sceneTextures_.push_back(!valid       ? 0
@@ -426,7 +428,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glUniform1f(uColorScale_, s.colorScale(colorScale_));
     glUniform1f(uTexGamma_, s.texGamma(texGamma_));
     glActiveTexture(GL_TEXTURE0);
-    glBindSampler(0, original ? sampNearest_ : sampTrilinear_);
+    glBindSampler(0, original ? (linearOriginal_ ? sampLinear_ : sampNearest_) : sampTrilinear_);
     uint32_t boundVao = 0;
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);

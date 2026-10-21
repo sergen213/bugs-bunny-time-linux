@@ -103,7 +103,7 @@ int LitWorld::spawn(uint16_t entityId, const V3& pos, int16_t yaw) {
         a.yaw = yaw;
         a.active = true;
         size_t k = 0;
-        while (k < actors.size() && !(actors[k].dead && int(k) != p.platform)) ++k;
+        while (k < actors.size() && !(actors[k].dead && int(k) != p.platform && int(k) != p.rope)) ++k;
         if (k == actors.size()) {
             if (actors.size() == actors.capacity()) return -1;
             actors.push_back(std::move(a));
@@ -248,7 +248,7 @@ void LitWorld::actorsTick() {
         if (a.dead || (a.flagsC & 0x40)) continue;
         a.visible = true;
         a.flags18 &= ~0x100u;
-        if (a.entityId != 5 && a.type != 20 && int(i) != p.platform && a.act3c != 0) {
+        if (a.entityId != 5 && a.type != 20 && int(i) != p.platform && int(i) != p.rope && a.act3c != 0) {
             if ((a.act3c & 2) && approxLen(ref.x - a.pos.x, ref.y - a.pos.y, ref.z - a.pos.z) > a.act3e) {  // beyond +0x3e
                 if (!(a.act3c & 0x40)) continue;
                 a.visible = false;
@@ -294,6 +294,7 @@ void LitWorld::actorsTick() {
             a.dead = true;  // freed by 0x447a50
             std::erase(order_, uint32_t(i));
             if (p.platform == int(i)) { p.platform = -1; p.flags14 &= ~0x14u; }
+            if (p.rope == int(i)) dropRope();
         }
     };
     auto run = [&](const std::vector<size_t>& v) {
@@ -349,9 +350,10 @@ void LitWorld::behaviour(size_t i) {
     case 27: platform(i, 0x100); return;
     case 28: platform(i, 0x200); return;
     case 29: platform(i, 0x400); return;
+    case 8: rope(i); return;
     case 3: case 7: case 11: case 15: case 17: case 20: case 21: case 30: case 33: case 35: return;  // no-op / texture link
     default: {
-        // 0 static prop, 4 flipbook effect, 8 rope, 10 tagger, 31 projectile, 34 attached:
+        // 0 static prop, 4 flipbook effect, 10 tagger, 31 projectile, 34 attached:
         // not simulated; TOD models loop their initial animation as in the viewer.
         LitActor& a = actors[i];
         const ActorDef& d = defs[size_t(a.def)];
@@ -362,6 +364,96 @@ void LitWorld::behaviour(size_t i) {
         }
     }
     }
+}
+
+// 0x4addc8: s16 sine table in degrees (≈ -1024·sin, 360 entries), the rope swing's table (bugs.exe bytes).
+constexpr int16_t kRopeSin[360] = {
+    -1, -17, -35, -53, -71, -89, -107, -124, -142, -160, -177, -195, -212, -230, -247, -265, -282, -299,
+    -316, -333, -350, -366, -383, -400, -416, -432, -448, -464, -480, -496, -512, -527, -542, -557, -572, -587,
+    -601, -616, -630, -644, -658, -671, -685, -698, -711, -724, -736, -748, -760, -772, -784, -795, -806, -817,
+    -828, -838, -848, -858, -868, -877, -886, -895, -904, -912, -920, -928, -935, -942, -949, -955, -962, -968,
+    -973, -979, -984, -989, -993, -997, -1001, -1005, -1008, -1011, -1014, -1016, -1018, -1020, -1021, -1022, -1023, -1023,
+    -1023, -1023, -1023, -1022, -1021, -1020, -1018, -1016, -1014, -1011, -1008, -1005, -1001, -997, -993, -989, -984, -979,
+    -973, -968, -962, -955, -949, -942, -935, -928, -920, -912, -904, -895, -886, -877, -868, -858, -848, -838,
+    -828, -817, -806, -795, -784, -772, -760, -748, -736, -724, -711, -698, -685, -671, -658, -644, -630, -616,
+    -601, -587, -572, -557, -542, -527, -512, -496, -480, -464, -448, -432, -416, -400, -383, -366, -350, -333,
+    -316, -299, -282, -265, -247, -230, -212, -195, -177, -160, -142, -124, -107, -89, -71, -53, -35, -17,
+    0, 17, 35, 53, 71, 89, 107, 124, 142, 160, 177, 195, 212, 230, 247, 265, 282, 299,
+    316, 333, 350, 366, 383, 400, 416, 432, 448, 464, 480, 496, 512, 527, 542, 557, 572, 587,
+    601, 616, 630, 644, 658, 671, 685, 698, 711, 724, 736, 748, 760, 772, 784, 795, 806, 817,
+    828, 838, 848, 858, 868, 877, 886, 895, 904, 912, 920, 928, 935, 942, 949, 955, 962, 968,
+    973, 979, 984, 989, 993, 997, 1001, 1005, 1008, 1011, 1014, 1016, 1018, 1020, 1021, 1022, 1023, 1023,
+    1023, 1023, 1023, 1022, 1021, 1020, 1018, 1016, 1014, 1011, 1008, 1005, 1001, 997, 993, 989, 984, 979,
+    973, 968, 962, 955, 949, 942, 935, 928, 920, 912, 904, 895, 886, 877, 868, 858, 848, 838,
+    828, 817, 806, 795, 784, 772, 760, 748, 736, 724, 711, 698, 685, 671, 658, 644, 630, 616,
+    601, 587, 572, 557, 542, 527, 512, 496, 480, 464, 448, 432, 416, 400, 383, 366, 350, 333,
+    316, 299, 282, 265, 247, 230, 212, 195, 177, 160, 142, 124, 107, 89, 71, 53, 35, 17,
+};
+
+// 0x43efc0 rope / chain. First call: the part list from animation 5 (once), the root node dropped (kept here as
+// part 0 with an identity coordinate: it carries the root swing for drawing), segment length = box height (TOD packet
+// 9 +0x4a) / node count, amplitude 100, phase 280, +0x1e default 0x80, box x ±inflation. Each tick (chains only,
+// flags8 0x400000 = straight pole): the node bend sin(k)·(A/8) with A = sin(phase)·amp, k = 280 - 9 per node from the
+// bottom, nodes from the grabbed one up straight; root pitch sin(phase + 90)·amp (sound +0x160 at each turn), root
+// matrix Y·X·Z; phase += 4 degrees, amplitude -1 (clamp [+0x1e, 300]); radius / box from the bottom end (0, seg, 0)
+// carried up the chain (x never carried, as the exe). Runtime: L02A1 chain at (13039, -5569, 23412): pitch -128..127,
+// amp 128, seg 332 (RUNTIME_REFERENCE §13).
+void LitWorld::rope(size_t i) {
+    LitActor& a = actors[i];
+    auto& parts = a.animState.parts;
+    if (parts.empty()) {
+        a.flags18 |= 0x80;
+        animate(a, 5, AnimOnce);
+        if (parts.size() < 2) return;
+        parts[0].rot = {}, parts[0].trans = {}, parts[0].scale = {4096, 4096, 4096};
+        a.ropeSeg = int16_t(a.box[1] / int16_t(parts.size() - 1));
+        a.ropeAmp = 100, a.ropePhase = 0x118, a.ropePitch = a.rot[0];
+        if (a.reg == 0) a.reg = 0x80;
+        a.box[4] = 0, a.box[3] = a.inflate, a.box[0] = int16_t(-a.inflate);
+        if (a.flags8 & 0x400000) a.radius = uint16_t(a.inflate), a.radius2 = uint32_t(a.inflate * a.inflate);
+        rotMatrixXYZ(a.ropeM, a.ropePitch, a.yaw, a.rot[2]);
+        a.ropeM.t = a.pos;
+    }
+    a.yaw = int16_t(wrapSigned(a.yaw));
+    if ((a.flags8 & 0x400000) || parts.size() < 2) return;
+    auto setPart = [](TodPart& p, int16_t rx) {
+        p.rot = {rx, 0, 0};
+        const Mat m = ropePartMatrix(p);
+        for (size_t k = 0; k < 9; ++k) p.m[k] = float(m.m[k]) / 4096.0f;
+    };
+    const int32_t A = (kRopeSin[a.ropePhase] * a.ropeAmp) >> 10;
+    int32_t k = 0x118;
+    for (size_t q = parts.size() - 1; q >= 1; --q) {  // bottom node up to the top one
+        if (int(q) == a.ropeGrab) k = 0xb4;
+        int16_t rx = 0;
+        if (k >= 0xb5) rx = int16_t((kRopeSin[k] * (A >> 3)) >> 10), k -= 9;
+        setPart(parts[q], rx);
+    }
+    const int32_t ph = a.ropePhase + 0x5a > 0x167 ? a.ropePhase - 0x10e : a.ropePhase + 0x5a;
+    const int16_t pitch = int16_t((kRopeSin[ph] * a.ropeAmp) >> 10);
+    a.ropeGrab = -1;
+    const int16_t side = pitch < a.ropePitch;
+    if (side != a.ropeSide && a.param) playSound(uint16_t(a.param));
+    a.ropeSide = side;
+    a.ropePitch = pitch;
+    setPart(parts[0], pitch);
+    rotMatrixYXZ(a.ropeM, pitch, a.yaw, a.rot[2]);
+    a.ropeM.t = a.pos;
+    a.ropePhase = a.ropePhase + 4 > 0x167 ? a.ropePhase - 0x164 : a.ropePhase + 4;
+    if (a.ropePhase & 2) --a.ropeAmp;
+    if (--a.ropeAmp < a.reg) a.ropeAmp = a.reg;
+    else if (a.ropeAmp > 300) a.ropeAmp = 300;
+    V3 v{0, a.ropeSeg, 0};
+    for (size_t q = parts.size() - 1; q >= 1; --q) {
+        const V3 o = apply(ropePartMatrix(parts[q]), v);
+        v = {0, int16_t(o.y + parts[q].trans[1]), int16_t(o.z + parts[q].trans[2])};
+    }
+    const V3 e = apply(a.ropeM, v);
+    a.radius2 = uint32_t(e.x * e.x + e.z * e.z + a.inflate * a.inflate);
+    a.radius = uint16_t(isqrt(int32_t(a.radius2)));
+    a.box[1] = int16_t(e.y);
+    if (e.z < 0) a.box[2] = int16_t(a.radius), a.box[5] = 0;
+    else a.box[5] = int16_t(a.radius), a.box[2] = 0;
 }
 
 // ---- items (LOGIC.md §3.1, 0x440120 / 0x4455e0): scan the step's event group; returns true when the actor died ----
@@ -626,7 +718,7 @@ void LitWorld::type14(size_t i) {
                         // left alone (runtime: 2 throughout the L01a walk-in) and the turn error 0x4b3c20 reset.
                         if (f & 0x1000000) p.reg = a.reg;
                         p.carrier = int32_t(i);
-                        p.platform = -1;
+                        p.platform = p.rope = -1;
                         turnErr_ = -1;
                         a.rider = -2;
                     } else {
@@ -645,7 +737,7 @@ void LitWorld::type14(size_t i) {
                 if (f & 0x80000) nextLevel = it.p1;  // goto level P1
                 if (f & 0x80000000) forceState(uint16_t(it.p2));
                 if (f & 0x100000) { checkpoint_ = a.pos; checkpointYaw_ = a.yaw; }
-                if (f & 0x800) { p.pos = a.pos; p.yaw = a.yaw; p.platform = -1; p.flags14 &= ~0x14u; cameraSnap(p.pos); }
+                if (f & 0x800) { p.pos = a.pos; p.yaw = a.yaw; p.platform = p.rope = -1; p.flags14 &= ~0x14u; cameraSnap(p.pos); }
                 if ((f & 0x4000) && a.rider == -2) {  // release Bugs at his attached world position = the carrier's
                     a.rider = -1;                       // current one (coordinate chain), x/z rotation cleared
                     p.carrier = -1;
@@ -796,7 +888,7 @@ void LitWorld::director(size_t i) {
         LitActor& b = actors[i];
         if (f & 0x4000000)
             if (const int t = findActor(uint16_t(it.p2)); t >= 0) actors[size_t(t)].flags14 |= 0x100;
-        if (f & 0x800) { p.yaw = b.yaw; p.pos = b.pos; p.platform = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x80000000; cameraSnap(p.pos); }
+        if (f & 0x800) { p.yaw = b.yaw; p.pos = b.pos; p.platform = p.rope = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x80000000; cameraSnap(p.pos); }
         if (f & 0x80000000) forceState(uint16_t(it.p2));
         if (f & 0x80000) nextLevel = it.p1;
         if (f & 0x10000) { b.flags14 |= 0x100; return; }
@@ -1177,7 +1269,7 @@ bool LitWorld::boxPush(const LitActor& o, V3& w) const {
     return true;
 }
 
-void LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
+int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
     if (p.platform >= 0) {  // 0x434230: still over the platform?
         const LitActor& pl = actors[size_t(p.platform)];
         const V3 q{p.pos.x + w.x, p.pos.y, p.pos.z + w.z};
@@ -1188,7 +1280,7 @@ void LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
         } else {
             p.pos.y = pl.pos.y + pl.box[4] + 4;
             w.y = 0;
-            return;
+            return -1;
         }
     }
     const V3 q{p.pos.x + w.x, p.pos.y + w.y, p.pos.z + w.z};
@@ -1225,7 +1317,7 @@ void LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
             w.y = 0;
             p.flags14 = (p.flags14 & 0xfffffdf4) | 0x14;
             p.phase = 0x800;
-            return;
+            return int(i);
         }
         a.contact = uint16_t(p.entityId);
         p.contact = a.entityId;
@@ -1260,8 +1352,9 @@ void LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
             a.flags14 |= 0x8000;
             sidePush(stomp());
         }
-        return;
+        return int(i);  // others (e.g. buoyant flags8 0x900000): contact without push
     }
+    return -1;
 }
 
 // Bugs' attacks (0x43a880): move flagsA 0x800000 body overlap (0x432fe0, approximated: centre inside the target

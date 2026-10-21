@@ -215,6 +215,9 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
             if (!(gy >> k & 1)) gAdd(7, 1);
         return;
     case 64: if (self) self->act3c |= 0x40; return;
+    case 69: if (it.y < 3) fade.rgb[it.y] = uint8_t(X); return;  // flash colour R / G / B (0x42d510)
+    case 70: if (X == 0) fadeIn(1, 0x100); else if (X == 1) fadeOut(2, 0x100); return;  // 16-tick fade
+    case 71: fadeIn(0x41, 0x400); return;                    // colour flash: 4 ticks in, 4 back
     case 72:                                                 // damage Bugs X (§3.6)
         if (invuln_ == 0) {
             G[1] = uint8_t(G[1] - X);
@@ -252,7 +255,7 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 98: cam.flags |= 0x20; return;
     case 99: cam.flags &= ~0x20u; return;
     case 101: cam.flags |= 4; return;
-    default: skip();  // A44 0x28, A56, A59/A68 shake, A69, A70/A71 fades, A85 camera target,
+    default: skip();  // A44 0x28, A56, A59/A68 shake, A85 camera target,
                       // A93/A100/A102-A128 front end
     }
 }

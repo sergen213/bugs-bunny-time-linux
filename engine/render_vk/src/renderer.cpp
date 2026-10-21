@@ -39,7 +39,7 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT; // ponytail: no D24 fall
 constexpr VkFormat kTexFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkBufferUsageFlags kStreamUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 constexpr VkShaderStageFlags kPushStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-enum : uint32_t { kSampNearest, kSampTrilinear, kSampUiNearest, kSampUiLinear };
+enum : uint32_t { kSampNearest, kSampTrilinear, kSampUiNearest, kSampUiLinear, kSampLinear };
 enum : uint32_t { kSlotWhite, kSlotFont }; // first two images created in init()
 
 // Matches the push block in scene.vert/scene.frag.
@@ -524,11 +524,12 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
     samplers_[kSampTrilinear] = sampler(VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, maxAniso_, VK_LOD_CLAMP_NONE);
     samplers_[kSampUiNearest] = sampler(VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f, 0.0f);
     samplers_[kSampUiLinear] = sampler(VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f, 0.0f);
+    samplers_[kSampLinear] = sampler(VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT, 1.0f, 0.0f);
 
     // One bindless set: binding 0 = every texture (update-after-bind), binding 1 = the four samplers.
     VkDescriptorSetLayoutBinding binds[2]{};
     binds[0] = {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxSlots_, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-    binds[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLER, 4, VK_SHADER_STAGE_FRAGMENT_BIT, samplers_};
+    binds[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLER, 5, VK_SHADER_STAGE_FRAGMENT_BIT, samplers_};
     const VkDescriptorBindingFlags bindFlags[2] = {VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
                                                        VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT, 0};
     VkDescriptorSetLayoutBindingFlagsCreateInfo bfi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
@@ -539,7 +540,7 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
     lci.bindingCount = 2;
     lci.pBindings = binds;
     check(vkCreateDescriptorSetLayout(device_, &lci, nullptr, &setLayout_), "vkCreateDescriptorSetLayout");
-    const VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxSlots_}, {VK_DESCRIPTOR_TYPE_SAMPLER, 4}};
+    const VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxSlots_}, {VK_DESCRIPTOR_TYPE_SAMPLER, 5}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     dpi.maxSets = 1;
@@ -825,6 +826,7 @@ void Renderer::uploadScene(const Scene& scene) {
     freeScene();
     colorScale_ = scene.colorScale;
     texGamma_ = scene.pcTexGamma;
+    linearOriginal_ = scene.game == GameId::LostInTime;
 
     std::vector<std::vector<uint8_t>> bled;
     std::vector<TexSrc> srcs;
@@ -1006,7 +1008,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     pc.fogColorScale = glm::vec4(s.fogColor[0], s.fogColor[1], s.fogColor[2], s.colorScale(colorScale_));
     pc.texGamma = s.texGamma(texGamma_);
     pc.fog = s.fog ? glm::vec2(s.fogStart, s.fogEnd) : glm::vec2(0.0f);
-    pc.samp = original ? kSampNearest : kSampTrilinear;
+    pc.samp = original ? (linearOriginal_ ? kSampLinear : kSampNearest) : kSampTrilinear;
     vkCmdPushConstants(cb, layout_, kPushStages, 0, sizeof pc, &pc);
     // Scene geometry lives in device-local buffers; actor geometry is streamed into this frame's ring.
     VkBuffer geomV[2] = {sceneVbo_.buf, VK_NULL_HANDLE}, geomI[2] = {sceneIbo_.buf, VK_NULL_HANDLE};
