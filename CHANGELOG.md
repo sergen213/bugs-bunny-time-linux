@@ -3,6 +3,33 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.7.0 — 2026-10-21 (Wave 7: original menus, original sound mixing)
+
+- Both games clear the 3-D view and fade fog to black like the originals (was a hard-coded light blue: blue strip under
+  the Lost in Time title copyright and blue gaps in the attic).
+- Time Busters: the original front end (GDI title menu from `Datas/data/menu.men`, Brady Bunch text via FreeType).
+  Enter on the collection menu's TB entry (or `bbtime --game tb --menu`): 1 / 2 Players → CCINTRO, Load Game (list /
+  load / delete `saves/tb/Savedata.dat`), Configuration (key rebinding, sound volumes + bong, language), Quit → the
+  collection menu; mouse as the original plus keyboard / gamepad focus; silent in Original Fidelity. Right / X on a game
+  entry opens the level list. Builds now need FreeType (`libfreetype-dev`).
+- Sound effects follow both originals' mixer rules: 24 voices, distance fade and pan from the camera, LiT pitch from the
+  program's PS1 centre note (sounds played ~2.8× too high before), looping sounds with release/stop, C85/C87 and TB
+  0x35/0x37 'sound playing', in-level speech bank; LiT levels and pitch match the original voice for voice (Wine
+  oracle, L01A). TB sound effects now play, including footsteps, jumps, spins and NPC sounds from the
+  animation-asset logic (checked against the TB oracle). settings.ini volumes apply at start-up.
+- Time Busters: one shared rand() stream as in the original (animation-asset logic and particle-effect draws
+  included, every call site traced in Wine), and class-16 director logic whose first block is block 0 now runs
+  (ARCA01's particle setup); NPC random picks (patrol direction, throw variant) now follow the same stream.
+- Lost in Time: the original front end. Enter on the collection menu's LiT entry (or `bbtime --game lit --menu`)
+  runs TITLE.BZE with its own logic: camera-node view, Taz's spin and Bugs out of the hole, PRESS ENTER, the slot menu
+  with Savedata summaries, Load (skips empty slots) / New game (→ CCINTRO) / Quit (→ collection menu), Esc back to the
+  slot menu. Right / gamepad X opens the old level list. Fixes on the way: C79/C80 pad masks, C69 Start mapping,
+  type-14 forward speed gated by flagsB (not flagsA) sign, item flag 0x400000 (set another actor's state).
+  Type-0 static props are one rigid object without animation (0x43eee0), which fixes the stretched title copyright
+  text. Autoplay keys P (Start) and E (Esc).
+  The title keeps the original 4:3 framing (51.28°, pillarbox) in Enhanced too, so its 3-D slot panel lines up with
+  the 4:3 menu text (`Settings::frame43`).
+
 ## 0.6.0 — 2026-10-20 (Wave 6, first public release)
 
 - Release: portable AppImage (`tools/release/build_appimage.sh`, built in an Ubuntu 24.04 container, glibc ≥ 2.39)

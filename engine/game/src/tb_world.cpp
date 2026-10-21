@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <ranges>
 
 namespace bb::game {
 namespace {
@@ -102,7 +103,7 @@ void loadEntity(TbActor& a, const std::vector<const TbChunk*>& chain, std::map<u
         std::map<uint16_t, TbBlock> blocks;
         parseBlocks(*src, &blocks, global);
         for (const TbTag& t : src->tags)  // the list head = the first own 'M' with an entity id
-            if (t.id == 0x4d && !a.firstBlock && le16(t.data, 0) < 10000) a.firstBlock = le16(t.data, 0);
+            if (t.id == 0x4d && a.firstBlock < 0 && le16(t.data, 0) < 10000) a.firstBlock = le16(t.data, 0);
         for (auto& [bid, items] : blocks) a.blocks.try_emplace(bid, std::move(items));
     }
     for (auto& [bid, items] : a.blocks) linkSkips(items);
@@ -201,7 +202,28 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
     std::map<uint16_t, const TbChunk*> templates, firstInstance;
     struct Asset { uint16_t role = 0; const TbChunk* ch = nullptr; std::span<const uint8_t> tod, model; };
     std::map<uint16_t, Asset> assets;
+    // Sounds (level loader chunk 0, as LiT): 0x01 programs (section 4), 0x02 bank (0x429e50, section 3), 0x04 sound
+    // (0x406ff0, 12 B), 0x4b / 0x4c speech programs / bank of the language section (file entry after section 3;
+    // ponytail: language 0, English).
+    const int i3 = bze.find(3), i4 = bze.find(4);
+    std::vector<uint8_t> s3, s4, sp;
+    if (i3 >= 0) s3 = bze.payload(size_t(i3));
+    if (i4 >= 0) s4 = bze.payload(size_t(i4));
+    if (i3 >= 0 && size_t(i3) + 1 < bze.sections.size()) sp = bze.payload(size_t(i3) + 1);
+    auto part = [](std::span<const uint8_t> sec, std::span<const uint8_t> ref) {
+        const uint32_t off = le32(ref, 0), size = le32(ref, 4);
+        return size_t(off) + size <= sec.size() ? sec.subspan(off, size) : std::span<const uint8_t>{};
+    };
+    w.sfx.tb = true, w.sfx.volume = 127;
     for (const TbChunk& ch : script.chunks) {
+        if (ch.type == 0x00)
+            for (const TbTag& t : ch.tags) {
+                if (t.id == 0x04) w.sfx.addEntry(t.data);
+                if (t.id == 0x01) w.sfx.programs = Sfx::programTable(part(s4, t.data));
+                if (t.id == 0x02) w.sfx.bank = Sfx::loadBank(part(s3, t.data), BzeVariant::TimeBusters);
+                if (t.id == 0x4b) w.sfx.speechPrograms = Sfx::programTable(part(sp, t.data));
+                if (t.id == 0x4c) w.sfx.speech = Sfx::loadBank(part(sp, t.data), BzeVariant::TimeBusters);
+            }
         const auto id = ch.tag(0x27);
         if (ch.type == 0x08 && !id.empty()) templates.emplace(le16(id, 0), &ch);
         if (isInstance(ch) && !id.empty()) firstInstance.emplace(le16(id, 0), &ch);
@@ -268,6 +290,32 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
         }
         return it->second = (rig || !m->anims.empty()) ? std::move(m) : nullptr;
     };
+    // The asset 'M' blocks (encoder 0x433ab0 order) of each anim of a model: anim role -> the entity's first tag-0x0f
+    // link with that role and a TOD (as the anims were built), along the template chain (instances often link none).
+    auto addLogic = [&](const ActorModel& m, const std::vector<const TbChunk*>& chain) {
+        for (const ActorAnim& an : m.anims)
+            for (const TbTag& tg : chain | std::views::transform([](const TbChunk* c) -> const std::vector<TbTag>& {
+                                       return c->tags;
+                                   }) | std::views::join) {
+                if (tg.id != 0x0f) continue;
+                const auto as = assets.find(le16(tg.data, 0));
+                if (as == assets.end() || as->second.role != an.id || as->second.tod.empty()) continue;
+                std::vector<TbBlock> logic;
+                bool open = false;
+                for (const TbTag& t : as->second.ch->tags) {
+                    if (t.id == 0x4d) logic.emplace_back(), open = true;
+                    else if (open && t.id >= 0x4e && t.id <= 0x60) {
+                        TbLogicItem li;
+                        li.tag = t.id;
+                        std::copy_n(t.data.begin(), std::min(t.data.size(), li.d.size()), li.d.begin());
+                        logic.back().push_back(li);
+                    } else open = false;
+                }
+                for (TbBlock& b : logic) linkSkips(b);
+                if (!logic.empty()) w.animLogic_.try_emplace(&an.tod, std::move(logic));
+                break;
+            }
+    };
     // Every instance chunk is an entity of the list 0x4d4fd0 in file order (the loader appends, 0x4609b0).
     bool found[2] = {};
     for (const TbChunk& ch : script.chunks) {
@@ -285,6 +333,7 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
         for (const ActorInstance& ai : scene.actors)
             if (ai.scriptOffset == ch.offset && ai.model < scene.actorModels.size()) a.model = &scene.actorModels[ai.model];
         if (!a.model && (a.ownModel = modelOf(ch, true))) a.model = a.ownModel.get();
+        if (a.model) addLogic(*a.model, chainOf(ch));
     }
     if (!found[0] || !found[1]) throw FormatError("tb world: Bugs (id 2) and Taz (id 3) entities required");
     for (auto& [bid, items] : w.globalBlocks_) linkSkips(items);
@@ -304,6 +353,7 @@ TbWorld TbWorld::load(const BzeFile& bze, const Scene& scene, const std::array<u
         proto.id = t;
         loadEntity(proto, chainOf(*tc->second), w.globalBlocks_);
         proto.ownModel = modelOf(*tc->second, true);
+        if (proto.ownModel) addLogic(*proto.ownModel, chainOf(*tc->second));
         for (const auto& [bid, b] : proto.blocks) spawnTemplates(b, want);
         w.templates_.emplace(t, std::move(proto));
     }
@@ -381,7 +431,13 @@ TbActor* TbWorld::entity(int32_t uid) {
 }
 
 void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
-    sounds.clear();
+    // 0x42ae60 before the views update: requests of the previous tick start now, heard from last tick's camera.
+    sfx.mix(cam.eye, cam.look, [&](int32_t e, V3& pos) {
+        if (e <= 2) return true;  // Bugs / Taz (0x4d236c, 0x4d2368): fixed levels
+        const TbActor* a = entity(e - 1);
+        pos = a ? a->pos : V3{cam.look.x + 0x100000, cam.look.y, cam.look.z};  // freed entity: out of range
+        return false;
+    });
     effects.clear();
     glyphs.clear(), textBoxes.clear();  // 0x45ee90: the overlay sprite / box lists restart every tick
     tbPadTick(pads[0], p1, edgeMask);
@@ -426,6 +482,7 @@ void TbWorld::tick(const PadInput& p1, const PadInput& p2) {
             if (c.progMask[1] & 0x80) runProgram(c, 0, 0x80, 0);
         });
         if (lastSpawn == dead) lastSpawn = -1;
+        sfx.releaseOwned(dead + 1);  // 0x407220
         it = entities.erase(it);
         listOwner_ = nullptr;
     }
@@ -482,7 +539,7 @@ bool TbWorld::callFriend(bool force) {
     TbActor& p = actors[size_t(1 - focus())];
     lastCallFriend = -1;
     if (!force && (GD[0x9f] || (S[3] & 3) || airTicks > 2 || (f.f24 & 0x40) || (p.f20 & 0x2000000) || cooldown < 45)) {
-        sounds.push_back(0x5f);  // refusal (0x407080; muted while S[3] & 0x10 / paused / dialog)
+        if (!(S[3] & 0x10) && !S[9] && !GD[0x9f]) playSound(f, 0x5f);  // refusal, muted while paused / in a dialog
         return false;
     }
     // place() 0x44ecd0: from p = focus - (0,200,0), 8 rays of 500 around the camera yaw; a candidate spot c is
@@ -516,7 +573,7 @@ bool TbWorld::callFriend(bool force) {
         if (clear) best = qd, result = fl->p;
     }
     if (best < 0x57e5) {
-        sounds.push_back(0x5f);
+        playSound(f, 0x5f);
         return false;
     }
     detach(p);
@@ -817,7 +874,8 @@ bool TbWorld::cond(TbActor& a, TbLogicItem& it, bool cur) {
         case 0x1a: return Sv(y) != x;
         case 0x22: textStatus = textSpawn(uint16_t(x), 0); return x & textStatus;  // 0x430760: show text X, status & X
         case 0x23: return x & textStatus;                                        // 0x4307a0: last text status & X
-        case 0x35: case 0x37: return y != 1;  // sound X playing (any / own voice): no sound channels run here
+        case 0x35: case 0x37:  // 0x4308a0 / 0x430900: sound X on any voice / on own voice == (Y == 1)
+            return sfx.playing(uint16_t(x), ci == 0x37 ? int32_t(a.uid) + 1 : 0) == (y == 1);
         case 0x36: {                          // the focus carries an attached entity
             bool any = false;
             const int32_t fu = int32_t(actors[size_t(focus())].uid);
@@ -889,7 +947,7 @@ bool TbWorld::cond(TbActor& a, TbLogicItem& it, bool cur) {
         if (a.anim.frame != uint32_t(d[4]) + 1 || a.anim.countdown != 0) return false;
         if (it.counter == 0) {
             it.counter = d[6];
-            sounds.push_back(d[2]);
+            playSound(a, d[2]);
         } else {
             --it.counter;
         }
@@ -957,6 +1015,17 @@ uint32_t TbWorld::actionV(TbActor& a, const TbLogicItem& it) {
                 S[p1] = v;
             }
         if (u & 0x200000) unsupported.insert("V effect 0x451e10");
+        if ((u & 0x200000) && !((p1 & 1) && (a.f24 & 4)) && uint16_t(p3) < fx_.size()) {
+            // 0x451e10 -> 0x452ab0 (skipped for p1 & 1 outside the view, +0x24 & 4): emit slot p3's particle count;
+            // only the rand() draws are simulated: 2 per particle (direction), +1 with flags 0x80 (+0x0e spread), +1
+            // unless 0x800 (+0x07). A full pool (120, 0x4528f0) steals the oldest particle, so every particle draws.
+            const FxSlot& f = fx_[uint16_t(p3)];
+            for (int k = 0; k < f.count; ++k) {
+                rng(), rng();
+                if (f.flags & 0x80) rng();
+                if (!(f.flags & 0x800)) rng();
+            }
+        }
         return 0;
     }
     if (u & 0x800000) unsupported.insert("V 0x800000");
@@ -1009,7 +1078,7 @@ uint32_t TbWorld::actionV(TbActor& a, const TbLogicItem& it) {
         if (const TbActor* par = entity(a.parent); par && !(u & 0x1000000)) a.yaw = par->yaw;
         detach(a);
     }
-    if (u & 0x60) sounds.push_back(uint16_t(p1));  // 0x20 voice 1 / 0x40 voice 2 (0x407080)
+    if (u & 0x60) playSound(a, uint16_t(p1), (u & 0x20) ? 1 : 2);  // 0x20 start, else 0x40 release (0x407080)
     if (u & 0x80000) res = 0x20000000;               // next in sequence
     if (u & 0x4000000) res = 0x2000000;              // previous
     if (u & 0x10000000) {                             // restart the transition at index p1
@@ -1075,7 +1144,7 @@ uint32_t TbWorld::action(TbActor& a, const TbLogicItem& it) {
             return 0;
         case 12: if (sv && x < S.size()) *sv = S[x]; return 0;           // 0x430e30
         case 16: a.stateTicks = 0; return 0;                             // 0x430fd0
-        case 20: sounds.push_back(x); return 0;                          // 0x430ff0
+        case 20: playSound(a, x); return 0;                              // 0x430ff0
         case 21: if (sv) *sv = uint8_t(*sv + int8_t(x)); return 0;      // 0x431010
         case 22:                                                         // 0x431030 GD(Y) += X (u16 at even Y <= 0x30)
             if ((y & 1) == 0 && y <= 0x30) {
@@ -1103,6 +1172,20 @@ uint32_t TbWorld::action(TbActor& a, const TbLogicItem& it) {
             if (x < a.boxes.size() && int32_t(x) != a.boxIdx) a.boxIdx = x, a.boxInstant = y & 2;
             return 0;
         case 126: music = x & 0xff; return 0;  // 0x432db0
+        case 118: {  // 0x432c80 -> 0x452060: field X & 0xff of the effect slot this entity owns (0x451e10, else 0) = Y
+            const auto own = std::ranges::find(fx_, int32_t(a.uid), &FxSlot::owner);
+            FxSlot& f = own == fx_.end() ? fx_[0] : *own;
+            switch (x & 0xff) {
+            case 4: f.count = uint8_t(y); break;
+            case 10: f.flags = y; break;
+            case 7:  // bind slot Y to this entity
+                for (FxSlot& s : fx_) if (s.owner == int32_t(a.uid)) s.owner = -1;
+                if (int16_t(y) >= 0 && size_t(int16_t(y)) < fx_.size()) fx_[size_t(int16_t(y))].owner = int32_t(a.uid);
+                break;
+            default: break;  // emitter shape / colour / timing fields: no rand() or gameplay effect
+            }
+            return 0;
+        }
         case 0: case 40: case 42: case 43: case 131: return 0;           // log stub / pad rumble (not ported)
         case 24: if (sv) *sv = uint8_t(*sv - int8_t(x)); return 0;      // 0x431070
         case 30: textStatus = textSpawn(uint16_t(x), int16_t(y)); return 0;   // 0x4312f0: text X, priority Y
@@ -1114,7 +1197,7 @@ uint32_t TbWorld::action(TbActor& a, const TbLogicItem& it) {
         case 31:                                                         // 0x431320: remove class-31 entities
             forEachEntity([&](TbActor& e) { if (e.behaviour == 31 && (x == 0xffff || e.id == x)) e.f20 |= 0x2000; });
             return 0;
-        case 63: sounds.push_back(x); return 0;                          // 0x431c40 voice 2
+        case 63: playSound(a, x, 2); return 0;                           // 0x431c40 release
         case 74: cameraSnap(actors[size_t(focus())]); return 0;          // 0x431fb0 camera reset flag 4 (I: snap)
         case 90: {                                                       // 0x432670 GD(Y) += GD(X)
             auto gdw = [&](uint16_t o) { return (o & 1) == 0 && o < 0x31; };
@@ -1566,6 +1649,14 @@ void TbWorld::actorStep(TbActor& a) {
             for (size_t fr = next0; fr < a.anim.next && fr < t->frames(); ++fr)
                 for (uint32_t k = t->frameStart[fr]; k < t->frameStart[fr + 1]; ++k)
                     if (t->packets[k].type == 0xa && t->packets[k].id) a.attachPart = int32_t(t->packets[k].id) - 1;
+            // 0x469770: a frame step runs the asset's logic list (footsteps: '`' items) right after applying the frame,
+            // before the hold reload (I: the '`' gate needs countdown +0x153 == 0, else holds > 1 tick never sound).
+            if (next0 < a.anim.next)
+                if (auto lg = animLogic_.find(t); lg != animLogic_.end()) {
+                    const uint8_t hold = std::exchange(a.anim.countdown, uint8_t(0));
+                    for (TbBlock& b : lg->second) runItems(a, b);  // shared rand() stream (oracle tbrand/rand.csv)
+                    a.anim.countdown = hold;
+                }
         }
         if (a.attachPart >= 0) a.attachPos = partWorld(a, a.attachPart);  // +0x7c
         // 0x468280 packet 0x900 (without tag-0x61 records, +0x78 = 0): box = the frame's, x/z inflated by +0x3e.

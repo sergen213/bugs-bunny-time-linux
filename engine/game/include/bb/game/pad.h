@@ -18,6 +18,7 @@ struct PadInput {
     uint8_t lx = 0x80, ly = 0x80;
     bool analog = false;
     bool help = false;  // F1 key-down this tick (WM_KEYDOWN 0x70, not a pad button): help screen toggle (LitWorld::tick)
+    bool esc = false;   // Esc held this tick (0x4b18d0 bit 1, the window's extra keys): condition C96
 };
 
 // GD pad words (§2.2) plus the press-window counters of 0x4491c0.

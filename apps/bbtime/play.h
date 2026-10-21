@@ -30,8 +30,8 @@ bb::game::PadInput readPad(const KeyMap& map, SDL_Gamepad* pad);
 // LCtrl □ aliases; P2: keypad 8/5/6/4, L L1, ; ' L2/R2, K R1, O △, I ○, P ✕, [ □, RCtrl select, RShift start.
 KeyMap tbKeyMap(int player);
 
-// --autoplay "KEYS*TICKS,...": KEYS from U D L R (d-pad), X ✕, S □, C ○, T △, 1 L1, 2 L2, 3 R1, 4 R2, H LiT F1 key
-// (help; give it one tick), - none.
+// --autoplay "KEYS*TICKS,...": KEYS from U D L R (d-pad), X ✕, S □, C ○, T △, 1 L1, 2 L2, 3 R1, 4 R2, P Start
+// (Enter), H LiT F1 key (help; give it one tick), E LiT Esc key, - none.
 // e.g. "-*10,U*60,X*8". nullopt on a syntax error.
 std::optional<std::vector<bb::game::PadInput>> parseAutoplay(std::string_view script);
 

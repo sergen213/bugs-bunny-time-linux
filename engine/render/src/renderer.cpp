@@ -411,7 +411,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     if ((meshes_.empty() && actorMeshes_.empty()) || w_ <= 0 || h_ <= 0) return;
     flush2D();
     const bool original = s.fidelity == Fidelity::Original;
-    const Viewport vp = original && s.pillarbox ? fitAspect(w_, h_, 4.0f / 3.0f) : Viewport{0, 0, w_, h_};
+    const Viewport vp = (original && s.pillarbox) || s.frame43 ? fitAspect(w_, h_, 4.0f / 3.0f) : Viewport{0, 0, w_, h_};
     glViewport(vp.x, vp.y, vp.w, vp.h);
     glEnable(GL_SCISSOR_TEST);
     glScissor(vp.x, vp.y, vp.w, vp.h);

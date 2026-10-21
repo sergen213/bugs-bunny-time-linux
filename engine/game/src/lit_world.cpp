@@ -73,22 +73,26 @@ LitWorld LitWorld::load(const BzeFile& bze, const Scene* scene) {
     std::vector<std::vector<uint16_t>> refs;  // per def: tag-0x0f asset list
     std::vector<uint16_t> playerRefs;
     std::map<uint16_t, AnimFx> animFx;        // chunk 0x22 animation assets with frame sounds / logic events
-    std::span<const uint8_t> prog;  // chunk 0 tag 0x01: u32 n, n x 16 programs x 8 B {u16 1-based blob, ...} (0x41e030)
+    const int i3 = bze.find(3);
+    const std::vector<uint8_t> s3 = i3 >= 0 ? bze.payload(size_t(i3)) : std::vector<uint8_t>{};
+    // Speech: the language's section follows section 3 in file order (L01a: 6 5 7 8 9 10 for languages 0..5).
+    // ponytail: language 0 (English); G[0x10] is set after the load.
+    const std::vector<uint8_t> sp = i3 >= 0 && size_t(i3) + 1 < bze.sections.size() ? bze.payload(size_t(i3) + 1)
+                                                                                   : std::vector<uint8_t>{};
+    auto region = [](std::span<const uint8_t> sec, const auto& ref) {  // tag {u32 off, u32 size}
+        const uint32_t off = le<uint32_t>(ref, 0), size = le<uint32_t>(ref, 4);
+        return size_t(off) + size <= sec.size() ? sec.subspan(off, size) : std::span<const uint8_t>{};
+    };
     for (const ScriptItem& it : ls.items) {
         if (it.kind != ScriptItem::Kind::Chunk) continue;
-        if (it.code == 0x00) {  // sound table entries tag 0x04 {u16 id, u8 bank, u8 program, u16 flags, u8, u8} (0x41de40)
-            if (const ScriptTag* t = tag(it, 0x01)) {
-                const uint32_t off = le<uint32_t>(t->data, 0), size = le<uint32_t>(t->data, 4);
-                if (size_t(off) + size <= s4.size()) prog = std::span(s4).subspan(off, size);
-            }
+        if (it.code == 0x00) {  // 0x42f6c0: 0x01 programs (0x41e030), 0x02 bank (0x41e0e0), 0x04 sound (0x41de40),
+                                // 0x4c / 0x4d per-language speech programs (0x41e070) / bank (base 0x4b1c80)
             for (const ScriptTag& t : it.tags) {
-                if (t.id != 0x04) continue;
-                const uint16_t id = le<uint16_t>(t.data, 0), flags = le<uint16_t>(t.data, 4);
-                // 0x41edb0: program entry (bank * 16 + program) of DAT_0054afc4; flag 0x400 = per-language speech table.
-                const size_t e = 4 + (size_t(t.data[2]) * 16 + t.data[3]) * 8;
-                const int32_t blob = !(flags & 0x400) && e + 2 <= prog.size() ? int32_t(prog[e] | prog[e + 1] << 8) - 1 : -1;
-                if (id >= w.sounds_.size()) w.sounds_.resize(id + 1u, {-1, 0, 0, 0});
-                w.sounds_[id] = {blob, flags, t.data.size() > 7 ? t.data[7] : 0, 1};
+                if (t.id == 0x04) w.sfx.addEntry(t.data);
+                if (t.id == 0x01 && t.data.size() >= 8) w.sfx.programs = Sfx::programTable(region(s4, t.data));
+                if (t.id == 0x02 && t.data.size() >= 8) w.sfx.bank = Sfx::loadBank(region(s3, t.data), BzeVariant::LostInTime);
+                if (t.id == 0x4c && t.data.size() >= 8) w.sfx.speechPrograms = Sfx::programTable(region(sp, t.data));
+                if (t.id == 0x4d && t.data.size() >= 8) w.sfx.speech = Sfx::loadBank(region(sp, t.data), BzeVariant::LostInTime);
             }
         } else if (it.code == 0x22) {  // asset: tag 0x27 {u16 role, u16 id}; tag 0x3f flipbook {u16 n, u16, u32 off, u32 size}
             const ScriptTag *id = tag(it, 0x27), *fl = tag(it, 0x3f);
@@ -282,26 +286,29 @@ bool LitWorld::handHitsPlayer(const V3& h) const {
 
 int16_t LitWorld::boxTop() const { return p.animState.box[4] ? p.animState.box[4] : kApproxBoxTop; }
 
-// Sound start 0x41deb0 mode 1 (mode 2 releases a looping voice: no voices are simulated).
-void LitWorld::playSound(uint32_t id) {
-    // 0x41deb0 (mode 1): needs a free channel of 24 (none -> nothing, no rand), then the table entry; flag 0x80 =
-    // chance, plays when rand() >= byte 7 * 0x80; a started sound holds its channel.
-    if (sfxChannels == 0 || id >= sounds_.size() || !sounds_[id][3]) return;
-    if ((sounds_[id][1] & 0x80) && rand_() < sounds_[id][2] * 0x80) return;
-    if (sfxChannels > 0) --sfxChannels;
-    if (sounds_[id][0] >= 0) sfx.push_back(uint16_t(sounds_[id][0]));
+// 0x41deb0 for self (nullptr = Bugs): mode 1 start, mode 2 release (sfx.h).
+void LitWorld::playSound(const LitActor* self, uint32_t id, uint16_t mode) {
+    sfx.request(emitter(self), uint16_t(id), mode, rand_);
+}
+
+// 0x437ab0 (from 0x43a880 after the state machine, move = current move id): Bugs' looping glide sound 0xd while
+// flags14 0x10000, dig sound 0x1b in move 0x8b underground (flags18 4) while a direction is held (GD+0x0b & 0xf0).
+void LitWorld::bugsLoopSounds(uint16_t move) {
+    const bool glide = p.flags14 & 0x10000, dig = (p.flags18 & 4) && (pad.pressed & 0xf000) && move == 0x8b;
+    if (glide != bool(loopSounds_ & 8)) loopSounds_ ^= 8, playSound(nullptr, 0xd, glide ? 1 : 2);
+    if (dig != bool(loopSounds_ & 0x10)) loopSounds_ ^= 0x10, playSound(nullptr, 0x1b, dig ? 1 : 2);
 }
 
 // ---- tick ----
 
 void LitWorld::tick(const PadInput& in) {
     ++ticks;
-    sfx.clear();
     // F1 (window message, before the tick body): request the help screen, or leave a pause state (0x40e4a1).
     if (in.help) {
         if (S[12] == 0) helpRequest_ = true;
         else S[12] = 2;
     }
+    keys_ = in.esc ? 2 : 0;
     // §2.2: all words zero while the player is scripted/dead (flags14 0x1000000) or a level change is pending.
     if ((p.flags14 & 0x1000000) || nextLevel >= 0) {
         pad.raw = pad.held = pad.prev = pad.pressed = 0;
@@ -311,6 +318,12 @@ void LitWorld::tick(const PadInput& in) {
     }
     if (S[12] == 0) cameraTick();  // §1.1 step 3a: camera first, from the previous tick's player position
     actorsTick();   // §7.1: activation, then behaviours in active-list order (player among them)
+    sfx.mix(cam.eye, cam.target, [&](int32_t e, V3& pos) {  // 0x41edb0 right after 0x447d40
+        if (e < 2) return true;  // Bugs (0x4b324c): fixed levels
+        pos = actors[size_t(e - 2)].pos;
+        return false;
+    });
+    cameraNodes();  // §1.1 step 9: the render pass poses the actors (camera nodes set the view)
     hudTick();      // HUD actor 0x44acc0 (lit_hud.cpp; §3.6 health below 1 -> death state)
     speechTick();   // §1.1 step 5
     // §1.1 step 7 (0x4065e0): pause states. Help opens unless a scripted camera (0x300 without 1), the cutscene lock
@@ -604,7 +617,7 @@ void LitWorld::zoneTriggers(Mover& m, LitActor* self) {
             if (e.flags & 0x400000) defaultDeathState_ = e.arg[0];
             if (e.flags & 0x100000) { checkpoint_ = arg; checkpointYaw_ = p.yaw; }
             if (e.flags & 0x10000) break;
-            if (e.flags & 0x200) playSound(uint32_t(e.arg[0]));
+            if (e.flags & 0x200) playSound(self, uint32_t(e.arg[0]));  // 0x4386ee
             if (e.flags & 0x40) cameraSnap(arg);
             for (uint32_t fl : {0x800000u, 0x2000u})  // respawn point 0x4b2180 (no reader found), 0x437510
                 if (e.flags & fl) unsupported.insert(std::format("trigger flag 0x{:x}", fl));
@@ -1081,6 +1094,7 @@ void LitWorld::playerTick() {
                                       {0, p.yaw, p.lean}, {4096, 4096, 4096}, false))
             p.hand = {(*o)[0], (*o)[1], (*o)[2]}, p.handSet = true;
     }
+    bugsLoopSounds(mv->id);  // 0x43eb57
     // 0x43a880 tail: unless the move keeps the animated box (flagsB 0x2000), Bugs' box x/z and radius are fixed;
     // only the packet-9 heights follow the animation (runtime: L01A fight capture, +0x48..+0x54 = ±70 / ±40, +0x2e 80).
     // ponytail: the carried-actor variants (+0x6c with flags8 0x2000: longer z1 / the carried box) are not modelled.
@@ -1145,6 +1159,33 @@ void LitWorld::cameraReset() {  // 0x431160 (camera reset, also A77)
     cam.cachedYaw = 0;
 }
 
+// Render pass: 0x40a1f0 poses the active actors (0x40a530 on skipped frames); a part created as a camera node (TOD
+// packet 8 sub 1, flags 0x40, not hidden) sets the eye to its world origin and the look point to its matrix applied
+// to (0, 0, 1000), flags |= 0x100. 0x44c4b0 then clears 0x300 and sets 0x200 for each drawn actor with flagsC 0x100
+// (the camera actor). Runtime: the title camera actor (0, 146, 0) holds eye (1, 146, 0), look (1, 146, 1000), flags
+// 0x342 (RUNTIME_REFERENCE.md §14). ponytail: one combined pass after the behaviours, 0x100 and 0x200 both kept.
+void LitWorld::cameraNodes() {
+    cam.flags &= ~0x300u;
+    if (!scene_) return;
+    for (const uint32_t k : order_) {
+        const LitActor& a = actors[k];
+        if (!a.active || a.dead || a.def < 0 || defs[size_t(a.def)].model < 0) continue;
+        const ActorModel& m = scene_->actorModels[size_t(defs[size_t(a.def)].model)];
+        const std::vector<TodPart>& parts = a.animState.parts;
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if ((parts[i].flags & 0x8040) != 0x40 || parts[i].dead) continue;
+            const std::array<int32_t, 3> at{a.pos.x, a.pos.y, a.pos.z};
+            const std::array<int16_t, 3> rot{a.rot[0], a.yaw, a.rot[2]};
+            const auto eye = partOrigin(m, a.animState, i, at, rot, a.scale, false);
+            const auto look = partOrigin(m, a.animState, i, at, rot, a.scale, false, {0, 0, 1000});
+            cam.eye = {(*eye)[0], (*eye)[1], (*eye)[2]};
+            cam.target = {(*look)[0], (*look)[1], (*look)[2]};
+            cam.flags |= 0x100;
+        }
+        if ((a.flagsC & 0x100) && a.visible) cam.flags |= 0x200;
+    }
+}
+
 void LitWorld::cameraTick() {
     if (const Zone* z = hf.findZone(p.pos, p.zone)) p.zone = int16_t(z->id);
     if (!p.initialised) return;
@@ -1159,6 +1200,12 @@ void LitWorld::cameraTick() {
     if ((cam.flags & 0x40) && !(cam.flags & 0x300)) {
         if (cam.recentreRequest < 10) { ++cam.recentreRequest; moved = true; }
         else cam.flags &= ~0x40u;
+    }
+    if (cam.flags & 0x300) {  // a camera node (0x40a1f0) owns the view: Bugs frozen, no follow (0x4318f0)
+        p.flags14 |= 0x80000000;
+        cam.flags |= 0x40;
+        cam.recentreRequest = 0;
+        return;
     }
     const int32_t dist = (p.flags14 & 0x1000000) ? 500 : cam.distance;
     if (cam.flags & 0xc00) {  // scripted points (type-36 directors, 0x4318f0 0xc00 branch): no follow this tick

@@ -194,7 +194,7 @@ void applyTodFrame(AnimState& st, const Tod& tod, size_t frame) {
             break;
         case 8:
             if (!(pk.flag & 1)) {
-                constexpr uint16_t kCreate[5] = {0x8008, 0x40, 0x80, 0x100, 0x200};  // 1..4: light/flag nodes
+                constexpr uint16_t kCreate[5] = {0x8008, 0x40, 0x80, 0x100, 0x200};  // 1: camera node (0x40a530), 2..4 light nodes
                 const unsigned sub = pk.flag >> 1 & 7;
                 if (sub < 5) {
                     TodPart np;
@@ -301,13 +301,16 @@ std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimS
 
 std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const AnimState& st, size_t i,
                                                  std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-                                                 std::array<int32_t, 3> scale, bool mustDraw) {
+                                                 std::array<int32_t, 3> scale, bool mustDraw, std::array<int32_t, 3> local) {
     if (i >= st.parts.size()) return std::nullopt;
     std::vector<Work> work;
     workMatrices(st.parts, Work{coordMatrix(rot, scale), {float(pos[0]), float(pos[1]), float(pos[2])}}, work);
     if (mustDraw && !drawn(model, st.parts[i], work[i])) return std::nullopt;
-    const V3& t = work[i].t;
-    return std::array<int32_t, 3>{int32_t(std::lround(t[0])), int32_t(std::lround(t[1])), int32_t(std::lround(t[2]))};
+    const Work& w = work[i];
+    std::array<int32_t, 3> r;
+    for (size_t k = 0; k < 3; ++k)
+        r[k] = int32_t(std::lround(w.t[k] + w.m[3 * k] * float(local[0]) + w.m[3 * k + 1] * float(local[1]) + w.m[3 * k + 2] * float(local[2])));
+    return r;
 }
 
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,

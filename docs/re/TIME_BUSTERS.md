@@ -56,7 +56,7 @@ Reproduction scripts: `tools/ghidra/` (see ENGINE_COMPARISON.md "Reproduction").
 | `/comp` | `DAT_004d03e8 = 1` → BZE sections are LZSS-compressed (default: raw) |
 
 Without `/skip_intro` and `/b`, the logo AVIs play and the GDI title menu (1 Player / 2 Players / Load Game /
-Configuration / Quit) appears; "2 Players" is reachable only there and sets `GD+0xA4 = 0x12` (R; runtime:
+Configuration / Quit) appears; "2 Players" is reachable only there and sets `GD+0xA4` bit 0x10, read as 0x12 in play because the 2P switch rule 0x45eee0 adds 0x02 each tick (R; runtime:
 RUNTIME_REFERENCE.md §1, §4 `tbplay/F_2p_granny.csv`).
 
 ## 2. Level table and files
@@ -189,9 +189,81 @@ logic VM (0x45d7a0), not by hard-coded strings. Needs dynamic or BZE-level analy
 * XA music `..\track\Track%d.xa` and speech files streamed through DirectSound (init 0x429660,
   `DS Stream:` messages); sound effects are AIFF chunks (`SSND INST COMM MARK`, max 128 headers).
 * AVI playback via AVIFIL32 + waveOut (0x409df0, 0x40a020).
-* Front-end menus are a GDI/TTF system driven by `..\data\menu.men` (keywords `PAGE_ ISKEY ISSLIDE
-  ISCHECK ISLISTBOX ISIMAGE ISTEXT ISLABEL LinkedKey KeyId FillX FillY Align TypeTexte LANGUAGE_ DETAILS_
-  RENDERER_ RESOLUTION_ CHECKBOX_ITEM_ …`), drawn with `BitBlt`, not by the 3D engine.
+* Front-end menus are a GDI/TTF system driven by `..\data\menu.men`, drawn with `BitBlt` / `DrawTextA`, not by the
+  3D engine — §8.1.
+
+### 8.1 Front end (`menu.men`, WinMain state 2 → 0x41c0f0) — O (code), R (Wine oracle `local/wine/tbmenu/`)
+
+Implemented natively in `bb::game::parseTbMenu` (`engine/game/src/tb_menu.cpp`, `ctest -R game.tb_menu`) and
+`apps/bbtime/tb_front.cpp` (`bbtime --game tb --menu`). Status: page 0 **Verified** (pixel compare below), other pages
+Tested by eye against the oracle shots.
+
+**Boot.** 0x41c0f0 probes the display modes, installs the three TTFs (0x416710: `Keystrok`, `adelaidn`, `Bradybun`,
+copied to `\FONTS\` and `AddFontResourceA`), creates the fonts (0x416850), loads the menu (0x4182b0, else
+"Couldn't load the menu file properly, check out your data directory"), reads `..\bin\Savedata.dat` (0x428e50) and
+shows page 0. It never calls PlayMusic (GAMEPLAY_TB §6.3). After 30 s without input it plays the attract AVI
+(resource string 10 + n, `%s%d.avi`; not ported). The window procedure 0x42e480 drives it with the **mouse only**:
+WM_MOUSEMOVE → hover 0x41bc40, WM_LBUTTONDOWN / DBLCLK → click 0x41bf90 (+ hover), WM_KEYDOWN → key capture 0x41ba20
+(Controls pages only), WM_CLOSE → "quit?" message box. There is no keyboard or joystick navigation (bbtime adds a
+focus on top: arrows / d-pad move to the nearest actionable item, Enter / ✕ clicks it, Esc / ○ = the page's Back
+image or Quit on page 0).
+
+**File.** Latin-1, CRLF, `//` comments, sections `[NAME]` (≤ 31 chars, split at every `[`). A value is found with
+`strstr(section, "Key=")` — the first occurrence anywhere in the section, case-sensitive (0x416ba0) — up to the line
+end, trailing spaces dropped; numbers are `atoi`. Keys:
+
+| key | meaning |
+|---|---|
+| `Nopage` / `Group` | page 0–9 (−1 = no item; only `[PAGE_n]` and `[CHECKBOX_ITEM_0]` use it) / group within the page (absent = −1). Pages hold groups in order of first appearance, groups hold items in file order (0x416d00); drawing and hit tests walk that order |
+| `[PAGE_n]` | page backdrop only: `Up<language>` (0x639b48), else `Up`; blitted 640×480 at 0,0. Its x / y / With / Height / Texte are **not** read |
+| `x` `y` `With` `Height` | item rect (+0x70..+0x7c). A loaded `Up` image replaces With/Height with the bitmap size (ISSLIDE re-reads With/Height afterwards); ISTEXT with 0 takes the text extent |
+| `Up` / `Down` | `..\data\<file>` BMPs, normal / hovered (`xxx` = none). Blitted opaque (SRCCOPY): the icons carry their own background crop |
+| `Texte` | `~`-separated per language (EN FR DE ES IT – NL; index 5 is `xxx`), spaces trimmed (0x416a60); a text containing `xxx` is never drawn |
+| `TypeTexte` | +0x6c: ISTEXT 0, ISCHECK 1, ISSLIDE 2, ISLABEL 3, ISIMAGE 4, ISKEY 5, ISNONE 6, ISLISTBOX 7 |
+| `Align` | `_strlwr`ed: top 1, left 2 (default), bottom 3, right 4, center 5 (ISIMAGE: top / left only) |
+| `Function` | `Done` / `Done2` → 0x41a6e0 with 1 / 2: write `config.pc`, registry language, `0x48b1bc` = players, state 5 (the game; R: CCINTRO → GRANNY, "2 Players" → GD+0xA4 bit 0x10, 0x12 in play). `Cancel` → 0x41a6e0 with 0 = quit. `Call(n)` → 0x41a860 page n (re-texts every item if the language changed). `LoadSaveGame` 0x41b520, `DeleteSaveGame` 0x41b810 |
+| `Enable` | +0xac (`FALSE` = 0; every shipped section sets it) |
+| ISCHECK: `Selected`, `Changeable`, `CheckType` | initial check, `FALSE` = click only runs Function (Controls player / control-type checks switch pages 2 ↔ 5 ↔ 6), box template `CHECKBOX_ITEM_<CheckType>` |
+| ISSLIDE: `FillX` `FillY` | fill origin. `<P>_SLIDER` / `<P>_MIN` / `<P>_MAX` bind by prefix (0x418bd0): MUSIC (0x639b74 = v·80), SFX (0x639b70 = v·128), VOICES, CONTRASTE (double 0x639c20 = 0.25 + 1.75 v) |
+| ISKEY: `KeyId`, `LinkedKey`, `Flags` | `P1_`/`P2_` + up down left right Croix Carre Rond Triangle L1 R1 L2 R2 (+ select start View), `Joy_B1..12`; a linked item mirrors the key (First View = camera L2 + R2) |
+| `LANGUAGE_n` `RESOLUTION_n` `RENDERER_n` `DETAILS_n` | name prefixes binding a check to language / mode (320×240 … 1024×768) / renderer / detail level |
+
+The shipped file: pages 0 main (5 images), 1 Configuration (Controls / Video / Sound / Language / Back), 2 P1 keys,
+3 Video (resolution, renderer, details, brightness), 4 Sound (music, effects), 5 P2 keys, 6 joystick buttons, 7 Load,
+9 Language; 121 items.
+
+**Drawing** (font 0x4d1dd8 = "brady bunch", lfHeight 23 pt · 96/72 = 30; list box font 0x4d1de0 = 26; R: the
+oracle's text is 1-bit, matching FreeType at ppem 25 with coverage ≥ 240 — IoU 0.99 on the title labels; colours =
+the RGB triples at 0x48b0d8 and immediates):
+
+| type | draw |
+|---|---|
+| ISIMAGE 0x4195e0 | Up (hovered: Down) at x,y; Texte centred under it (x + w/2 − tw/2, y + h) in red (242,31,16), grey (128,128,150) when disabled (0x419c30) |
+| ISTEXT 0x4197a0 | blue (8,25,204), hovered (9,128,237); center = centred on x |
+| ISLABEL 0x419c30 | red / grey, aligned in the rect (center with With 0 = centred on x) |
+| ISCHECK 0x419950 | box (coche1 checked / coche2) at x − 16 − 7, y + h/2 − 8 + 3; text at x,y: blue / checked (49,174,241), hovered (9,128,237) / checked (175,238,253), disabled grey |
+| ISSLIDE 0x419df0 / 0x41adc0 | Texte red, centred 30 above; bar `Up` at x,y; fill (181,0,51) from FillX − 6 over With·v, FillY..+Height. `_MIN` / `_MAX` step ∓0.125 (brightness 0.05) and play `..\data\bong.wav` at the effects volume (0x41b060) |
+| ISKEY 0x41a2a0 | Texte orange (247,176,72) at x,y (top: centred 0x17 above); key name in the alignment: white, hovered (32,0,255), waiting (128,64,255), disabled (160,160,160); unbound `???` |
+| ISLISTBOX 0x419f40 | Savedata texts, 22-px rows at x + 10, small font: (9,128,237), hovered (49,174,241), selected (248,230,0), both (175,238,253); UP / DOWN images scroll it |
+
+Hover (0x41bc40): the first item under the mouse (image or its label, check box or text); a disabled key ends its
+group. Click (0x41bf90): +0x90 (check toggle 0x41ab70, key capture 0x41b1f0, list row 0x41b120, slider step 0x41b060,
+Done) then +0x98 (Call / Cancel / Load / Delete).
+
+**Saves.** `..\bin\Savedata.dat`: u32 n, `"1.00\0"`, n × 0x54: u8 slot, text "date, time, n%" (0x4b B), u32 level
+(+0x4c), +0x50 the in-memory next pointer. Load = `Savegame<slot>.dat` (0x2b0 bytes) → GAME_DATA, then 0x428bf0 clears
+GD+0x14a, 0xfe–0x108, 0x13d, sets GD+0x93 = language, start level = the record's level, players = GD+0xa4 & 0x10.
+Delete (0x428fb0) drops the record, renumbers the rest 0..n−1, rewrites Savedata (deleted when empty), deletes
+`Savegame<slot>.dat` and renames the later files down by one.
+
+**bbtime mapping.** Saves in `$XDG_DATA_HOME/bbtime/saves/tb/` (list, load, delete; TB has no in-game save in bbtime
+yet, so the list is empty unless original files are copied there). Sound sliders = the audio device's music / effects
+volume and `settings.ini` `music_volume` / `sfx_volume`. Controls: P1 / P2 keys rebind the session's TB keyboard maps
+(a key taken from another action leaves it `???`); the joystick page shows bbtime's fixed SDL gamepad layout (A X B LB
+RB Y LT RT) and is not rebindable. Video: 640×480, 3D card and high details are shown checked and the other choices
+disabled (bbtime renders at the window size, no detail levels); brightness moves but has no effect. Language: menu
+texts and backdrop for the session. Original Fidelity keeps the front end silent; Enhanced plays the collection
+menu's TB track.
 
 ## 9. Aspect ratio / FOV globals
 

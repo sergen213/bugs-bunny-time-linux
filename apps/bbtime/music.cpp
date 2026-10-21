@@ -1,6 +1,7 @@
 #include "music.h"
 
 #include "bb/audio.h"
+#include "settings.h"
 
 #include <cctype>
 #include <format>
@@ -54,6 +55,8 @@ bb::AudioDevice* audioDevice() {
     if (!dev) {
         dev = std::make_unique<bb::AudioDevice>();
         if (!dev->ok()) std::println(stderr, "bbtime: no OpenAL device, audio disabled");
+        const Settings s = loadSettings(settingsPath());  // settings.ini music_volume / sfx_volume (0..100)
+        dev->setMusicVolume(float(s.musicVolume) / 100.0f), dev->setSfxVolume(float(s.sfxVolume) / 100.0f);
     }
     return dev->ok() ? dev.get() : nullptr;
 }

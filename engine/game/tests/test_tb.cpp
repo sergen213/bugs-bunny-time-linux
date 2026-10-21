@@ -260,6 +260,9 @@ void arca(const fs::path& dir) {
         auto run = [&]() {
             Level r = load(dir / "ARCA01.bze");
             r.w.setTwoPlayer(true);
+            assert(r.w.A4 == 0x10);  // menu "2 Players" (0x41a6e0(2) -> 0x4370c0): bit 0x10 only
+            r.w.tick({}, {});
+            assert(r.w.A4 == 0x12);  // switch rule (0x45eee0) adds 0x02 each 2P tick = runtime A4 0x12 (F_2p_granny.csv)
             for (int i = 0; i < 200; ++i)
                 r.w.tick(keys(i % 50 < 30 ? PadUp : PadCross), keys(i % 40 < 20 ? PadLeft | PadUp : 0));
             return std::pair{r.w.actors[0].pos, r.w.actors[1].pos};
@@ -280,7 +283,7 @@ void arca(const fs::path& dir) {
         b.pos = {g->pos.x + 1200, g->pos.y - 30, g->pos.z};  // as the capture: Bugs poked 1200 in front of it
         g->yaw = 1024;                                         // facing +x
         std::vector<std::pair<uint16_t, int>> seen;            // guard state, entry tick
-        int thrown = -1, gone = -1, hit = -1;
+        int thrown = -1, gone = -1, hit = -1, flight = -1;
         std::vector<V3> path;                                  // the thrown 401 per tick from its spawn
         for (int i = 0; i < 300; ++i) {
             w.tick({});
@@ -288,41 +291,54 @@ void arca(const fs::path& dir) {
             const TbActor* p = nullptr;
             for (const TbActor& e : w.entities)
                 if (e.id == 401) p = &e;
-            if (p && thrown < 0) thrown = i;
+            if (p && thrown < 0) thrown = i, flight = p->rec() ? p->rec()->id : -1;
             if (p && gone < 0 && thrown >= 0) path.push_back(p->pos);
             if (!p && thrown >= 0 && gone < 0) gone = i;
             if (hit < 0 && b.hp < 6) hit = i;
         }
         std::string s;
         for (auto [id, at] : seen) s += std::format(" {}@{}", id, at);
-        std::printf("  guard 267 states:%s; 401 thrown @%d, gone @%d, Bugs hurt @%d (health %d)\n", s.c_str(), thrown, gone,
-                    hit, b.hp);
-        // Capture B per tick: 364 @55, its block 364 spawns 401 on anim frame 7 (@71) and sends it event 0x101 ->
-        // 395 (the first-tick event 2 only applies without a state); 395 (flagsB 0x20000) follows its TOD 0xa00
-        // point (0x45643b carry +0x58: next position = last tick's attach point) out and back to the hand and
-        // removes itself on its anim's last frame (V 0x400) @128; hitting Bugs ran its program (block 397: S[0x7a]
-        // = 1), so on 364's last frame the guard picks event 300 -> 435 @133, 502 @181, 501 @182, 364 @188.
-        const std::vector<uint16_t> want = {357, 522, 497, 504, 502, 501, 364, 435, 502, 501, 364};
+        std::printf("  guard 267 states:%s; 401 (%d) thrown @%d, gone @%d, Bugs hurt @%d (health %d)\n", s.c_str(), flight,
+                    thrown, gone, hit, b.hp);
+        // Capture B per tick: 364 @55, its block 364 spawns 401 on anim frame 7 (@71) and sends it event 0x100/0x101
+        // (rand) -> 394/395 (the first-tick event 2 only applies without a state). B: 395 (flagsB 0x20000) follows
+        // its TOD 0xa00 point (0x45643b carry +0x58: next position = last tick's attach point) out and back to the
+        // hand and removes itself on its anim's last frame (V 0x400) @128; hitting Bugs ran its program (block 397:
+        // S[0x7a] = 1), so on 364's last frame the guard picks event 300 -> 435 @133, 502 @181, 501 @182, 364 @188.
+        // The patrol state before the notice (B 522, local/wine/tbrand 521) and the 401 variant are rand() picks of
+        // the shared stream: tbrand (rand() callers traced) throws a miss first, then 364's end -> 502 @+78, 501
+        // @+79, 364 @+85, and the second throw hits. A 502 before the first 501 is there in B, not in tbrand.
         std::vector<uint16_t> ids;
         for (auto [id, at] : seen) ids.push_back(id);
-        const auto m = std::ranges::search(ids, want);
-        assert(m.begin() != ids.end());
-        const int t364 = seen[size_t(m.begin() - ids.begin()) + 6].second;
-        const auto at = [&](size_t k) { return seen[size_t(m.begin() - ids.begin()) + k].second - t364; };
-        assert(thrown - t364 == 16 && gone - t364 == 73 && at(7) == 78 && at(8) == 126 && at(9) == 127 && at(10) == 133);
-        // Flight (B, guard yaw 1006; ticks 71..127, the removal tick unseen): per-tick dy exact, dx along the facing
-        // within 1 (ours yaw 1024: 104 where B has 104 · sin(1006) = 103.96 truncated).
-        const int dyB[] = {0, 0, -33, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, -1, -2, -3, -3, -4, -5, -5, -6, -6, -6, -6, -6, -6, -6,
-                           -6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -3, -2, -1, 0, 0, 1, 2, 2, 4, 5, 6, 7, 8, 10, 11, 13, 14,
-                           8, 0};
-        const int dxB[] = {0, 0, 103, 110, 105, 100, 96, 91, 86, 81, 76, 72, 67, 63, 58, 54, 50, 45, 41, 37, 33, 29, 25, 21,
-                           17, 12, 8, 4, 1, -2, -7, -13, -19, -24, -29, -33, -38, -42, -46, -50, -54, -57, -60, -63, -66,
-                           -69, -71, -73, -74, -76, -77, -79, -79, -80, -80, -19};
-        assert(path.size() == std::size(dyB) + 1);
-        for (size_t k = 0; k < std::size(dyB); ++k)
-            assert(path[k + 1].y - path[k].y == dyB[k] && std::abs(path[k + 1].x - path[k].x - dxB[k]) <= 1);
-        // Both throws hit Bugs (B: health 6 -> 5 @83, -> 4 @221); the hit ticks depend on where Bugs stands.
-        assert(hit > thrown && hit < gone && b.hp == 4 && w.S[0x7a] == 1);
+        auto m = std::ranges::find(ids, 497);
+        assert(m != ids.end() && m - ids.begin() >= 2 && (m[-1] == 521 || m[-1] == 522) && m[-2] == 357);
+        size_t k = size_t(m - ids.begin()) + 1;
+        assert(ids[k++] == 504);
+        if (ids[k] == 502) ++k;
+        assert(ids[k] == 501 && ids[k + 1] == 364);
+        const int t364 = seen[k + 1].second;
+        const auto at = [&](size_t j) { return seen[k + 1 + j].second - t364; };
+        assert(thrown - t364 == 16 && gone - t364 == 73 && at(1) == 78 && (flight == 394 || flight == 395));
+        if (flight == 395) {
+            assert(ids[k + 2] == 435 && ids[k + 3] == 502 && at(2) == 126 && ids[k + 4] == 501 && at(3) == 127 &&
+                   ids[k + 5] == 364 && at(4) == 133);
+            // Flight (B, guard yaw 1006; ticks 71..127, the removal tick unseen): per-tick dy exact, dx along the
+            // facing within 1 (ours yaw 1024: 104 where B has 104 · sin(1006) = 103.96 truncated).
+            const int dyB[] = {0, 0, -33, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, -1, -2, -3, -3, -4, -5, -5, -6, -6, -6, -6, -6, -6,
+                               -6, -6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -3, -2, -1, 0, 0, 1, 2, 2, 4, 5, 6, 7, 8, 10, 11,
+                               13, 14, 8, 0};
+            const int dxB[] = {0, 0, 103, 110, 105, 100, 96, 91, 86, 81, 76, 72, 67, 63, 58, 54, 50, 45, 41, 37, 33, 29, 25,
+                               21, 17, 12, 8, 4, 1, -2, -7, -13, -19, -24, -29, -33, -38, -42, -46, -50, -54, -57, -60, -63,
+                               -66, -69, -71, -73, -74, -76, -77, -79, -79, -80, -80, -19};
+            assert(path.size() == std::size(dyB) + 1);
+            for (size_t j = 0; j < std::size(dyB); ++j)
+                assert(path[j + 1].y - path[j].y == dyB[j] && std::abs(path[j + 1].x - path[j].x - dxB[j]) <= 1);
+            assert(hit > thrown && hit < gone);  // B: health 6 -> 5 @83; where Bugs stands sets the tick
+        } else {
+            assert(ids[k + 2] == 502 && ids[k + 3] == 501 && at(2) == 79 && ids[k + 4] == 364 && at(3) == 85);
+        }
+        // A later throw hits too (B: -> 4 @221; tbrand: the second); S[0x7a] = 1 from block 397.
+        assert(hit > 0 && b.hp <= 5 && w.S[0x7a] == 1);
         // Melee (capture C: Bugs poked next to it -> 502 394, Bugs hurt state 208, health -1, 60-tick flash).
         b.pos = {g->pos.x + rotY(g->yaw, 0, 0, 300).x, g->pos.y - 30, g->pos.z + rotY(g->yaw, 0, 0, 300).z};
         const int bugsHp = b.hp;
@@ -375,21 +391,21 @@ void arca(const fs::path& dir) {
             return v;
         };
         // The guard's draws land in its own register (+0x126 = S[0x1fe], 0x4d269e); its second pick at 364's end (tick
-        // 177: oracle 6 rand() calls, ours 5, the Taz fidget draws already differ) takes another call index, so the
-        // guard is compared through tick 176.
+        // 177: 435 in the oracle, ours 500: the per-tick draw counts still differ in this scene) takes another call
+        // index, so the guard is compared through tick 176.
         const auto gWant = runs({{394, 2}, {433, 17}, {502, 1}, {394, 24}, {435, 48}, {502, 1}, {501, 6}, {364, 78}});
-        // Taz: the oracle's idle fidget picks (20/21/22 from tick 48) come from rand() draws that follow the sounds and
-        // effects the original draws first in the same tick (2-5 calls per tick against our 0-1), so its states are
-        // compared through tick 47 and for the second hit, the thrown 401 @120 like the oracle.
-        const auto tWant = runs({{135, 6}, {136, 12}, {140, 5}, {190, 13}, {10, 12}});
+        // Taz: the idle fidget picks follow the draws of the director logic's particle effects (V 0x200000) and the
+        // animation-asset logic in the same tick, now all on the shared stream: every state through tick 229 matches
+        // the oracle (fidgets 20/21/22 @48, the thrown 401 @120, 20/21/22 @146); its 9 @237 is ours @230.
+        const auto tWant = runs({{135, 6}, {136, 12}, {140, 5}, {190, 13}, {10, 12}, {20, 6}, {21, 25}, {22, 6}, {8, 35},
+                                 {190, 13}, {10, 13}, {20, 6}, {21, 29}, {22, 6}, {8, 43}});
         auto show = [](const std::vector<uint16_t>& v) {
             std::string r;
             for (size_t k = 0; k < v.size(); ++k)
                 if (!k || v[k] != v[k - 1]) r += std::format(" {}@{}", v[k], k);
             return r;
         };
-        const bool tazOk = std::equal(tWant.begin(), tWant.end(), ts.begin()) && ts[119] != 190 &&
-                           std::all_of(ts.begin() + 120, ts.begin() + 133, [](uint16_t s) { return s == 190; }) && ts[133] != 190;
+        const bool tazOk = std::equal(tWant.begin(), tWant.end(), ts.begin());
         const bool gOk = std::equal(gWant.begin(), gWant.end(), gs.begin());
         std::printf("  Taz spin: guard health %d -> %d, Taz %d; guard%s (%s), Taz%s (%s the oracle)\n", hp0, g->hp, t.hp,
                     show(gs).c_str(), gOk ? "match" : "DIFFER", show(ts).c_str(), tazOk ? "match" : "DIFFER from");

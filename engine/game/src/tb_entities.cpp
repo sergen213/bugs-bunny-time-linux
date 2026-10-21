@@ -96,10 +96,10 @@ void TbWorld::classTick(TbActor& a) {
             a.f24 |= 0x8000;
         }
         if (a.flags1 & 0x14) unsupported.insert("class16 camera target");  // DAT_004d5164 camera hint
-        if (a.firstBlock) runBlock(a, a.firstBlock);
+        if (a.firstBlock >= 0) runBlock(a, uint16_t(a.firstBlock));
         return;
     case 35:  // 0x450cd0
-        if (a.firstBlock) runBlock(a, a.firstBlock);
+        if (a.firstBlock >= 0) runBlock(a, uint16_t(a.firstBlock));
         return;
     case 31: textTick(a); return;  // 0x450d00 overlay text
     case 0: case 6: case 7: case 20: return;

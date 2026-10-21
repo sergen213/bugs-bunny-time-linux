@@ -1,7 +1,8 @@
 // LiT level-logic VM: TestLogicCond 0x42a7d0 (99 conditions, table 0x4ac550) and RunLogicAction 0x42c6d0
 // (129 actions, table 0x4ac6e0). Semantics: docs/re/LOGIC.md §4/§5. `self` = the actor running the item
-// (nullptr = Bugs); P = Bugs. Front-end/menu opcodes (C92-C98, A93, A100-A128) are not ported: they return false /
-// do nothing and are listed in LitWorld::unsupported, as are camera effects without a simulated counterpart.
+// (nullptr = Bugs); P = Bugs. The title front end's opcodes (C96, A93, A100, A128) are ported; the pause-menu
+// options opcodes (C92-C95, C97, A102-A127, in every playable level) return false / do nothing and are listed in
+// LitWorld::unsupported, as are camera effects without a simulated counterpart.
 // C55/C56, A49/A51/A52 run overlay text scripts (lit_overlay.cpp).
 #include "bb/game/lit_world.h"
 
@@ -10,8 +11,10 @@
 namespace bb::game {
 namespace {
 
-// C57/C79/C90 mask byte: bits 0-3 triangle/circle/cross/square, bits 4-7 up/right/down/left -> pad word bits.
+// C57/C69/C90 mask byte: bits 0-3 triangle/circle/cross/square, bits 4-7 up/right/down/left -> pad word bits.
 uint16_t padMask(uint8_t a) { return uint16_t((a & 0xf) << 4 | (a & 0xf0) << 8); }
+// C79/C80 (0x42b820 / 0x42b850) mask byte: bits 0-3 L2/R2/L1/R1, bits 4-7 Select/L3/R3/Start.
+uint16_t padMask2(uint8_t a) { return uint16_t((a & 0xf) | (a & 0xf0) << 4); }
 
 // Angle from `from` to `to` minus `yaw`, wrapped to (-0x800, 0x800] (0x42ae30 / 0x42af90).
 int32_t facing(const V3& from, const V3& to, int32_t yaw) { return angleDiff(ratan2(to.x - from.x, to.z - from.z), yaw); }
@@ -83,7 +86,10 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 54: return (p.flags18 & 4) == 0;
     case 55: overlayStatus_ = overlay(it.x); return (A & overlayStatus_) != 0;  // 0x42b450
     case 56: return (A & overlayStatus_) != 0;
-    case 57: return ((pad.raw | (pad.raw & PadStart ? PadCross : 0)) & padMask(A)) != 0;
+    case 57: case 69: {  // 0x42b4a0 / 0x42b500: Start (or Return) also counts as cross; C69 = none of them
+        const bool any = ((pad.raw | (pad.raw & PadStart ? PadCross : 0)) & padMask(A)) != 0;
+        return it.cond == 57 ? any : !any;
+    }
     case 58: return me.reg == A;
     case 59: return int16_t(A) < me.reg;
     case 60: return me.reg < int16_t(A);
@@ -93,7 +99,6 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 66: return G[A] < G[B];
     case 67: return S[B] < S[A];
     case 68: return G[B] < G[A];
-    case 69: case 80: return (pad.raw & padMask(A)) == 0;  // C69 tail truncated in the decompile: 'none-of' Inferred
     case 70: return s8(A) < s8(S[B]);
     case 71: return s8(S[B]) < s8(A);
     case 72: return s8(S[A]) < s8(S[B]);
@@ -102,7 +107,8 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 75: return me.zone != A;
     case 77: return (p.flags14 & 0x10) == 0;
     case 78: { const PlayerState* st = findState(p.state); return st && p.seq <= 4 && uint16_t(st->moves[p.seq]) == A; }
-    case 79: return (pad.raw & padMask(A)) != 0;
+    case 79: return (pad.raw & padMask2(A)) != 0;
+    case 80: return (pad.raw & padMask2(A)) == 0;
     case 81: return (pad.pressed & PadR1) == 0;
     case 82: case 83: {  // 0x42b640: A bits -> flags14, B bits -> flags18
         static constexpr uint32_t a14[8] = {0x1, 0x2, 0x10, 0x8, 0x200, 0x400, 0x4000, 0x1000000};
@@ -113,12 +119,14 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
         return it.cond == 82 ? any : !any;
     }
     case 84: { const int32_t h = int8_t(p.pos.y >> 8); return s8(A) <= h && h <= s8(B); }
-    case 85: case 87: return B != 1;                        // sound A playing == (B == 1): voices not simulated, never playing
+    case 85: case 87:  // 0x42b930 / 0x42b990: sound A on any voice / on self's voice (start pending or playing) == (B == 1)
+        return sfx.playing(A, it.cond == 87 ? emitter(self) : 0) == (B == 1);
     case 86: return false;                                  // Bugs carrying: not simulated
     case 88: return s8(A) < s8(G[B]);
     case 89: return s8(G[B]) < s8(A);
     case 90: return (pad.pressed & padMask(A)) != 0;
     case 91: return (pad.pressed & padMask(A)) == 0;
+    case 96: return (keys_ & 2) != 0;  // 0x42c670: Esc held (0x4b18d0 bit 1)
     case 98: return joystick == (A != 0);  // 0x42c690: config use-joystick (selects >D vs >J hint scripts)
     default:
         unsupported.insert(std::format("C{}", it.cond));
@@ -182,7 +190,7 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 31: me.flags14 = (me.flags14 & ~0x200000u) | 0x400000; return;
     case 32: if (self) self->act3c &= ~0x40u; return;      // activation +0x3c &= ~0x40
     case 33: case 63: return;                                // drop / destroy carried actor: none carried
-    case 34: playSound(X); return;
+    case 34: playSound(self, X); return;
     case 35: G[1] = 0; kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_)); return;
     case 36: sy = uint8_t(sy + X); return;
     case 37: gAdd(it.y, X); return;
@@ -238,7 +246,7 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
         else if (X == 1) speech_ = 0, S[0x17] = 1;
         else speech_ = 0, S[0x17] = 0;
         return;
-    case 82: return;                                         // sound mode 2 = release a voice
+    case 82: playSound(self, X, 2); return;                  // 0x42d7f0: release
     case 83: cam.flags |= 0x8000; return;
     case 84: cam.flags &= ~0x8000u; return;
     case 86: p.flags14 |= 0x80000000; return;
@@ -255,8 +263,36 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 98: cam.flags |= 0x20; return;
     case 99: cam.flags &= ~0x20u; return;
     case 101: cam.flags |= 4; return;
-    default: skip();  // A44 0x28, A56, A59/A68 shake, A85 camera target,
-                      // A93/A100/A102-A128 front end
+    case 93:  // 0x42d910: title slot lines 1-6, "N. <golden> <clocks>" (saved) or "N. Empty", green on slot G[X]
+        for (uint8_t k = 0; k < 6; ++k) {
+            const bool sel = G[X & 0xff] == k + 1;
+            overlay(uint16_t((saveMask >> k & 1 ? (sel ? 0x36 : 0x2e) : (sel ? 0x46 : 0x3e)) + k));
+        }
+        return;
+    case 100: {  // 0x42dae0: slot cursor G[X] onto a saved slot, searching in the raw pad's direction (→/↓ forward)
+        uint8_t& c = G[X & 0xff];
+        const auto saved = [&](int s) { return (saveMask >> ((s - 1) & 31) & 1) != 0; };
+        if (saved(c)) return;
+        int v = c;
+        if (!(pad.raw & (PadRight | PadDown))) {
+            while (v > 0 && !saved(v)) --v;
+            if (v < 1) {
+                if (pad.raw & PadLeft) { c = uint8_t(c + 3); return; }
+                for (v = 1; v < 7 && !saved(v); ++v) {}
+            }
+        } else {
+            while (v < 7 && !saved(v)) ++v;
+            if (v > 6) {
+                if (pad.raw & PadRight) { c = uint8_t(c - 3); return; }
+                for (v = 6; !saved(v);)
+                    if (--v < 1) break;
+            }
+        }
+        c = uint8_t(v);
+        return;
+    }
+    case 128: quitRequest = true; return;  // 0x42e350: 0x45f2b0 = 0x14, the "Do you really want to quit?" dialog
+    default: skip();  // A44 0x28, A56, A59/A68 shake, A85 camera target, A102-A127 pause-menu options
     }
 }
 

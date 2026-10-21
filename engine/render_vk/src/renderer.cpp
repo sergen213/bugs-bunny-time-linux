@@ -983,7 +983,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     flush2D();
     VkCommandBuffer cb = frames_[frame_].cmd;
     const bool original = s.fidelity == Fidelity::Original;
-    const render::Viewport vp = original && s.pillarbox ? render::fitAspect(w_, h_, 4.0f / 3.0f) : render::Viewport{0, 0, w_, h_};
+    const render::Viewport vp = (original && s.pillarbox) || s.frame43 ? render::fitAspect(w_, h_, 4.0f / 3.0f) : render::Viewport{0, 0, w_, h_};
     const int top = h_ - vp.y - vp.h; // fitAspect is bottom-left based like GL; Vulkan is top-left
     const VkRect2D rect{{vp.x, top}, {uint32_t(vp.w), uint32_t(vp.h)}};
     VkClearAttachment clears[2]{};

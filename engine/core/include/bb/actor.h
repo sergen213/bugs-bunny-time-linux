@@ -17,7 +17,7 @@ Tod parseTod(std::span<const uint8_t> d, size_t off);
 // One GsCOORDINATE2 part (pool entry 0x4b2240) as the frame applier leaves it.
 struct TodPart {
     uint32_t id = 0;             // creating packet's id (parents and kills search by it)
-    uint16_t flags = 0x8008;     // 0x8000 unposed/hidden, 8 no object, 4 has object, 0x40.. light nodes
+    uint16_t flags = 0x8008;     // 0x8000 unposed/hidden, 8 no object, 4 has object, 0x40 camera node, 0x80.. light nodes
     int32_t object = -1;         // 0-based TMD object, -1 = none
     int32_t parent = -2;         // part index into the part list; -1 = actor root, -2 = none (unattached)
     bool dead = false;           // killed (type 8, odd flag other than 0xb); kept so indices stay stable
@@ -72,11 +72,12 @@ void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t,
 std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimState& st);
 
 // World position (PS1, rounded) of part `i`'s coordinate origin (0x4375d0 walks the GsCOORDINATE2 chain) under the
-// root Trans(pos) * RotMatrix(rot) * Scale(scale); nullopt when the part is absent or not drawn this pose.
-// World origin of part i (nullopt when out of range or, with mustDraw, not drawn).
+// root Trans(pos) * RotMatrix(rot) * Scale(scale), plus the part's world matrix applied to `local` (0x40a530: a camera
+// node's look point (0, 0, 1000)); nullopt when the part is out of range or, with mustDraw, not drawn this pose.
 std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const AnimState& st, size_t i,
                                                  std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-                                                 std::array<int32_t, 3> scale, bool mustDraw = true);
+                                                 std::array<int32_t, 3> scale, bool mustDraw = true,
+                                                 std::array<int32_t, 3> local = {});
 
 // Index of animation `animId` in model.anims, -1 if absent.
 int findAnim(const ActorModel& model, uint16_t animId);

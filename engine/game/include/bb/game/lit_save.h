@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -50,6 +51,14 @@ std::filesystem::path litSaveGamePath(const std::filesystem::path& dir, int slot
 std::filesystem::path litSaveDataPath(const std::filesystem::path& dir);            // dir/Savedata.dat
 // Reads dir/Savedata.dat; a missing file is the zeroed summary the original creates (0x4076f0). Throws on bad data.
 LitSaveData readLitSaveData(const std::filesystem::path& dir);
+class LitWorld;
+// The title's part of 0x407190, run each tick after LitWorld::tick: request S[0x0a] = 4 new game / 5 load slot G[0x9f]
+// (only when its bit is in w.saveMask; a file that cannot be read is a new game in slot 0 and S[0x1b] = 4) both set
+// S[0x1c] = 0, S[0x25] = 1, S[0x1b] = 0x10 (the Start / Go back page), w.G = the game's G (next level G[0x0e]: 0x38
+// CCINTRO, or the saved level) and return its GAME_DATA image; S[3] == 1 on the title (w.level 0) reads
+// dir/Savedata.dat (0x4076f0: w.saveMask, S[4], slot summaries S[0x2b + 2k] u16 golden carrots / S[0x3b + k] clocks),
+// then S[0x1b] = 0x0e (slot menu), S[0x24] = 1 (Load game), S[3] = 2. Request 6 (save) is writeLitSave.
+std::optional<LitSaveGame> litFrontEnd(LitWorld& w, const std::filesystem::path& dir);
 // The save request (S[0x0a] = 6 -> 0x4074f0): seals g, writes Savegame<slot>.dat and the updated Savedata.dat.
 // Existing files are first copied to <name>.bak. Returns "" or an error.
 std::string writeLitSave(const std::filesystem::path& dir, LitSaveGame& g);

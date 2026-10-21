@@ -406,7 +406,7 @@ int testExit(const BzeFile& bze, const Scene& scene) {
 // follows; release at 301 leaves it at x 25610.
 void testPushL01a(const BzeFile& bze, const Scene& scene) {
     LitWorld w = LitWorld::load(bze, &scene);
-    w.sfxChannels = 24;
+    w.sfx.device = false;
     w.loadUpdate();
     size_t bi = 0;
     while (bi < w.actors.size() && w.actors[bi].type != 5) ++bi;
@@ -445,7 +445,7 @@ void testRopeL02a1(const std::filesystem::path& file) {
     const BzeFile bze = loadBze(file);
     const Scene scene = buildLitScene(bze, "L02A1");
     LitWorld w = LitWorld::load(bze, &scene);
-    w.sfxChannels = 24;
+    w.sfx.device = false;
     w.loadUpdate();
     size_t ri = 0;
     while (ri < w.actors.size() && w.actors[ri].type != 8) ++ri;
@@ -495,7 +495,7 @@ void testFloatL01d1(const std::filesystem::path& file) {
     const BzeFile bze = loadBze(file);
     const Scene scene = buildLitScene(bze, "L01D1");
     LitWorld w = LitWorld::load(bze, &scene);
-    w.sfxChannels = 24;
+    w.sfx.device = false;
     w.loadUpdate();
     size_t gi = 0;
     while (gi < w.actors.size() && !(w.actors[gi].flags8 & 0x100000)) ++gi;
@@ -583,7 +583,7 @@ void testEnemyL01a(const BzeFile& bze, const Scene& scene) {
     struct At { int cnt; uint32_t seed; V3 pos; int16_t yaw; uint16_t state; int16_t wander; };
     {
         LitWorld w = LitWorld::load(bze, &scene);
-        w.sfxChannels = 24;
+        w.sfx.device = false;
         w.loadUpdate();
         const At want[] = {{9, 0x0bb31550, {24500, -624, 15125}, 4096, 1, 491},
                            {431, 0x884dc7d5, {25270, -624, 16030}, 5006, 1, 400},
@@ -604,7 +604,7 @@ void testEnemyL01a(const BzeFile& bze, const Scene& scene) {
     // Fight (csv/litenemy_L01A_fight2.csv, pads replayed by counter): teleported next to it (memsrv poke at counter
     // 103), three kicks (□) make it face (state 236), chase (177) and start its attack (201) exactly as the original.
     LitWorld w = LitWorld::load(bze, &scene);
-    w.sfxChannels = 24;
+    w.sfx.device = false;
     w.loadUpdate();
     const std::pair<int, uint16_t> pads[] = {{585, PadSquare}, {603, 0}, {641, PadSquare}, {657, 0}, {697, PadSquare}, {711, 0},
                                              {771, PadCross}, {793, 0}, {881, PadUp}, {921, 0}, {967, PadCross}, {999, 0},
@@ -671,7 +671,7 @@ void testEnemyL01a(const BzeFile& bze, const Scene& scene) {
 // local/litenemies/enemy_trace.py (counter = 2t + 3).
 void probeEnemy(const BzeFile& bze, const Scene& scene) {
     LitWorld w = LitWorld::load(bze, &scene);
-    w.sfxChannels = 24;
+    w.sfx.device = false;
     w.loadUpdate();
     std::map<int, uint16_t> pads;
     if (const char* f = std::getenv("PROBE_PADS")) {

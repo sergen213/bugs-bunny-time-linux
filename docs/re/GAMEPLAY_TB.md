@@ -376,7 +376,11 @@ player (3D / xz), 10 the player recorded in `+0x24 & 0x3000000`, else focus (O/H
 
 Actions: 'S' (7) table `0x4cd6ac` — 3/4 `S[Y]`/`GD` `|= X`, 5 `&=`, 7/8 `= rand() % X`, 10/11 `= X`, 12 `S[Y] = S[X]`,
 16 `+0x82 = 0`, 20 sound, 21 `S[Y] += (s8)X`, 22 `GD(Y) += X` (`0x431030`, u16 at even Y ≤ 0x30), 34 yaw `+= (s8)S[Y] << 4`
-(`0x4311a0`), 76/77 octant bit of the bearing to/from target X, 79, 82, 106 GAME_DATA +500 bit, 126 (above);
+(`0x4311a0`), 76/77 octant bit of the bearing to/from target X, 79, 82, 106 GAME_DATA +500 bit, 118 particle slot field
+(`0x432c80` → `0x452060`: slot = the one this entity owns (`0x451e10`, else 0); field X & 0xff: 4 count +0x52, 7 bind
+slot Y to this entity +0x60, 10 flags +6, others shape/colour/timing), 126 (above); V 0x80200000 emits particle slot
+p3 (`0x452ab0`, skipped for p1 & 1 while `+0x24 & 4`): per particle 2 rand() + 1 with slot flags 0x80 + 1 without
+0x800 (R: `local/wine/tbrand/rand.csv`); slots 0x4d6ae0 20 × 0x9c, defaults count 10 flags 0x40 (`0x451e40`, level load);
 'V' (0xb) `0x45ad70` `{u32 op, p1, p2, p3}` (non-0x80000000 branch): 0x810 spawn template p3 (p2 times) at the attach
 part or the actor (0x800 random yaw), on the spawned or selected target 0x40000 attach (to `+0x84`), 0x4000 event p1,
 0x20000 kill; 0x200 release children matching `+0x08 & p1` / `+0x0c & p2` (`+0x20 |= 0x10000`, program run);
@@ -702,6 +706,8 @@ The TB front end (`menu.men`, GDI, WinMain state 2 → `0x41c0f0`) **never calls
 `Track14.xa` is only the missing-file fallback (and what PlayMusic(−1) would pick before any level track, via the
 initial 99). For the collection menu the closest original choice is the hub track **Track2.xa** (Granny, n = 3) —
 I/M choice, not an original behaviour; `apps/bbtime/music.cpp` currently uses Track14 (UNVERIFIED there).
+bbtime's original TB front end (`tb_front.cpp`, TIME_BUSTERS.md §8.1) is silent in Original Fidelity; Enhanced plays
+the collection menu's TB track (`menuTrack`) by choice; the bong plays on the Sound page's − / + as in the original.
 
 **Reimplementation notes (music).** Implement action 126 as "set wanted track"; once per tick compare with the
 playing one: 0/1 stop, −1 resume, else `Track(n−1).xa` with the Track14 fallback, loop at end of stream; reset the

@@ -172,7 +172,7 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
         if (s.frame != frame) continue;
         if (s.count) { --s.count; continue; }
         s.count = s.reload;
-        playSound(s.id);
+        playSound(self, s.id);  // 0x4393e0 / 0x438970 (Bugs)
     }
     for (const AnimFx::Event& e : it->events) {
         if ((e.frame != frame && !(e.f3 & 8)) || (e.item.cond && !cond(e.item, self))) continue;
@@ -291,7 +291,8 @@ void LitWorld::actorsTick() {
         LitActor& a = actors[i];
         ++a.timer;
         if (a.flags14 & 0x100) {
-            a.dead = true;  // freed by 0x447a50
+            a.dead = true;  // freed by 0x447a50 (0x41f5d0 releases its flag-0x10 voices)
+            sfx.releaseOwned(emitter(&a));
             std::erase(order_, uint32_t(i));
             if (p.platform == int(i)) { p.platform = -1; p.flags14 &= ~0x14u; }
             if (p.rope == int(i)) dropRope();
@@ -351,13 +352,22 @@ void LitWorld::behaviour(size_t i) {
     case 28: platform(i, 0x200); return;
     case 29: platform(i, 0x400); return;
     case 8: rope(i); return;
+    case 0: {  // 0x43eee0 static prop: one rigid part (0x448980) for the model's object, no TOD playback (the title
+               // copyright plane's anim 163 root scale 6336/4505 is never applied: RUNTIME_REFERENCE.md §14)
+        LitActor& a = actors[i];
+        if (a.animState.parts.empty()) {
+            a.flags18 |= 0x80;
+            if (defs[size_t(a.def)].model >= 0) a.animState.parts.push_back({.flags = 4, .object = 0, .parent = -1});
+        }
+        return;
+    }
     case 3: case 7: case 11: case 15: case 17: case 20: case 21: case 30: case 33: case 35: return;  // no-op / texture link
     default: {
-        // 0 static prop, 4 flipbook effect, 10 tagger, 31 projectile, 34 attached:
+        // 4 flipbook effect, 10 tagger, 31 projectile, 34 attached:
         // not simulated; TOD models loop their initial animation as in the viewer.
         LitActor& a = actors[i];
         const ActorDef& d = defs[size_t(a.def)];
-        if (a.type != 0) unsupported.insert(std::format("actor type {}", a.type));
+        unsupported.insert(std::format("actor type {}", a.type));
         if (d.idleAnim) {
             animate(a, a.anim == d.idleAnim ? 0 : d.idleAnim, a.anim == d.idleAnim ? 0 : AnimLoop);
             a.anim = d.idleAnim;
@@ -433,7 +443,7 @@ void LitWorld::rope(size_t i) {
     const int16_t pitch = int16_t((kRopeSin[ph] * a.ropeAmp) >> 10);
     a.ropeGrab = -1;
     const int16_t side = pitch < a.ropePitch;
-    if (side != a.ropeSide && a.param) playSound(uint16_t(a.param));
+    if (side != a.ropeSide && a.param) playSound(&a, uint16_t(a.param));  // 0x43f261 / 0x43f29b
     a.ropeSide = side;
     a.ropePitch = pitch;
     setPart(parts[0], pitch);
@@ -480,8 +490,9 @@ bool LitWorld::runItem(size_t i, const ActorItem& it, bool t14) {
             ta = &actors[size_t(k)];
             tgt = ta;
         }
-        if (f & 0x400000) {
-            unsupported.insert("item flag 0x400000");
+        if (f & 0x400000) {  // 0x437510: the target actor starts state P1 (title: Taz sets the logo / Bugs states)
+            if (ta) startScript(*ta, uint16_t(it.p1)), ta->flags14 &= 0xf9fffdf6;
+            else unsupported.insert("item flag 0x400000 on Bugs");
         } else if (f & 0x18000000) {
             const int32_t d = dist(tgt->pos, a.pos, f & 1);
             if ((f & 0x200000) ? uint32_t(d) < uint32_t(it.p1) : uint32_t(d) > uint32_t(it.p1)) return false;
@@ -567,7 +578,9 @@ void LitWorld::type14(size_t i) {
             a.phase = int16_t((st->w[2] + a.phase) & 0xfff);
         }
         if (fa & 0x20040000) unsupported.insert("type14 flagsA 0x20040000 (hover)");
-        if (fa & 0x80000000) unsupported.insert("type14 flagsA 0x80000000 (player-steered)");
+        // 0x440120: forward speed +0x14 with flagsA 2, unless the step's flagsB sign bit selects pad steering (GD+0x12 /
+        // +0x14 analog, flagsA 0x100000). flagsA's sign bit only skips the heading probe and MoveActor (below).
+        if (fb & 0x80000000) unsupported.insert("type14 flagsB 0x80000000 (pad-steered)");
         else if (fa & 2) lz += (fb & 0x400000) ? int8_t(S[uint8_t(st->w[0])]) * 2 : st->w[0];
         if (fa & 0x400) ly -= st->w[3];
         if (fa & 0x800) ly += st->w[3];
@@ -704,7 +717,8 @@ void LitWorld::type14(size_t i) {
             if (!runItem(i, it, true)) continue;
             const uint32_t f = it.flags;
             if (f) {
-                if (f & 0x200) playSound(uint32_t(it.p1));
+                if (f & 0x200) playSound(&actors[i], uint32_t(it.p1));
+                if (f & 0x400) playSound(&actors[i], uint32_t(it.p1), 2);
                 if (f & 0x40100) {
                     const int k = spawn(uint16_t(it.p2), a.pos, a.yaw);
                     if (k >= 0) {
@@ -817,7 +831,8 @@ void LitWorld::type2(size_t i) {
             if (!runItem(i, it, false)) continue;
             const uint32_t f = it.flags;
             if (f) {
-                if (f & 0x200) playSound(uint32_t(it.p1));
+                if (f & 0x200) playSound(&a, uint32_t(it.p1));
+                if (f & 0x400) playSound(&a, uint32_t(it.p1), 2);
                 if (f & 0x4000000)
                     if (const int k = findActor(uint16_t(it.p2)); k >= 0) actors[size_t(k)].flags14 |= 0x100;
                 if (f & 0x80000) nextLevel = it.p1;
@@ -874,7 +889,8 @@ void LitWorld::director(size_t i) {
             if ((f & 0x200000) ? uint32_t(dd) < uint32_t(it.p1) : uint32_t(dd) > uint32_t(it.p1)) continue;
         }
         if (it.item.act) act(it.item, &a);
-        if (f & 0x200) playSound(uint32_t(it.p1));
+        if (f & 0x200) playSound(&a, uint32_t(it.p1));
+        if (f & 0x400) playSound(&a, uint32_t(it.p1), 2);
         if (f & 0x40100) {
             const V3 at = a.pos;
             const int16_t yaw = a.yaw, reg = a.reg, zone = a.zone;
@@ -1097,7 +1113,8 @@ void LitWorld::platform(size_t i, uint32_t mode) {
         if ((it.mask14 && !(a.flags14 & it.mask14)) || (it.mask18 && !(a.flags18 & it.mask18))) continue;
         if (!cond(it.item, &a)) continue;
         act(it.item, &a);
-        if (it.flags & 0x200) playSound(uint32_t(it.p1));
+        if (it.flags & 0x200) playSound(&a, uint32_t(it.p1));
+        if (it.flags & 0x400) playSound(&a, uint32_t(it.p1), 2);
         if (it.flags & 0x10000) { a.flags14 |= 0x100; return; }
         if (!(it.flags & 0x8000)) break;
     }

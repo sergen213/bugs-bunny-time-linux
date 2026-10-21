@@ -99,6 +99,8 @@ AiffSound parseAiff(std::span<const uint8_t> d, BzeVariant game) {
     uint32_t frames = 0;
     std::span<const uint8_t> ssnd;
     bool comm = false;
+    std::vector<std::pair<int16_t, uint32_t>> marks;  // MARK {id, position}
+    int16_t loopBegin = 0, loopEnd = 0;               // INST sustain loop marker ids
     for (size_t p = 12; p + 8 <= formEnd;) {
         const std::string_view id(reinterpret_cast<const char*>(d.data() + p), 4);
         uint64_t size = be32(d, p + 4);
@@ -125,6 +127,13 @@ AiffSound parseAiff(std::span<const uint8_t> d, BzeVariant game) {
             const uint64_t off = be32(d, body);
             if (8 + off > size) fail(p, "SSND offset past chunk");
             ssnd = d.subspan(size_t(body + 8 + off), size_t(size - 8 - off));
+        } else if (id == "MARK" && size >= 2) {
+            for (size_t q = body + 2, n = be16(d, body); n-- && q + 7 <= body + size;) {
+                marks.emplace_back(int16_t(be16(d, q)), be32(d, q + 2));
+                q += 7 + d[q + 6] + ((d[q + 6] & 1) ^ 1);  // pstring padded to an even total
+            }
+        } else if (id == "INST" && size >= 14) {
+            loopBegin = int16_t(be16(d, body + 10)), loopEnd = int16_t(be16(d, body + 12));
         }
         p = size_t(body + size + (size & 1));
     }
@@ -133,12 +142,23 @@ AiffSound parseAiff(std::span<const uint8_t> d, BzeVariant game) {
     if (s.channels < 1 || s.channels > 2 || (s.bits != 8 && s.bits != 16) || s.rate == 0 ||
         (game == BzeVariant::TimeBusters && s.bits != 16))
         fail(12, std::format("unsupported format {} ch / {} bit / {} Hz", s.channels, s.bits, s.rate));
+    auto setLoop = [&] {
+        if (marks.size() < 2) return;
+        auto at = [&](int16_t mid) {
+            const auto m = std::ranges::find(marks, mid, &std::pair<int16_t, uint32_t>::first);
+            return m == marks.end() ? 0u : m->second;
+        };
+        const uint32_t b = game == BzeVariant::TimeBusters ? marks[0].second : at(loopBegin);
+        const uint32_t e = game == BzeVariant::TimeBusters ? marks[1].second : at(loopEnd);
+        if (b < e && e <= s.frames()) s.loopStart = b, s.loopEnd = e;
+    };
     if (game == BzeVariant::TimeBusters) {
         const XaLayout layout = s.channels == 2 ? XaLayout::Stereo : XaLayout::Mono;
         ImaState st[2]{};
         decodeXa(ssnd, layout, st, s.pcm);
         // Odd mono frame counts pad the last byte's high nibble; the game decodes every byte.
         s.truncated |= frames > xaFrames(ssnd.size(), layout) + (layout == XaLayout::Mono);
+        setLoop();
         return s;
     }
     // Some LiT sounds declare more frames than SSND holds (bugs.exe 0x41e950 then reads past the chunk into the
@@ -149,6 +169,7 @@ AiffSound parseAiff(std::span<const uint8_t> d, BzeVariant game) {
     s.pcm.resize(count);
     for (size_t i = 0; i < count; ++i)
         s.pcm[i] = bytesPer == 2 ? int16_t(be16(ssnd, i * 2)) : int16_t(int8_t(ssnd[i]) * 256);
+    setLoop();
     return s;
 }
 

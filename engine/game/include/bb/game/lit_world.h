@@ -8,6 +8,7 @@
 #include "bb/game/heightfield.h"
 #include "bb/game/litmath.h"
 #include "bb/game/pad.h"
+#include "bb/game/sfx.h"
 #include "bb/scene.h"
 
 #include <array>
@@ -250,7 +251,7 @@ public:
     // restore (the start director reads G), before the first tick(). It stands for counters 1 and 3 (tick t = counter
     // 2t + 3): the HUD actor shows every counter in the load pass and runs again in the counter-3 tick (Wine: the
     // elements fly out from counter 121 = after the 60-tick hold counted from counter 1).
-    void loadUpdate() { cameraTick(); actorsTick(); hudTick(); hudTick(); }
+    void loadUpdate() { cameraTick(); actorsTick(); cameraNodes(); hudTick(); hudTick(); }
     const ActorModel* playerModel() const { return model_; }
 
     Heightfield hf;
@@ -266,7 +267,10 @@ public:
     std::array<uint8_t, 256> G{}, S{};
     uint32_t ticks = 0;
     int nextLevel = -1;              // level change request (GD+0 / DAT_004b39bc = 1), LitWorld::levelName id
-    std::vector<uint16_t> sfx;       // section-3 sound-bank blob indices started this tick (sound table, LOGIC §3)
+    // Sound voices (sfx.h): requests during the tick, one mixer pass after the behaviours (0x41edb0); the app drains
+    // sfx.cmds. Replays of the audio-less Wine oracle set sfx.device = false (runtime: its 24 voices never free, all
+    // busy by counter 1739, so chance sounds stop consuming rand).
+    Sfx sfx;
     std::set<std::string> unsupported;  // logic conditions/actions/flags met but not interpreted (status/overlay)
     MsvcRand rand_;                  // exe rand() 0x4ae610 (tests sync it with the original's seed)
     int level = -1;                  // GD+0 current level id (LitWorld::levelName), set by the caller (HUD hides in 3)
@@ -283,10 +287,11 @@ public:
     // G[0x25]. holdsLoading: target ids with the 3000 ms minimum (0x4065e0).
     static int loadingScreen(int target, uint8_t world);
     static bool holdsLoading(int target);
-    // Free sound channels (0x4b3260, 24 slots, freed by the mixer when a sample ends): -1 = always one free (with
-    // audio, slots recycle); the audio-less Wine oracle never frees them (runtime: all 24 busy by counter 1739),
-    // so tests replaying its traces set 24.
-    int32_t sfxChannels = -1;
+    // Title front end (title.bze logic, GAMEPLAY.md §8): Savedata.dat slot mask 0x4b28e4 (bit slot-1; A93 icons, A100
+    // cursor), copied with the summaries into S[0x2b..0x40] by litFrontEnd (lit_save.h); A128 "Quit game" sets
+    // quitRequest (the exe's 0x45f2b0 = 0x14 "Do you really want to quit?" dialog; the app returns to its menu).
+    uint32_t saveMask = 0;
+    bool quitRequest = false;
 
     int health() const { return G[1]; }
     int carrots() const { return G[3]; }
@@ -323,12 +328,16 @@ public:
     uint32_t overlay(uint16_t script, LitActor* resume = nullptr);
 
 private:
+    uint8_t keys_ = 0;               // 0x4b18d0 extra keys this tick: bit 1 Esc (C96)
+    void cameraNodes();              // 0x40a1f0 / 0x40a530: a TOD camera node (part flags 0x40) sets the view
     const ActorModel* model_ = nullptr;
     const Scene* scene_ = nullptr;
     V3 spawn_;
     int16_t spawnYaw_ = 0;
     V3 levelEye_;  // chunk 0x3b tag 0x2b
-    std::vector<std::array<int32_t, 4>> sounds_;  // sound id -> {blob or -1, flags, chance byte, listed} (tags 0x04 + section-4 programs)
+    // Emitter handle (sfx.h): Bugs 1, actor i -> i + 2.
+    int32_t emitter(const LitActor* a) const { return a ? int32_t(a - actors.data()) + 2 : 1; }
+    uint8_t loopSounds_ = 0;  // 0x4b39d0: 8 glide sound on, 0x10 dig sound on
     std::vector<AnimFx> playerFx_;   // the player's animation sound / logic events
 
     // Player-behaviour globals (§3).
@@ -379,7 +388,8 @@ private:
     void respawn();
     void forceState(uint16_t state);  // 0x4377a0
     bool damagePlayer(LitActor& a, const ActorStep* st);  // 0x437d90
-    void playSound(uint32_t id);
+    void playSound(const LitActor* self, uint32_t id, uint16_t mode = 1);  // 0x41deb0 (self nullptr = Bugs)
+    void bugsLoopSounds(uint16_t move);                                    // 0x437ab0: glide / dig loops
     const PlayerState* findState(uint16_t id) const;
     const PlayerMove* findMove(uint16_t id) const;
     int16_t boxTop() const;

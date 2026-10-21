@@ -61,7 +61,7 @@ struct TbActor {
     std::vector<TbStateRec> states;
     std::vector<TbTransition> trans;
     std::map<uint16_t, TbBlock> blocks;      // blocks < 10000 (entity list +0x114)
-    uint16_t firstBlock = 0;                 // head of +0x114 (own blocks first, then the template's): director logic
+    int32_t firstBlock = -1;                 // head of +0x114 (own blocks first, then the template's; block 0 is valid)
     const ActorModel* model = nullptr;
     std::shared_ptr<const ActorModel> ownModel;  // spawned entities: the template's model, rig and anims
     AnimState anim;
@@ -152,6 +152,8 @@ public:
     TbActor* entity(int32_t uid);            // any entity by uid (nullptr if gone)
     TbActor* byListPos(uint32_t pos);        // a level entity by its position in the entity list (file order)
     const std::vector<TbActor*>& list() { return order(); }  // every entity in list (tick) order
+    // 0x407080 for entity a (emitter uid + 1): mode 1 start, 2 release.
+    void playSound(const TbActor& a, uint16_t id, uint16_t mode = 1) { sfx.request(int32_t(a.uid) + 1, id, mode, rng); }
 
     TbCollision col;
     std::array<TbActor, 2> actors;           // [0] Bugs (id 2), [1] Taz (id 3)
@@ -178,7 +180,9 @@ public:
     // CRT rand 0x46afe0 (seed 0x4cf26c, srand(1) once at start-up 0x401000): logic 'W' chances, action 7/8, spawn
     // yaw. The original shares it with every entity, sound and effect of the level; replays set seed per tick.
     MsvcRand rng;
-    std::vector<uint16_t> sounds;            // sound requests this tick (0x407080 ids; not played here)
+    // Sound voices (sfx.h, TB rules): the mixer pass 0x42ae60 runs at the top of each tick, before the entities
+    // (requests start one tick later); emitter = entity uid + 1. Oracle replays set sfx.device = false.
+    Sfx sfx;
     std::vector<uint16_t> effects;           // '^' effect-template spawns this tick (0x45cc40; not simulated)
     int music = 0;                           // logic action 126 value n (Track(n-1).xa), first setter in the level
     int dt = 0;                              // DAT_004d26c4: 0 on the first tick after load, then 2
@@ -211,6 +215,13 @@ private:
     int16_t lookYaw_ = 0;                    // DAT_004d5972 (stale look-mode yaw given to the called partner)
     std::map<uint16_t, TbActor> templates_;  // spawnable templates (chunk 0x08) referenced by V 0x10 actions
     std::map<uint16_t, TbBlock> globalBlocks_;  // blocks >= 10000 (global list 0x4d5984)
+    // Animation-asset logic (chunk 0x22 'M' blocks, file order), run by the player 0x469770 on frame steps: the
+    // footstep / jump / spin sounds ('`' items) live here. Keyed by the TOD each model parsed for that asset.
+    std::map<const Tod*, std::vector<TbBlock>> animLogic_;
+    // Particle emitter slots 0x4d6ae0 (20 × 0x9c B, defaults of 0x451e40 at level load), only the fields that gate
+    // rand() draws: count +0x52, flags +6, owner entity +0x60 (uid, -1 none).
+    struct FxSlot { uint8_t count = 10; uint16_t flags = 0x40; int32_t owner = -1; };
+    std::array<FxSlot, 20> fx_{};
     std::vector<TbActor*> list_;             // entity list 0x4d4fd0 order: players at their file position
     V3 prevEye_;                             // DAT_004d2750: camera position of the previous list build
     const TbWorld* listOwner_ = nullptr;     // list_ is rebuilt when stale (spawn/erase) or the world was moved

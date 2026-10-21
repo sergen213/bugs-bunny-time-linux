@@ -13,9 +13,11 @@ add_library(bb_game STATIC
   src/tb_world.cpp
   src/tb_entities.cpp
   src/tb_hud.cpp
+  src/tb_menu.cpp
+  src/sfx.cpp
 )
 target_include_directories(bb_game PUBLIC include)
-target_link_libraries(bb_game PUBLIC bb_core)
+target_link_libraries(bb_game PUBLIC bb_core bb_audio)
 
 add_executable(test_game tests/test_game.cpp)
 target_link_libraries(test_game PRIVATE bb_game)
@@ -42,3 +44,23 @@ target_compile_options(test_lit_overlay PRIVATE -UNDEBUG)
 # Real MERLIN data (BBTIME_DATA): the save prompt vs the Wine oracle; 77 = skipped.
 add_test(NAME game.lit_overlay COMMAND test_lit_overlay)
 set_tests_properties(game.lit_overlay PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_lit_title tests/test_lit_title.cpp)
+target_link_libraries(test_lit_title PRIVATE bb_game)
+target_compile_options(test_lit_title PRIVATE -UNDEBUG)
+# Real title.bze (BBTIME_DATA): front-end logic vs the Wine oracle (RUNTIME_REFERENCE.md §14); 77 = skipped.
+add_test(NAME game.lit_title COMMAND test_lit_title)
+set_tests_properties(game.lit_title PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_tb_menu tests/test_tb_menu.cpp)
+target_link_libraries(test_tb_menu PRIVATE bb_game)
+target_compile_options(test_tb_menu PRIVATE -UNDEBUG)
+# Real Datas/data/menu.men (BBTIME_DATA); the Savedata.dat round trip always runs; 77 = skipped.
+add_test(NAME game.tb_menu COMMAND test_tb_menu)
+set_tests_properties(game.tb_menu PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_sfx tests/test_sfx.cpp)
+target_link_libraries(test_sfx PRIVATE bb_game)
+target_compile_options(test_sfx PRIVATE -UNDEBUG)
+# Attenuation / volume / pitch against hand-evaluated exe formulas + the voice machine; real banks via BBTIME_DATA.
+add_test(NAME game.sfx COMMAND test_sfx)

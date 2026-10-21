@@ -835,12 +835,55 @@ The save prompt ("Do you want to save your game?") is the type-16 menu entity of
   **never verified on load**), write 320 B; then update `Savedata.dat`: mask `0x4b28e4 |= bit`, slot summary
   (+8 + 0x2c·(slot−1)): `+0 u16` golden-carrot total, `+2 u16` clocks `G[5]` (R: `4d 01 7c 00` = 333/124 at +0x34);
   write 0x168 B from `0x4b28e0`, then `mask ^= bit` in memory only (`0x4076cc`). Failure → `S[0x1b] = 7`.
-* Savedata reader `0x4076f0` (on the title, `S[3] == 1`): creates a zeroed file if missing; copies slot summaries into
-  `S[0x2b..0x40]` for the title menu; `GD+0x50 = G[0x10]` = config language.
+* Savedata reader `0x4076f0` (from `0x407190` when `S[3] == 1` and `GD+0 == 0`, i.e. on the title): creates a zeroed
+  file if missing; after a successful read: mask `0x4b28e4`, `S[4]` = mask byte, slot k summaries → `S[0x2b + 2k]`
+  u16 golden carrots, `S[0x3b + k]` clocks (low byte); then `S[0x1b] = 0x0e`, `S[0x24] = 1`, `S[3] = 2`. Every
+  `0x407190` call also rewrites `GD+0x50 = G[0x10]` = config language.
 * Requests via `S[0x0a]` (`0x407190`): **4 new game** (`G[] = 0`, `G[1] = G[2] = 6`, `G[0] = 3`, `G[0x10]` =
-  language, `G[0x11] = 0`, analog calibration defaults, **next level `G[0x0e] = 0x38` (56 `ccintro`)**); **5 load**
-  (slot must be in the mask; copy 320 B back; next level = saved `currentLevel`, or 0x38 if 0); **6 save**
-  (`0x4074f0`; `S[0x08] = 0x0a` ok / `0x14` fail).
+  language, `G[0x11] = 0`, analog calibration defaults, **next level `G[0x0e] = 0x38` (56 `ccintro`)**, slot byte
+  `G[0x9f]` kept); **5 load** (slot must be in the mask; copy 320 B back; next level = saved `currentLevel`, or 0x38
+  if 0; `G[0x36] = 0`; an unreadable file → `S[0x1b] = 4` and the new-game G with `G[0x9f] = 0`); both then
+  `S[0x1c] = 0`, `S[0x25] = 1`, `S[0x1b] = 0x10`; **6 save** (`0x4074f0`; `S[0x08] = 0x0a` ok / `0x14` fail).
+
+### 8.1.1 LiT title front end (TITLE.BZE, level 0) — Verified against the oracle (RUNTIME_REFERENCE.md §14)
+
+The front end is ordinary level logic (no exe menu code): type-16 directors keyed on the page byte `S[0x1b]`, the
+overlay text scripts of title.bze and four front-end opcodes (C96 Esc, A93 slot lines, A100 slot cursor, A128 quit).
+bbtime runs it as a play-mode level (`bbtime --game lit --menu`, or Enter on the collection menu's LiT entry).
+
+* **View**: the type-14 actor at (0, 146, 0) (flagsC 0x100) carries a TOD **camera node** (packet 8 sub 1, part flags
+  0x40): the pose pass `0x40a1f0` / `0x40a530` sets eye = node origin, look = node matrix · (0, 0, 1000), camera flags
+  `|= 0x100`; the draw pass `0x44c4b0` clears 0x300 and sets 0x200 per drawn flagsC-0x100 actor. With 0x300 the
+  follow camera `0x4318f0` returns early and freezes Bugs (flags14 0x80000000). R: eye (1, 146, 0), look (1, 146, 1000),
+  flags 0x342. The player (50, 400, 1300) plays anim 52, which hides every part (packet 8 flag 0xb).
+* **Copyright plane**: type-0 actor (0, 465, 871), tag 0x12 scale (1.2, 1.2). Type 0 = `0x43eee0`: on the first call one
+  part (`0x448980`) for the model's object under the actor root, then only the root matrix (rot, scale, pos) each
+  tick; no TOD is played, so the model's anim 163 (root scale 6336 / 4505) never applies.
+* **Intro**: the director at (−1000, 400, 1300) spawns template 43 (Taz's spin, anim 116): step flagsA 2 forward 16 per
+  tick, turning to entity 49 (flagsA 0x200000); within 20 of it (item 0x10000000) → state 129, whose items flag
+  0x400000 (`0x437510`: the target actor starts state P1) put the logo (entity 20) in state 129 (anim 118) and the
+  display Bugs (entity 266, scale 0xd99, starts in state 2 = anim 52 hidden) in state 236 (out of the hole: anims 15,
+  33, 17), then idle state 1 (anim 73, fidgets 74 / 35). The flagsA sign bit does not block the forward speed (only
+  the flagsB sign bit, pad steering, does: `0x440120`).
+* **Pages** (`S[0x1b]`): 0 logo — `S[0]` = 1, after 190 ticks "PRESS ENTER" (script 0/1 by the 0..19 blink counter
+  `S[0x0b]`); Start (C79 mask 0x80) → `G[141] |= 2`, page 21 (board template 1269 spawned at (0, −360, 2000)) → page 1,
+  `S[3] = 1` → `0x407190` → page 14. Page 14 — `S[0x24]` Load / New / Quit (scripts 140–143, ←/→, clamped 1..3);
+  ✕/Start copies it to `S[0x1c]` (3 = Quit → A128); then the slot cursor `G[0x9f]` (↑/↓ ±1, ←/→ ±3, clamped 1..6;
+  Load runs A100 so only saved slots are reachable) with A93 drawing the six lines; ✕ → `S[0x0a]` = 5 (load) / 4
+  (new). Page 16 — `S[0x25]` Start / Go back (scripts 37/38, 41/42): Start → `G[141] = 0`, A42 → level `G[0x0e]`.
+  Esc (C96) on any page but 0 → `S[2] = 1` → page 14 with every cursor reset. The memory-card pages (scripts 2–36)
+  and the controller-configuration pages 17/18 (scripts 90–139, entered with `S[0x25]` = 255, which page 16 clamps to
+  1..2) are PS1 leftovers the PC flow does not reach (I; none showed in the oracle session).
+* **A93** `0x42d910` (X = G index of the cursor): for slot k = 1..6 spawns overlay script `0x2e + k−1` (saved:
+  "N. ° golden ± clocks", `>BL` reads `S[0x2b..]`), `0x36 + k−1` (saved, cursor: palette 2 green), `0x3e + k−1`
+  ("N. Empty") or `0x46 + k−1` (empty, cursor).
+* **A100** `0x42dae0`: when `G[X]` is not a saved slot, moves it to the nearest saved one — backward (raw pad without
+  → / ↓) down to 1, then forward from 1 (← instead adds 3), or forward (→ / ↓) up to 6, then backward from 6 (→
+  instead subtracts 3); no saved slot leaves 7 / 0.
+* **A128** `0x42e350`: `0x45f2b0 = 0x14` → the exe's "Do you really want to quit?" Yes/No window (R); bbtime returns to
+  the collection menu instead (`LitWorld::quitRequest`).
+* **C79 / C80** (`0x42b820` / `0x42b850`): raw pad any / none of mask bits 0–3 L2 R2 L1 R1, 4–7 Select L3 R3 Start
+  (not the C57 layout); **C69** = C57's mask (Start / Return also ✕) with none-of.
 
 GAME_DATA (LiT, `*(0x52fd00) + 0x10000`): +0 current level, +4 checksum, +0x0a..+0x3e pad words (§2.2), +0x40
 `G[256]` (LOGIC.md §1).
@@ -848,7 +891,8 @@ GAME_DATA (LiT, `*(0x52fd00) + 0x10000`): +0 current level, +4 checksum, +0x0a..
 `config.pc` (128 B, live copy `0x9ca820`, BugsDecomp layout confirmed by readers here): +0x08 language (→ `G[0x10]`),
 +0x1c fogDist, +0x30/+0x34 volumes (logic A122–A127 change them in steps of 10/5 and call WriteConfig `0x409a10`),
 +0x38 joystick enabled (C98), +0x3c joyMap[10], +0x46 kbdMap[16] (§2.1), +0x10/+0x14 resolution (A108/A114/A118),
-+0x18 fullscreen (A111). Front-end option menus are BZE logic (LOGIC.md C92–C98, A100–A128).
++0x18 fullscreen (A111). The configuration options (A102–A127, C92–C95) belong to the pause menu of every playable
+level (LOGIC.md); the title has none, and bbtime's own Options screen covers video and audio settings.
 
 ### 8.2 TB — O/H
 

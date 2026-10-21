@@ -8,6 +8,7 @@
 #include "music.h"
 #include "play.h"
 #include "settings.h"
+#include "tb_front.h"
 
 #include "bb/actor.h"
 #include "bb/audio.h"
@@ -67,6 +68,7 @@ struct Args {
     int players = 1;                              // --players: TB 1-player (switching) or 2-player co-op
     int slot = -1;                                // --slot: LiT save slot 1..6 (saveDir()/lit/Savegame<N>.dat)
     fs::path importSaves;                         // --import-saves: original Datas/bin (or install root) to import
+    bool menu = false;                            // --menu: start in --game's original front end
 };
 
 fs::path defaultDataRoot() {
@@ -83,6 +85,7 @@ constexpr const char* kUsage =
     "              [--renderer gl|vk] [--vk-validation] [--autoplay KEYS*TICKS,...]\n"
     "              [--players 1|2] [--autoplay2 KEYS*TICKS,...]  (TB co-op; autoplay2 = player 2)\n"
     "              [--slot 1-6] [--import-saves DIR]  (LiT saves in $XDG_DATA_HOME/bbtime/saves/lit)\n"
+    "              [--menu]  (with --game, no --level: start in that game's original front end)\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -151,6 +154,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         }
         else if (f == "--slot") ok = number(a.slot) && a.slot <= 6;
         else if (f == "--import-saves") { auto v = value(); ok = bool(v); if (v) a.importSaves = *v; }
+        else if (f == "--menu") a.menu = true;
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
         else if (f == "--camera") {
             auto v = value();
@@ -179,6 +183,10 @@ std::optional<Args> parseArgs(int argc, char** argv) {
     }
     if (a.slot > 0 && a.game != GameId::LostInTime) {
         std::println(stderr, "bbtime: --slot needs --game lit");
+        return std::nullopt;
+    }
+    if (a.menu && (!a.game || !a.level.empty())) {
+        std::println(stderr, "bbtime: --menu needs --game and no --level");
         return std::nullopt;
     }
     return a;
@@ -236,7 +244,7 @@ void loadGame(Game& g, const fs::path& root, R& r) {
     }
 }
 
-enum class Screen { Main, Options, Game, Level };
+enum class Screen { Main, Options, Game, Level, TbFront };
 enum class Action { Up, Down, Left, Right, Accept, Back };
 
 template <class R> // bb::render::Renderer (GL) or bb::render_vk::Renderer: same interface shape
@@ -269,7 +277,15 @@ struct App {
     std::optional<std::array<uint8_t, 0x300>> tbCarry;  // TB GAME_DATA for the next enterLevel (reload 0x4014c0 keeps it)
     int tbLevel = -1;                     // current TB level-table index (GD+0), -1 = not in the table
     std::string playStatus;               // why a LiT level stayed in viewer mode
-    std::vector<bb::AiffSound> litSfx;    // LiT in-level sound bank (LitWorld::sfx indexes it)
+    // Original SFX mixer commands (bb::game::Sfx) -> OpenAL. The config SFX volume of the exes' formulas follows the
+    // device's SFX volume (settings.ini sfx_volume / the TB Sound page): LiT 0..100, TB 0..127.
+    void pumpSfx(bb::game::Sfx& s) {
+        bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice();
+        if (dev)
+            for (const bb::SfxCmd& c : s.cmds) dev->sfx(c);
+        s.cmds.clear();
+        s.volume = int32_t(std::lround((dev ? dev->sfxVolume() : 1.0f) * (s.tb ? 127 : 100)));
+    }
     bbtime::KeyMap keys;
     size_t autoplayAt = 0;
     // LiT GAME_DATA image of the active slot (--slot; Savegame<N>.dat or a new game): seeds G[] when a level is
@@ -282,10 +298,15 @@ struct App {
     struct LitLoading { int next = -1; std::array<uint8_t, 256> G{}; uint32_t image = 0; uint64_t startMs = 0; bool loaded = false; };
     std::optional<LitLoading> litLoading;
     bool litFadingOut = false, litEnter = false;
+    bool escKey = false;                  // LiT Esc pressed since the last tick (PadInput::esc, title C96)
+    bool frontEnd = false;                // session started from a game's original front end: leaving returns to Main
     std::vector<uint32_t> fontImages;     // per Scene::overlayFont entry (0 = missing), built by drawOverlayText
     Fidelity fontFidelity = Fidelity::Original;
     std::map<std::array<int16_t, 5>, uint32_t> hudImages;  // TB HUD sprite crops {frame, u, v, w, h} -> image
     bool tbFadingOut = false;             // TB level change: 0x401910 fade-out running before the load
+    std::optional<bbtime::TbFront> tbFront;  // TB original front end (tb_front.cpp), kept for the session
+    uint32_t tbFrontImage = 0;            // its 640x480 canvas
+    uint32_t tbAutoPrev = 0;              // --autoplay buttons (+ 0x10000 Esc) of the previous front-end tick
 
     Game& game() { return games[gameIdx]; }
 
@@ -298,14 +319,8 @@ struct App {
         play.reset();
         tbPlay.reset();
         playStatus.clear();
+        if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->stopSfx();  // the level's voices
         if (game().id == GameId::LostInTime && !scene.placeholder) {
-            litSfx.clear();  // in-level AIFF bank (section 3), indexed by LitWorld::sfx
-            if (const int i3 = bze.find(3); i3 >= 0) {
-                const std::vector<uint8_t> s3 = bze.payload(size_t(i3));
-                for (std::span<const uint8_t> blob : bb::sfxBank(s3)) {
-                    try { litSfx.push_back(bb::parseAiff(blob)); } catch (const std::exception&) { litSfx.emplace_back(); }
-                }
-            }
             try {
                 bb::game::LitWorld w = bb::game::LitWorld::load(bze, &scene);
                 // Debug: BBTIME_LIT_START="x,y,z" (PS1 units) places Bugs there in the first LiT level entered
@@ -435,9 +450,58 @@ struct App {
 
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
-        screen = Screen::Game;
+        screen = frontEnd ? Screen::Main : Screen::Game;
+        frontEnd = false;
         if (litLoading) r.destroyImage(litLoading->image), litLoading.reset();
         litFadingOut = false;
+    }
+
+    // A game entry of the collection menu (Accept, or --menu): that game's original front end. Its own Quit (and
+    // Esc on the LiT title page / Backspace) returns to Screen::Main; Right / X opens the debug level list instead.
+    void openFrontEnd(int gi) {
+        gameIdx = mainSel = gi;
+        levelSel = 0;
+        if (game().id == GameId::LostInTime) {
+            // TITLE (level 0) in play mode with its own logic (GAMEPLAY.md §8): no slot yet (0x407190 sets G).
+            litSave.reset();
+            enterLevel("TITLE");
+            frontEnd = true;
+            overlay = false;  // the original screen, diagnostics on F3
+        } else {  // GDI title menu 0x41c0f0 over menu.men (tb_front.cpp)
+            if (!tbFront) tbFront.emplace();
+            if (const std::string err = tbFront->open(game().root, bbtime::saveDir() / "tb", tbKeys, args.mute); !err.empty()) {
+                std::println(stderr, "bbtime: TB front end: {}", err);
+                screen = Screen::Game;
+                return;
+            }
+            screen = Screen::TbFront;
+            overlay = false;  // the original screen, diagnostics on F3
+        }
+    }
+
+    // TB front-end result: 1 / 2 Players boot CCINTRO like the exe's state 5 after the menu (R: CCINTRO -> GRANNY),
+    // a load starts the record's level with the file's GAME_DATA, Quit returns to the collection menu.
+    void tbFrontAction(const bbtime::TbFrontAction& a) {
+        if (a.kind == bbtime::TbFrontAction::None) return;
+        if (a.kind == bbtime::TbFrontAction::Quit) { screen = Screen::Main; return; }
+        players = a.players;
+        if (a.kind == bbtime::TbFrontAction::Load) tbCarry = a.gd;
+        else tbCarry.reset();
+        std::string name(a.kind == bbtime::TbFrontAction::Load ? bb::game::TbWorld::levelName(a.level) : "CCINTRO");
+        for (const std::string& l : game().levels)
+            if (iequals(l, name)) name = l;
+        enterLevel(name);
+        frontEnd = true;
+    }
+
+    // Window point -> 640x480 canvas pixel of the 4:3 viewport the front end is drawn in (-1 outside).
+    void tbMouse(float x, float y) {
+        int ww = 1, wh = 1;
+        SDL_GetWindowSize(r.window(), &ww, &wh);
+        const auto v = bb::render::fitAspect(r.width(), r.height(), 4.0f / 3.0f);
+        const float px = x * float(r.width()) / float(ww) - float(v.x), py = y * float(r.height()) / float(wh) - float(v.y);
+        const bool in = px >= 0 && py >= 0 && px < float(v.w) && py < float(v.h);
+        tbFront->mouse(in ? int(px * 640.0f / float(v.w)) : -1, in ? int(py * 480.0f / float(v.h)) : -1);
     }
 
     // Fade-out over: the loading screen of the target (LitWorld::loadingScreen; "<name>_<language G[0x10]>.bze", plain
@@ -457,7 +521,7 @@ struct App {
 
     // S[0x0a] request from level logic, as 0x407190 each tick. 6 = save (the "Do you want to save your game?" yes,
     // item S[18] == 1): 0x4074f0 writes Savegame<G[0x9f]>.dat + Savedata.dat, S[8] = 0x0a ok / 0x14 failed (failure
-    // also S[0x1b] = 7). 4/5 (new game / load) come only from the title level's menu, which runs as --slot here.
+    // also S[0x1b] = 7). 4/5 (new game / load from the title menu) and the title's Savedata read: litFrontEnd.
     void litRequest(uint8_t& req) {
         if (req == 6) {
             bb::game::LitSaveGame g = litSave.value_or(bb::game::LitSaveGame::newGame(0));
@@ -478,8 +542,9 @@ struct App {
         case Screen::Main:
             if (a == Action::Up || a == Action::Down) mainSel = (mainSel + step + 4) % 4;
             else if (a == Action::Back) running = false;
+            else if (a == Action::Right && mainSel < 2) { gameIdx = mainSel; levelSel = 0; screen = Screen::Game; }
             else if (a == Action::Accept) {
-                if (mainSel < 2) { gameIdx = mainSel; levelSel = 0; screen = Screen::Game; }
+                if (mainSel < 2) openFrontEnd(mainSel);
                 else if (mainSel == 2) screen = Screen::Options;
                 else running = false;
             }
@@ -500,6 +565,13 @@ struct App {
         }
         case Screen::Level:
             if (a == Action::Back) leaveLevel();
+            break;
+        case Screen::TbFront:
+            // Keyboard / pad Accept: nav(0, 0) focuses the first item when nothing is hovered (the mouse-only original
+            // starts that way) and is a no-op otherwise.
+            if (a == Action::Accept) tbFrontAction(tbFront->click()), tbFront->nav(0, 0);
+            else if (a == Action::Back) tbFrontAction(tbFront->back());
+            else tbFront->nav(a == Action::Left ? -1 : a == Action::Right ? 1 : 0, a == Action::Up ? -1 : a == Action::Down ? 1 : 0);
             break;
         }
     }
@@ -527,7 +599,14 @@ struct App {
             if (pad && SDL_GetGamepadID(pad) == e.gdevice.which) { SDL_CloseGamepad(pad); pad = nullptr; }
             if (pad2 && SDL_GetGamepadID(pad2) == e.gdevice.which) { SDL_CloseGamepad(pad2); pad2 = nullptr; }
             break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:  // the TB front end is mouse-driven (0x42e480: WM_LBUTTONDOWN -> 0x41bf90)
+            if (screen == Screen::TbFront && e.button.button == SDL_BUTTON_LEFT) {
+                tbMouse(e.button.x, e.button.y);
+                tbFrontAction(tbFront->click());
+            }
+            break;
         case SDL_EVENT_MOUSE_MOTION:
+            if (screen == Screen::TbFront) tbMouse(e.motion.x, e.motion.y);  // WM_MOUSEMOVE -> 0x41bc40
             if (screen == Screen::Level && freeCamera()) {
                 cam.yaw -= e.motion.xrel * 0.0025f;
                 cam.pitch = std::clamp(cam.pitch - e.motion.yrel * 0.0025f, -1.55f, 1.55f);
@@ -548,13 +627,17 @@ struct App {
             case SDL_GAMEPAD_BUTTON_SOUTH: case SDL_GAMEPAD_BUTTON_START: menu(Action::Accept); break;
             case SDL_GAMEPAD_BUTTON_EAST: case SDL_GAMEPAD_BUTTON_BACK: menu(Action::Back); break;
             case SDL_GAMEPAD_BUTTON_NORTH: overlay = !overlay; break;
+            case SDL_GAMEPAD_BUTTON_WEST: if (screen == Screen::Main) menu(Action::Right); break;  // level list
             default: break;
             }
             break;
         case SDL_EVENT_KEY_DOWN: {
             const SDL_Keycode k = e.key.key;
+            if (screen == Screen::TbFront && tbFront->capturing()) { tbFront->captureKey(e.key.scancode); break; }
             if (k == SDLK_F3) overlay = !overlay;
             else if (k == SDLK_F11) { fullscreen = !fullscreen; r.setFullscreen(fullscreen); }
+            // LiT title (level 0) past its logo page: Esc is the game's C96 (back to the slot menu).
+            else if (k == SDLK_ESCAPE && screen == Screen::Level && play && litLevel == 0 && play->world.S[0x1b]) escKey = true;
             else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) menu(Action::Back);
             else if (screen == Screen::Level) {
                 if (k == SDLK_F2) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
@@ -585,6 +668,19 @@ struct App {
     void tick(float dt) {
         prevCam = cam;
         r.setTextureTick(++simTick);
+        if (screen == Screen::TbFront && autoplayAt < args.autoplay.size()) {  // --autoplay smokes: button edges
+            const bb::game::PadInput in = args.autoplay[autoplayAt++];
+            const uint32_t held = in.buttons | (in.esc ? 0x10000u : 0u), down = held & ~tbAutoPrev;
+            tbAutoPrev = held;
+            using namespace bb::game;
+            if (down & PadUp) menu(Action::Up);
+            if (down & PadDown) menu(Action::Down);
+            if (down & PadLeft) menu(Action::Left);
+            if (down & PadRight) menu(Action::Right);
+            if (down & (PadCross | PadStart)) menu(Action::Accept);
+            if (down & 0x10000u) menu(Action::Back);
+            return;
+        }
         if (screen != Screen::Level) return;
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
@@ -597,6 +693,7 @@ struct App {
                 if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
                 else if (!play->freeFly) in = bbtime::readPad(keys, pad);
                 in.help = in.help || std::exchange(helpKey, false);
+                in.esc = in.esc || std::exchange(escKey, false);
                 return in;
             };
             if (litLoading) {  // the loading screen stays the presented frame while the target loads
@@ -621,10 +718,19 @@ struct App {
                 play->world.fadeTick();
             }
             play->tick(input());
-            if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice())
-                for (uint16_t b : play->world.sfx)
-                    if (b < litSfx.size() && !litSfx[b].pcm.empty()) dev->playSfx(litSfx[b]);
+            pumpSfx(play->world.sfx);
+            // 0x407190: title requests 4/5 + the Savedata read (a game started: its GAME_DATA image), then save (6).
+            if (auto g = bb::game::litFrontEnd(play->world, bbtime::saveDir() / "lit")) {
+                litSave = *g;
+                std::println("bbtime: title {} slot {}: next level {}", play->world.S[0x1b] == 4 ? "load failed," : "start",
+                             g->slot(), play->world.G[0x0e]);
+            }
             if (uint8_t& req = play->world.S[0x0a]; req) litRequest(req);
+            if (play->world.quitRequest) {  // A128 "Quit game": the collection menu instead of the exe's quit dialog
+                frontEnd = true;
+                leaveLevel();
+                return;
+            }
             if (const int next = play->world.nextLevel; next >= 0) {  // level change request: fade out first
                 if (!litFadingOut) litFadingOut = true, play->world.fadeOut(2, 0x100), play->world.fadeTick();
                 else if (!play->world.fade.mode) litFadingOut = false, startLitLoading(next);  // never drawn bright
@@ -639,6 +745,7 @@ struct App {
             if (autoplay2At < args.autoplay2.size()) p2 = args.autoplay2[autoplay2At++];
             else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
             tbPlay->tick(p1, p2);
+            pumpSfx(tbPlay->world.sfx);
             // Reload 0x4014c0 (level GD+0, GAME_DATA kept) after 0x401910's fade-out: fadeOut(2, 0x100) on the request
             // tick, the world keeps ticking, and the load follows the tick that reaches level 0 (16 frames; trace
             // local/wine/tbnpc/hud/fade_trace.csv). enterLevel then fades in at speed 200.
@@ -705,10 +812,14 @@ struct App {
     }
 
     void draw() {
+        // LiT TITLE: its 3-D menu panel sits under 4:3 screen text, so it keeps the original framing in both modes.
+        s.frame43 = screen == Screen::Level && play && litLevel == 0;
         r.beginFrame(s);
         const int sc = uiScale(), g = R::kGlyph;
         const float W = float(r.width()), H = float(r.height());
-        const std::string_view hint = "Up/Down: move  Enter/A: select  Esc/B: back  F3: diagnostics  F11: fullscreen";
+        const std::string_view hint = screen == Screen::Main
+            ? "Up/Down: move  Enter/A: play (original menu)  Right/X: level list  Esc/B: back  F3: diagnostics"
+            : "Up/Down: move  Enter/A: select  Esc/B: back  F3: diagnostics  F11: fullscreen";
         switch (screen) {
         case Screen::Main: {
             backdrop(games[mainSel < 2 ? mainSel : 0], 200);
@@ -730,6 +841,15 @@ struct App {
                   std::format("TB players:     {} ({})", players, players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend"),
                   "Back"},
                  optSel, 0, 8);
+            break;
+        }
+        case Screen::TbFront: {  // the 640x480 GDI page stretched over the 4:3 client, like the other 2-D screens
+            if (const bb::Texture* t = tbFront->frame()) {
+                r.destroyImage(tbFrontImage);
+                tbFrontImage = r.createImage(*t);
+            }
+            const auto v = bb::render::fitAspect(r.width(), r.height(), 4.0f / 3.0f);
+            r.drawImage(tbFrontImage, float(v.x), float(v.y), float(v.w), float(v.h), s.fidelity == Fidelity::Enhanced);
             break;
         }
         case Screen::Game: {
@@ -783,7 +903,8 @@ struct App {
             break;
         }
         }
-        if (screen != Screen::Level) r.drawText(float(8 * sc), H - float(g * sc) - float(36 * sc), sc, hint, kGrey);
+        if (screen != Screen::Level && screen != Screen::TbFront)
+            r.drawText(float(8 * sc), H - float(g * sc) - float(36 * sc), sc, hint, kGrey);
         if (overlay) drawOverlay();
     }
 
@@ -971,7 +1092,7 @@ struct App {
             r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy())
                                                           : scene.game == bb::GameId::LostInTime ? "linear" : "nearest",
             enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", glm::degrees(s.vfovRad()),
-            !enh && s.pillarbox ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
+            (!enh && s.pillarbox) || s.frame43 ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
         if constexpr (requires { r.diagnostics(); }) text += std::format("\n{}", r.diagnostics());
         if (screen == Screen::Level)
             text += std::format("\n{} {}  meshes {}  tris {}  textures {}  fog {}\npos {:.1f} {:.1f} {:.1f}  {}",
@@ -1085,6 +1206,7 @@ int run(const std::optional<Args>& args) {
             app.gameIdx = *args->game == GameId::LostInTime ? 0 : 1;
             app.mainSel = app.gameIdx;
             app.screen = Screen::Game;
+            if (args->menu) app.openFrontEnd(app.gameIdx);
             if (!level.empty()) {
                 auto& lv = app.game().levels;
                 if (auto it = std::ranges::find_if(lv, [&](const std::string& l) { return iequals(l, level); }); it != lv.end()) {
@@ -1117,7 +1239,7 @@ int run(const std::optional<Args>& args) {
             last = now;
             app.frameTime += (dt - app.frameTime) * 0.05;
             if ((app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) &&
-                app.screen == Screen::Level) { // lockstep: 1 tick per frame
+                (app.screen == Screen::Level || app.screen == Screen::TbFront)) { // lockstep: 1 tick per frame
                 app.tick(float(step.dt));
                 app.alpha = 1.0f;
             } else {
@@ -1128,8 +1250,13 @@ int run(const std::optional<Args>& args) {
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
             fs::path track;  // menu: highlighted game's track; TB level: logic action 126 (GAMEPLAY_TB.md §6)
             if (!args->mute) {
-                if (app.screen != Screen::Level) track = bbtime::menuTrack(app.games[musicIdx].id, args->roots[musicIdx]);
+                // The TB front end never calls PlayMusic (GAMEPLAY_TB §6.3): silent in Original Fidelity; Enhanced keeps
+                // the collection menu's TB track.
+                if (app.screen == Screen::TbFront) {
+                    if (app.s.fidelity == Fidelity::Enhanced) track = bbtime::menuTrack(GameId::TimeBusters, args->roots[1]);
+                } else if (app.screen != Screen::Level) track = bbtime::menuTrack(app.games[musicIdx].id, args->roots[musicIdx]);
                 else if (app.tbPlay) track = bbtime::tbLevelTrack(args->roots[1], app.tbPlay->world.music);
+                else if (app.play && app.litLevel == 0) track = bbtime::menuTrack(GameId::LostInTime, args->roots[0]);  // TITLE: TRACK25
             }
             bbtime::playMusic(track);
             app.draw();
@@ -1143,6 +1270,7 @@ int run(const std::optional<Args>& args) {
         if (app.pad) SDL_CloseGamepad(app.pad);
         if (app.pad2) SDL_CloseGamepad(app.pad2);
         for (Game& g : app.games) app.r.destroyImage(g.backdrop);
+        app.r.destroyImage(app.tbFrontImage);
         app.freeFont();
     }
     return 0;

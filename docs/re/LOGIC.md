@@ -151,7 +151,7 @@ channels besides `S[]`/`G[]`.
 | C66 | 0x42 | 0x42ab80 | cgltu `G[A] < G[B]` | CondCgltu | cond 44 (1.00) |
 | C67 | 0x43 | 0x42a9b0 | csgtu `S[B] < S[A]` | CondCsgtu | cond 45 (1.00) |
 | C68 | 0x44 | 0x42ac20 | cggtu `G[B] < G[A]` | CondCggtu | cond 46 (1.00) |
-| C69 | 0x45 | 0x42b500 | raw-pad mask test, variant of C57 (0x42b500; tail truncated in decompile — inferred 'none-of') |  | — |
+| C69 | 0x45 | 0x42b500 | raw-pad none-of A, C57's mask and Start / Return → ✕ mapping (full decompile of 0x42b500) |  | — |
 | C70 | 0x46 | 0x42a8d0 | cislt `(s8)A < (s8)S[B]` | CondCislt | cond 47 (0.76) |
 | C71 | 0x47 | 0x42a990 | cisgt `(s8)S[B] < (s8)A` | CondCisgt | cond 48 (0.76) |
 | C72 | 0x48 | 0x42a920 | cslt `S[A] < S[B]` signed | CondCslt | cond 49 (1.00); cond 49 [hash] |
@@ -161,8 +161,8 @@ channels besides `S[]`/`G[]`.
 | C76 | 0x4c | 0x42b600 | player `flags14 & 0x10` |  | — |
 | C77 | 0x4d | 0x42b620 | player `!(flags14 & 0x10)` |  | — |
 | C78 | 0x4e | 0x42ad60 | player script step: `*(u16*)(P+0x180 + 6 + P+0x17e*2) == A` |  | — |
-| C79 | 0x4f | 0x42b820 | raw-pad any-of A (no Start mapping) |  | — |
-| C80 | 0x50 | 0x42b850 | raw-pad none-of A |  | — |
+| C79 | 0x4f | 0x42b820 | raw-pad any-of A, own mask: bits 0–3 L2 R2 L1 R1, bits 4–7 Select L3 R3 Start (title "PRESS ENTER" = 0x80) |  | — |
+| C80 | 0x50 | 0x42b850 | raw-pad none-of A (C79's mask) |  | — |
 | C81 | 0x51 | 0x42b360 | tbuact: `!(GD+0x0a & 0x08)` | CondTbuact | — |
 | C82 | 0x52 | 0x42b640 | player any-of: A bits → flags14 {1:0x1, 2:0x2, 4:0x10, 8:0x8, 0x10:0x200, 0x20:0x400, 0x40:0x4000, 0x80:0x1000000}; B bits → flags18 {1:0x2000000, …} |  | — |
 | C83 | 0x53 | 0x42b740 | inverse of C82 (none-of) |  | — |
@@ -178,7 +178,7 @@ channels besides `S[]`/`G[]`.
 | C93 | 0x5d | 0x42ba70 | menu item B value `!= A` |  | — |
 | C94 | 0x5e | 0x42bad0 | key-binding conflict scan over config bytes 0x9ca8d0..0x9ca8f2 (front-end only) |  | — |
 | C95 | 0x5f | 0x42c140 | capture pressed joystick button into joyMap slot (menu item B) — front-end only |  | — |
-| C96 | 0x60 | 0x42c670 | tkdesc: Esc (`0x4b18d0 & 2`) | CondTkdesc | — |
+| C96 | 0x60 | 0x42c670 | tkdesc: Esc (`0x4b18d0 & 2`) — title: back to the slot menu (bbtime: `PadInput::esc`) | CondTkdesc | — |
 | C97 | 0x61 | 0x42c680 | `DAT_004b1a2c != 0` (pause request pending) |  | — |
 | C98 | 0x62 | 0x42c690 | joystick enabled (`config+0x38`) == A (bool) |  | — |
 
@@ -270,7 +270,7 @@ channels besides `S[]`/`G[]`.
 | A79 | 0x4f | 0x42d6d0 | `0x4b2150 = X*100 + Y` |  | act 60 (0.67) |
 | A80 | 0x50 | 0x42d6f0 | `0x4b2154 = X*100 + Y` |  | act 61 (0.67) |
 | A81 | 0x51 | 0x42d750 | **speech** XA control (not demo): X>1 start speech X (`S[0x17]=8`, id `0x4b322e`); X=1 `S[0x17]=1`; X=0 stop (`S[0x17]=0`). Status advanced by `0x41e2b0` each tick: 8 → 2 → 4 playing → 0 after the clip length (GAMEPLAY.md §7.6) |  | act 62 (0.95); act 62 [fuzzy] |
-| A82 | 0x52 | 0x42d7f0 | play sound X, mode 2 |  | act 63 (0.87) |
+| A82 | 0x52 | 0x42d7f0 | release sound X (0x41deb0 mode 2: the self voice of X, else any voice of X, → 0x8002; formats/AUDIO_XA.md) |  | act 63 (0.87) |
 | A83 | 0x53 | 0x42d830 | camera flags `|= 0x8000` (L2/R2 rotation disabled) |  | — |
 | A84 | 0x54 | 0x42d820 | camera flags `&= ~0x8000` |  | — |
 | A85 | 0x55 | 0x42d840 | camera target actor `0x4b39b8 = self` |  | act 83 (1.00) |
@@ -281,14 +281,14 @@ channels besides `S[]`/`G[]`.
 | A90 | 0x5a | 0x42d8f0 | camera flags `&= ~0x300` (end scripted camera) |  | act 115 (0.67) |
 | A91 | 0x5b | 0x42d730 | `0x4b2378 = X<<8 | Y` |  | act 117 (0.62) |
 | A92 | 0x5c | 0x42d900 | death-state id override `0x4b39d8 = X` (used by A35 / death) |  | act 126 (0.89) |
-| A93 | 0x5d | 0x42d910 | title save-slot icons via overlay scripts 0x2e..0x49 (slot mask `0x4b28e4`, G[X]) |  | — |
+| A93 | 0x5d | 0x42d910 | title slot lines: per slot k = 1..6 overlay script 0x2e+k−1 (saved) / 0x36+k−1 (saved, cursor G[X] = k) / 0x3e+k−1 (empty) / 0x46+k−1 (empty, cursor); mask `0x4b28e4` (GAMEPLAY.md §8.1.1) |  | — |
 | A94 | 0x5e | 0x42da70 | camera flags `|= 1` |  | act 140 (0.67) |
 | A95 | 0x5f | 0x42da80 | camera flags `&= ~1` |  | act 141 (1.00) |
 | A96 | 0x60 | 0x42da90 | camera flags `= 0x10` |  | t3 12 (1.00) |
 | A97 | 0x61 | 0x42daa0 | player `flags14 &= ~9` |  | — |
 | A98 | 0x62 | 0x42dab0 | camera flags `|= 0x20` |  | — |
 | A99 | 0x63 | 0x42dac0 | camera flags `&= ~0x20` |  | — |
-| A100 | 0x64 | 0x42dae0 | save-slot menu cursor G[X] (skips empty slots, raw ↑/↓) |  | — |
+| A100 | 0x64 | 0x42dae0 | slot cursor G[X] onto the nearest saved slot in the raw pad's direction (→/↓ forward), ← / → past the ends ±3 (GAMEPLAY.md §8.1.1) |  | — |
 | A101 | 0x65 | 0x42dad0 | camera flags `|= 4` |  | — |
 | A102 | 0x66 | 0x42dbe0 | menu item Y ++ (wrap) |  | — |
 | A103 | 0x67 | 0x42dc20 | menu item Y −− (wrap) |  | t4 8 (0.60) |
@@ -316,7 +316,7 @@ channels besides `S[]`/`G[]`.
 | A125 | 0x7d | 0x42e2c0 | same −10 |  | — |
 | A126 | 0x7e | 0x42e2f0 | item Y = vol34/5 − 10 |  | — |
 | A127 | 0x7f | 0x42e320 | item Y = vol30/10 |  | — |
-| A128 | 0x80 | 0x42e350 | quit dialog (`0x45f2b0 = 0x14`) |  | t4 27 (1.00) |
+| A128 | 0x80 | 0x42e350 | quit dialog (`0x45f2b0 = 0x14`: "Do you really want to quit?", R); bbtime: `quitRequest` → collection menu |  | t4 27 (1.00) |
 
 ## 6. TB
 
@@ -334,12 +334,13 @@ Opcode numbers are game-specific; every TB opcode still needs semantic verificat
   to the 16-bit golden-carrot counter `G[7] | G[0xfc] << 8` (inc/dec/add/sub/incgg; `movgi`/`clrg` do *not* special-case it).
 * Timers are in 30 Hz ticks (`/30` seconds, `/1800` minutes). `rand()` = CRT `rand` 0x450810 (*observed*: seed `0x4ae610`,
   `x = x*0x343fd + 0x269ec3; return (x >> 16) & 0x7fff`) — needed for bit-exact random gates.
-* Front-end/options menus (C92–C98, A93, A100–A128) are implemented in level logic of the title/option levels and
-  poke `config.pc` fields directly; a native front end may replace them but must keep their side effects.
+* The title front end (TITLE.BZE: C96, A93, A100, A128 + ordinary ops, GAMEPLAY.md §8.1.1) is implemented and runs as
+  level logic in bbtime. C92–C95, C97 and A102–A127 are the pause menu's options (present in every playable level,
+  not in the title) and poke `config.pc` fields directly; they stay unported (bbtime's Options screen instead).
 
 ## 8. Residual unknowns
 
-* C69 tail (decompile truncated), A24 tail, exact bit map of C82/C83's B byte beyond bit 0.
-* Overlay interpreter, font and key names: GAMEPLAY.md §7.6 (done); pause-menu opcodes C92–C97 / A100+ remain.
+* A24 tail, exact bit map of C82/C83's B byte beyond bit 0.
+* Overlay interpreter, font and key names: GAMEPLAY.md §7.6 (done); pause-menu opcodes C92–C95, C97, A102–A127 remain.
 * Semantics of 0x35 node fields `+8..+0xf`, 0x34 step fields; `0x4377a0` exact role.
 * Player flag names (flags14/18 bits) — see GAMEPLAY.md §3.

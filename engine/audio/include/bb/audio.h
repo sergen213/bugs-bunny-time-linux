@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <map>
 #include <span>
 #include <vector>
 
@@ -65,6 +66,10 @@ struct AiffSound {
     uint32_t rate = 0;
     bool truncated = false;    // COMM frame count exceeded the SSND data; pcm holds what exists
     std::vector<int16_t> pcm;  // interleaved, native endian
+    // Loop region in frames (loopEnd 0 = one-shot). Needs >= 2 MARK markers: LiT (0x41e950) takes the positions of
+    // the INST sustain-loop begin/end marker ids, TB (0x42a7c0) the first two markers in MARK order.
+    uint32_t loopStart = 0, loopEnd = 0;
+    uint32_t frames() const { return channels ? uint32_t(pcm.size() / channels) : 0; }
 };
 // Throws FormatError (bb/bze.h) for malformed / truncated input.
 AiffSound parseAiff(std::span<const uint8_t> in, BzeVariant game = BzeVariant::LostInTime);
@@ -72,6 +77,18 @@ AiffSound parseAiff(std::span<const uint8_t> in, BzeVariant game = BzeVariant::L
 // Section-3 sound bank (both games): u32 n, u32 offsets[n] -> FORM/AIFF blobs. Returns each blob (bounded by
 // its FORM size), or empty if the section does not start with such a table (cutscene/loader levels start with TIMs).
 std::vector<std::span<const uint8_t>> sfxBank(std::span<const uint8_t> section3);
+
+// One DirectSound buffer call of a game's SFX mixer (bb::game::Sfx), replayed by AudioDevice::sfx. `key` names a
+// buffer copy (the exes keep 10 per blob). Volume in hundredths of dB (-10000 silent .. 0); pan -10000 (left only)
+// .. 10000 (right only), DSBPAN: the other side is attenuated by |pan| hundredths of dB.
+struct SfxCmd {
+    enum Op : uint8_t { Play, Volume, Stop } op = Play;
+    uint32_t key = 0;
+    const AiffSound* sound = nullptr;  // Play: a looping sound plays [0, loopStart) then repeats [loopStart, loopEnd)
+                                       // with the pan negated (the exes' second buffer gets -pan)
+    uint32_t rate = 0;                 // Play: buffer frequency (Hz)
+    int32_t volume = 0, pan = 0;       // Play / Volume (pan: Play only)
+};
 
 // OpenAL output. Pump update() once per frame; there is no audio thread.
 class AudioDevice {
@@ -88,8 +105,11 @@ public:
     void stopMusic();
     bool musicPlaying() const { return music_.has_value(); }
     void setMusicVolume(float gain);  // 0..1
-    void setSfxVolume(float gain);    // 0..1, applies to sounds started afterwards
-    void playSfx(const AiffSound& s);  // one-shot, fire and forget
+    void setSfxVolume(float gain);    // 0..1: playSfx gain; games read it as their config SFX volume (sfxVolume())
+    float sfxVolume() const { return sfxGain_; }
+    void playSfx(const AiffSound& s);  // non-positional one-shot at the sfx volume (UI sounds)
+    void sfx(const SfxCmd& c);         // game mixer command (bb::game::Sfx::cmds)
+    void stopSfx();                    // stop every mixer voice (level change)
     void update();                     // refill music buffers, reap finished sound effects
 
 private:
@@ -106,6 +126,7 @@ private:
     std::vector<int16_t> scratch_;
     struct Voice { unsigned src, buf; };
     std::vector<Voice> sfx_;
+    std::map<uint32_t, Voice> keyed_;  // mixer voices by SfxCmd::key
 };
 
 } // namespace bb
