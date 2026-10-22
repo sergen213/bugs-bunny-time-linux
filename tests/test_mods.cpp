@@ -127,6 +127,12 @@ int main() {
         Scene s = actorScene();
         const fs::path out = root / "export";
         assert(mods::exportModels(s, out) >= 2);
+        {  // launcher viewer: the exported model's one triangle, rest pose
+            const mods::Preview p = mods::loadPreview(out / "models/lit/bugs.gltf");
+            size_t n = 0;
+            for (const auto& grp : p.groups) n += grp.vertices.size();
+            assert(n == 3 * 9);
+        }
         mods::Info i;
         i.id = i.name = "c";
         i.dir = root / "c";

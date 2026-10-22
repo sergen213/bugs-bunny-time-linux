@@ -1219,7 +1219,7 @@ void Renderer::addMeshes(std::span<const Mesh> ms, bool actor, size_t casters, s
         meshes_.push_back({tex, m.blend, m.twoSided, actor, world && solid, world && (solid || m.blend == Blend::Alpha), int32_t(verts.size()),
                            uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, animOk ? m.textureAnim : -1, 0,
                            // FSR reactive: LiT type-4 sprite effects (apps/bbtime poseActors names them) and animated textures
-                           (actor && m.name == "sprite") || animOk});
+                           (actor && m.name == "sprite") || animOk, m.zone});
         if (actor) actorLayout_.push_back(uint32_t(m.vertices.size()));
         if (!actor && world && solid) {
             casterLo_ = glm::min(casterLo_, lo);
@@ -1425,6 +1425,7 @@ void Renderer::uploadScene(const Scene& scene) {
     casterHi_ = -casterLo_;
     addMeshes(scene.meshes, false, SIZE_MAX, verts, idx);
     sceneMeshCount_ = meshes_.size();
+    zones_ = scene.zones;
     reflectiveMaterials(scene);
     std::vector<TriRange> ranges;
     for (const GpuMesh& m : meshes_)
@@ -1785,6 +1786,8 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     const glm::mat4 proj = render::projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, s.zFar);
     Push3D pc{};
     const glm::mat4 viewProj = clipFix * proj * view;
+    const bool zoned = render::walkZones(zones_, proj * view, zoneView_, zoneTable_, zoneDrawn_);
+    auto shown = [&](const GpuMesh& m) { return !zoned || m.zone < 0 || zoneDrawn_[size_t(m.zone)]; };
     pc.viewProj = viewProj;
     float jitter[2] = {0.0f, 0.0f};
     if (fsr) { // sub-pixel jitter of FSR's sequence, as a clip-space translation (NDC y up = pixel y down)
@@ -2092,10 +2095,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     // back-to-front by mesh centre without depth writes.
     for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
         for (const GpuMesh& m : meshes_)
-            if (m.blend == pass) draw(m);
+            if (m.blend == pass && shown(m)) draw(m);
     std::vector<const GpuMesh*> translucent;
     for (const GpuMesh& m : meshes_)
-        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest) translucent.push_back(&m);
+        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) translucent.push_back(&m);
     std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
         const glm::vec3 d = m->center - cam.pos;
         return glm::dot(d, d);

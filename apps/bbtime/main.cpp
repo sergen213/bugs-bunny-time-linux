@@ -577,6 +577,13 @@ struct App {
     }
 
     bool freeCamera() const { return play ? play->freeFly : tbPlay ? tbPlay->freeFly : true; }
+    // Half-angle tangents {x, y} of the 3-D view as rendered (pillarbox, Hor+): the games' actor screen culls follow it.
+    std::array<double, 2> viewTan() const {
+        const bool box = (s.fidelity == Fidelity::Original && s.pillarbox) || s.frame43;
+        const float aspect = box || r.height() == 0 ? 4.0f / 3.0f : float(r.width()) / float(r.height());
+        const double ty = std::tan(double(bb::render::horPlusVFov(s.vfovRad(), aspect)) * 0.5);
+        return {ty * aspect, ty};
+    }
 
     void leaveLevel() {
         SDL_SetWindowRelativeMouseMode(r.window(), false);
@@ -863,6 +870,7 @@ struct App {
                 litLoading.reset();
                 if (!play) return;
             }
+            play->world.viewHalfX = std::max(400.0 * viewTan()[0], 256.0);
             if (litEnter) {  // 0x4065e0 after the load: the second unrendered tick (counter 5; loadUpdate stood for the
                 litEnter = false;  // load pass and counter 3), update 1 of the fade in, then tick + draw (counter 7)
                 litPoke(play->world), play->tick(input());
@@ -896,6 +904,7 @@ struct App {
             else if (!tbPlay->freeFly) p1 = bbtime::readPad(tbKeys[0], pad);
             if (autoplay2At < args.autoplay2.size()) p2 = args.autoplay2[autoplay2At++];
             else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
+            tbPlay->world.viewTanX = viewTan()[0], tbPlay->world.viewTanY = viewTan()[1];
             tbPlay->tick(p1, p2);
             pumpSfx(tbPlay->world.sfx);
             // 0x401b60 (next frame's head, no reload pending): the pause menu's save request S[0x29] = 6.
@@ -1182,7 +1191,27 @@ struct App {
                 c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             }
             poseActors(lerp, c);
+            // LiT zone/portal visibility (0x44c270): eye + player zones; the free-fly camera sees every zone.
+            // Debug: BBTIME_LIT_ALL_ZONES=1 draws every zone (A/B against the walk).
+            static const bool allZones = std::getenv("BBTIME_LIT_ALL_ZONES");
+            if (play && !freeCamera() && !allZones)
+                r.setZoneView({play->world.camZone, play->world.p.zone, (play->world.cam.flags & 0x300) != 0});
+            else
+                r.setZoneView({});
             r.drawScene(c, s);
+            if (play) {  // the table the next tick's +0x3c & 1 actor test reads: zones whose first entry is unflagged
+                std::optional<std::vector<int16_t>> zt;
+                if (!r.zoneTable().empty()) {
+                    zt.emplace();
+                    std::vector<int16_t> seen;
+                    for (const bb::render::ZoneEntry& e : r.zoneTable()) {
+                        if (std::ranges::find(seen, e.zone) != seen.end()) continue;
+                        seen.push_back(e.zone);
+                        if (!e.flagged) zt->push_back(e.zone);
+                    }
+                }
+                play->world.zoneTable = std::move(zt);
+            }
             if (play || tbPlay) {
                 if (tbPlay) drawTbBoxes();  // letterbox bars + text-box rects, under the glyphs (0x464c30 / 0x4662f0)
                 drawOverlayText(play ? play->world.glyphs : tbPlay->world.glyphs);  // game text: drawn with --no-hud too
@@ -1229,9 +1258,11 @@ struct App {
             if (play || tbPlay) continue;  // the simulation's actors are drawn below
             bb::poseActor(scene.actorModels[a.model], actorAnim[i], a.pos, a.rot, a.scale, actorMeshes);
         }
+        // Enhanced draw distance: entities unlisted only by their activation range are drawn too (frozen, not ticked).
+        const bool farDraw = s.fidelity == Fidelity::Enhanced && !s.frame43;
         if (tbPlay)  // listed entities (view list 0x45eee0; the shadow pass 0x464480 draws from it too, I), not removed
             for (const bb::game::TbActor& e : tbPlay->world.entities)
-                if (e.active && e.drawn() && e.model && !e.anim.parts.empty())
+                if ((e.active || (farDraw && e.far)) && e.drawn() && e.model && !e.anim.parts.empty())
                     bb::poseActor(*e.model, e.anim, {e.pos.x, e.pos.y, e.pos.z}, {e.pitch, e.yaw, e.roll},
                                   {e.scale[0], e.scale[1], e.scale[2]}, actorMeshes);
         // Enhanced sun shadows (Vulkan): actorMeshes[0, casters) cast and receive them. LiT's sky dome (behaviour 9,
@@ -1241,7 +1272,7 @@ struct App {
         auto poseLit = [&](bool sky) {
             for (const bb::game::LitActor& a : play->world.actors) {
                 const int32_t m = play->world.defs[size_t(a.def)].model;
-                if (a.dead || !a.visible || m < 0 || a.animState.parts.empty() || (sunShadows && (a.type == 9) != sky)) continue;
+                if (a.dead || !(a.visible || (farDraw && a.far)) || m < 0 || a.animState.parts.empty() || (sunShadows && (a.type == 9) != sky)) continue;
                 bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
                               {a.rot[0], a.yaw, a.rot[2]}, a.scale, actorMeshes);
             }
@@ -1254,7 +1285,7 @@ struct App {
             const uint8_t white = uint8_t(std::min(255.0f, std::round(255.0f / s.colorScale(scene.colorScale))));
             for (const bb::game::LitActor& a : play->world.actors) {
                 const bb::game::ActorDef& d = play->world.defs[size_t(a.def)];
-                if (a.type != 4 || a.dead || !a.visible || !a.boxInit) continue;
+                if (a.type != 4 || a.dead || !(a.visible || (farDraw && a.far)) || !a.boxInit) continue;
                 const auto sp = scene.sprites.find(d.sprite);
                 if (sp == scene.sprites.end() || a.animState.frame >= sp->second.size()) continue;
                 const bb::SpriteFrame& f = sp->second[a.animState.frame];
@@ -1490,9 +1521,13 @@ struct App {
         if (screen == Screen::Level && play) {
             const bb::game::LitWorld& w = play->world;
             text += std::format("\nPLAY  tick {}  state {} seq {}  anim {}  flags14 {:08x}\nbugs {} {} {}  yaw {}  ground {}  zone {}"
-                                "\ncam eye {} {} {}  yaw {}  F1 help  F5 free-fly  F2 fidelity  F4 fog",
+                                "\ncam eye {} {} {}  yaw {}  zone {}  F1 help  F5 free-fly  F2 fidelity  F4 fog",
                                 w.ticks, w.p.state, w.p.seq, w.p.anim, w.p.flags14, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.yaw,
-                                w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw);
+                                w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw, w.camZone);
+            if (!r.zoneTable().empty()) {
+                text += "\nzone table";
+                for (const bb::render::ZoneEntry& e : r.zoneTable()) text += std::format(" {}{}", e.zone, e.flagged ? "*" : "");
+            }
             if (!w.unsupported.empty()) {
                 text += "\nnot interpreted:";
                 for (const std::string& u : w.unsupported) text += " " + u;

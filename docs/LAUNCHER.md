@@ -13,6 +13,7 @@ smoke on KDE Wayland). The game does not depend on Qt: both share `apps/bbtime/s
 | `$XDG_DATA_HOME/bbtime/backups/<UTC stamp>/` | Saves tab | full copies of `saves/` |
 | `$XDG_DATA_HOME/bbtime/mods/<id>/` | Mods page (New mod, Install from .zip, Remove) | mods (`docs/MODDING.md`) |
 | `$XDG_DATA_HOME/bbtime/modkit-export/` (default, any folder can be picked) | Mods page "Export assets…" (`bbtime-modkit export`) | the user's own exported originals |
+| `$XDG_CACHE_HOME/bbtime/viewer/<game>/<LEVEL>/` | Mods page 3-D viewer "Show originals" (`bbtime-modkit export --what models`) | cached original models for the viewer; safe to delete |
 | `$XDG_DATA_HOME/bbtime/app/` | updater | see `docs/UPDATES.md` |
 | `$XDG_STATE_HOME/bbtime/logs/bbtime-*.log` | launcher | stdout+stderr of games started from the launcher |
 
@@ -92,6 +93,20 @@ game's level loader). Screenshots: `local/shots/w9launcher/`.
   the build tree), "Refresh". Below: the selected mod's details and validation (`bb::mods::validate`, run in the
   background; it decodes the named levels to check texture ids) and the conflicts of the enabled set (keys that
   several enabled mods provide, and which one wins). Screenshot: `local/shots/w9mod/launcher_mods_page.png`.
+  The **3-D model viewer** tab lists the selected mod's `models/` and `animations/` glTF files and, after "Show
+  originals" (game + level), that level's original models (exported once into the cache above; originals the mod
+  replaces are marked). Selecting one shows it textured (base colour texture × vertex colour, nearest sampling, as
+  the game): drag = orbit, wheel = zoom, double-click = reset. Static rest / bind pose only (no animation, no
+  skinning). `QOpenGLWidget`, `bb::mods::loadPreview`. Screenshot: `local/shots/w10/viewer/`.
+  **Replace model…** (button or right-click) copies a picked `.gltf` / `.glb` into the selected mod at the
+  selected model's path (`models/<game>/<model id>`, `models/<game>/<level>/<asset id>` or `…/world`, the
+  extension of the picked file; a file of the other format for the same model is removed) together with the
+  buffers / images its relative URIs name, at the same relative place, so nothing is rewritten. URIs that are
+  absolute or leave the mod folder are not copied (warning). The file must parse (`loadPreview`) and have
+  triangles; missing `part<N>` / `<index>#` nodes of the original, a mod for the other game and every overwritten
+  file are listed in one confirmation. No mod selected → offers **New mod…** first. **Remove replacement** deletes
+  the mod's file for the selected model (mod entry or the marked original) and its side files that no other glTF
+  of the mod refers to, after a confirmation listing them.
 * **Logs** — game logs, newest first; live while a game started from the launcher runs.
 * **Updates** — signed update check/install/rollback against the GitHub release channel; after an install that
   brings a newer launcher it restarts into it (`docs/UPDATES.md`).

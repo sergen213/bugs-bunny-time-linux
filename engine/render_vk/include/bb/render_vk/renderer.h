@@ -70,6 +70,10 @@ public:
     void setActorMeshes(std::span<const Mesh> meshes, size_t shadowCasters = SIZE_MAX);
     // 30 Hz simulation tick selecting the current frame of Scene::textureAnims (Mesh::textureAnim).
     void setTextureTick(uint32_t tick) { texTick_ = tick; }
+    // LiT zone/portal visibility (bb/render/zones.h), as the GL renderer: only the rasterised passes skip hidden
+    // zones; the shadow map and the ray-tracing BLAS keep every zone.
+    void setZoneView(const render::ZoneView& v) { zoneView_ = v; }
+    const std::vector<render::ZoneEntry>& zoneTable() const { return zoneTable_; }
 
     // 2D images: returns a bindless slot handle, 0 on invalid input.
     uint32_t createImage(const Texture& tex);
@@ -107,7 +111,7 @@ private:
                    VkCommandBuffer copyCmd[2]{}; VkFence copyFence[2]{}; VkSemaphore copyAcquired[2]{}; bool copyPending[2]{}; };
     // caster: drawn into the shadow map / BLAS; receiver: shadowed (and AO for opaque + alpha-tested)
     // material: packHalf2x16(reflection strength, roughness) for ray-traced reflections, 0 = none
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; };
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; };
     struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; };
     struct RtGeo { uint64_t vtx, idx; uint32_t first; int32_t base; uint32_t tex, pad; }; // scene.frag Geo
     struct TexAnim { std::vector<uint32_t> frames; uint32_t start, hold; }; // frames as bindless slots
@@ -242,6 +246,10 @@ private:
     std::vector<GpuMesh> meshes_;       // scene meshes, then actor meshes (actor = true)
     std::vector<TexAnim> texAnims_;
     uint32_t texTick_ = 0;
+    std::vector<WorldZone> zones_;  // Scene::zones of the uploaded scene
+    render::ZoneView zoneView_;
+    std::vector<render::ZoneEntry> zoneTable_;
+    std::vector<uint8_t> zoneDrawn_;
     size_t sceneMeshCount_ = 0;
     std::vector<Vertex> actorVerts_;
     std::vector<uint32_t> actorIdx_;

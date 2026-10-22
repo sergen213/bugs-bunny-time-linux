@@ -98,6 +98,7 @@ struct TbActor {
     uint16_t view = 0, range = 0, actBlock = 0;
     int32_t sleep = 0;
     bool active = false;                     // listed (ticked) this tick
+    bool far = false;                        // unlisted only by the +0x76 range (incl. its sleep): Enhanced still draws it
     bool collidable = false;                 // in the contact list 0x4d2734 this tick (flags0 & 0x2000100 == 0x100)
     uint16_t gdBit = 0;                      // tag 0x65 (+0x48): GAME_DATA +500 bit; flags10 & 4: removed when set
     int16_t maxHp = 1;                       // DAT_004d5ebc (flags1 0x200 boss bar S[1])
@@ -202,6 +203,9 @@ public:
     int music = 0;                           // logic action 126 value n (Track(n-1).xa), first setter in the level
     int dt = 0;                              // DAT_004d26c4: 0 on the first tick after load, then 2
     uint32_t ticks = 0;
+    // View list frustum (0x45eee0): half-angle tangents of the render view. The exe's planes span tan 0x8a0/0xd7a
+    // (0.64) across and ~0.48 vertically (51.3°); the app sets its wider Enhanced FOV here so edge entities stay listed.
+    double viewTanX = 0.64, viewTanY = 0.48;
     int lastCallFriend = 0;                  // 1 placed, -1 refused/failed, 0 not requested (this tick)
     std::set<std::string> unsupported;       // logic conditions/actions met but not interpreted
 

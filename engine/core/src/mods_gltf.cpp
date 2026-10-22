@@ -21,6 +21,7 @@
 #include <optional>
 #include <print>
 #include <regex>
+#include <ranges>
 #include <span>
 #include <charconv>
 #include <functional>
@@ -1049,6 +1050,73 @@ void applyToModel(const Scene& s, ActorModel& model) {
     std::vector<std::string> notes;
     applyOne(nullptr, s, model, idsOf(s, model), model.anims.empty() ? 0 : model.anims[0].id, m, notes);
     for (const std::string& n : notes) std::println(stderr, "bbtime: {}", n);
+}
+
+Preview loadPreview(const fs::path& file) {
+    const Gltf g = Gltf::load(file);
+    Preview out;
+    for (const json& n : g.j.value("nodes", json::array())) out.nodes.push_back(n.value("name", ""));
+    std::vector<int> roots;
+    if (g.j.contains("scenes") && !g.j["scenes"].empty())
+        for (const json& n : g.at("scenes", g.j.value("scene", size_t(0))).value("nodes", json::array())) roots.push_back(n);
+    else
+        for (const auto par = g.parents(); size_t i : std::views::iota(size_t(0), par.size()))
+            if (par[i] < 0) roots.push_back(int(i));
+    std::function<void(int, const M4&, int)> walk = [&](int ni, const M4& parent, int depth) {
+        if (depth > 64) throw FormatError("glTF: node hierarchy too deep (cycle?)");
+        const json& n = g.at("nodes", size_t(ni));
+        const M4 world = mul(parent, g.local(n));
+        eachPrimitive(g, ni, world, [&](const json&, const json& p, const M4& m) {
+            const json& attr = p.at("attributes");
+            int pc = 0, tc = 2, cc = 4;
+            const std::vector<float> pos = g.floats(attr.at("POSITION"), pc);
+            const size_t nv = pos.size() / size_t(pc);
+            const std::vector<float> uv = attr.contains("TEXCOORD_0") ? g.floats(attr["TEXCOORD_0"], tc) : std::vector<float>(nv * 2, 0.0f);
+            const std::vector<float> col = attr.contains("COLOR_0") ? g.floats(attr["COLOR_0"], cc) : std::vector<float>(nv * 4, 0.5f);
+            if (pc != 3 || uv.size() / size_t(tc) != nv || col.size() / size_t(cc) != nv) throw FormatError("glTF: attribute size mismatch");
+            std::vector<float> idx;
+            if (int ic = 1; p.contains("indices")) idx = g.floats(p["indices"], ic);
+            else for (size_t i = 0; i < nv; ++i) idx.push_back(float(i));
+            Preview::Group& grp = out.groups.emplace_back();
+            float tint[4]{1, 1, 1, 1};
+            if (p.contains("material")) {
+                const json& mat = g.at("materials", p["material"]);
+                grp.alphaTest = mat.value("alphaMode", "OPAQUE") != "OPAQUE";
+                const json pbr = mat.value("pbrMetallicRoughness", json::object());
+                for (size_t k = 0; k < 4 && pbr.contains("baseColorFactor"); ++k) tint[k] = pbr["baseColorFactor"][k];
+                if (pbr.contains("baseColorTexture")) {
+                    const json& tex = g.at("textures", pbr["baseColorTexture"].at("index"));
+                    if (tex.contains("source")) {
+                        const json& im = g.at("images", tex["source"]);
+                        const std::string uri = im.value("uri", "");
+                        if (im.contains("bufferView")) {
+                            const json& v = g.at("bufferViews", im["bufferView"]);
+                            const auto& b = g.buffers.at(v.at("buffer"));
+                            const size_t off = v.value("byteOffset", size_t(0)), len = v.at("byteLength");
+                            if (off + len > b.size()) throw FormatError("glTF: image past its buffer");
+                            grp.imageBytes.assign(b.begin() + long(off), b.begin() + long(off + len));
+                        } else if (uri.starts_with("data:")) {
+                            grp.imageBytes = unb64(std::string_view(uri).substr(uri.find(',') + 1));
+                        } else if (!uri.empty()) {
+                            grp.image = g.dir / uri;
+                        }
+                    }
+                }
+            }
+            grp.vertices.reserve(idx.size() * 9);
+            for (const float fi : idx) {
+                const size_t i = size_t(fi);
+                if (i >= nv) throw FormatError("glTF: index out of range");
+                const auto w = xform(m, &pos[i * 3]);
+                grp.vertices.insert(grp.vertices.end(), {w[0], w[1], w[2], uv[i * 2], uv[i * 2 + 1]});
+                for (size_t c = 0; c < 4; ++c) grp.vertices.push_back((c < size_t(cc) ? col[i * size_t(cc) + c] : 1.0f) * tint[c]);
+            }
+        });
+        for (const json& c : n.value("children", json::array())) walk(c, world, depth + 1);
+    };
+    for (const int r : roots) walk(r, identity(), 0);
+    std::erase_if(out.groups, [](const Preview::Group& grp) { return grp.vertices.empty(); });
+    return out;
 }
 
 size_t exportModels(const Scene& s, const fs::path& out, std::span<const ActorModel* const> extra) {

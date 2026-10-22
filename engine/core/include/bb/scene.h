@@ -40,6 +40,19 @@ struct Mesh {
     std::vector<uint32_t> indices; // triangle list; front faces are counter-clockwise in engine space
     bool twoSided = false;       // no back-face culling
     int32_t textureAnim = -1;    // index into Scene::textureAnims; when set it overrides `texture` (the fallback)
+    int16_t zone = -1;           // LiT world: zone id of its chunk 0x20 (tag 0x21); -1 = always drawn
+};
+
+// LiT zone/portal visibility (MODELS.md §7, 0x44c270 / 0x40fe90). Engine-space corners.
+using Corner = std::array<float, 3>;
+struct ZonePortal {
+    uint16_t to = 0;                       // portal record 0x10 @16: zone id it reveals
+    std::array<Corner, 4> quad{};
+};
+struct WorldZone {
+    bool present = false;                  // a world chunk carries this id (zone object table 0x4b37a0)
+    uint8_t depth = 0;                     // chunk tag 0x43 (+0xb5): portal walk depth limit
+    std::vector<ZonePortal> portals;
 };
 
 // Texture link / animated texture: faces bound to link `linkId` show frames[(startFrame + tick / holdTicks) %
@@ -158,6 +171,7 @@ struct Scene {
     // health panels 116x46 / 140x46, bars 80x8, icons). hudSheet[frame] = Scene::textures index, -1 if not loaded.
     std::vector<int32_t> hudSheet;
     std::map<uint16_t, std::vector<SpriteFrame>> sprites;  // LiT: every sprite-sequence asset id -> its frames
+    std::vector<WorldZone> zones;  // LiT: index = zone id; empty = no zone/portal visibility (TB, galleries)
     SceneStats stats;
     std::vector<std::string> notes; // short human-readable status lines for overlays (gaps, research state)
 };

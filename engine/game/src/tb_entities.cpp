@@ -46,12 +46,12 @@ void TbWorld::viewList() {
         a.f24 |= 4;
         a.active = false;
         a.collidable = (a.flags0 & 0x2000100) == 0x100 && !(a.view & 0x20) && !(&a == &partner && (GD[0xa2] & 3));
-        if (a.f20 & 0x2000) continue;
-        if (a.actBlock && !(runBlock(a, a.actBlock) & 0x40000000)) continue;
+        if (a.f20 & 0x2000) { a.far = false; continue; }
+        if (a.actBlock && !(runBlock(a, a.actBlock) & 0x40000000)) { a.far = false; continue; }
         a.sleep -= dec;
         if (a.sleep >= 1) continue;
         a.sleep = 0;
-        if (a.view & 0x20) continue;
+        if (a.view & 0x20) { a.far = false; continue; }
         bool out = false;
         if (a.view && a.behaviour != 20 && a.parent != int32_t(F.uid) && F.parent != int32_t(a.uid)) {
             if (a.view & 2) {
@@ -59,6 +59,7 @@ void TbWorld::viewList() {
                 if (dist > a.range) {
                     if (!(a.view & 0x40)) {
                         a.sleep = dist - a.range;
+                        a.far = true;
                         continue;
                     }
                     out = true;
@@ -66,10 +67,11 @@ void TbWorld::viewList() {
             }
             if ((a.view & 0xc) && !out) {
                 // 0x406280 scales view y by 0x639a94 / 4096 (2560): the planes below then give the 51.3° vertical FOV.
-                constexpr double ys = 2560.0 / 4096;
+                // A wider render FOV (viewTanX/Y) squeezes view x / y so the exe's planes span it instead.
+                const double ys = 2560.0 / 4096 * 0.48 / std::max(viewTanY, 0.48), xs = 0.64 / std::max(viewTanX, 0.64);
                 auto view = [&](double px, double py, double pz) {
                     px -= eye.x, py -= eye.y, pz -= eye.z;
-                    return std::array<int32_t, 3>{int32_t(px * r[0] + py * r[1] + pz * r[2]),
+                    return std::array<int32_t, 3>{int32_t((px * r[0] + py * r[1] + pz * r[2]) * xs),
                                                   int32_t((px * d[0] + py * d[1] + pz * d[2]) * ys),
                                                   int32_t(px * f[0] + py * f[1] + pz * f[2])};
                 };
@@ -109,10 +111,10 @@ void TbWorld::viewList() {
                         out = bits != 0xf;
                     }
                 }
-                if (out && !(a.view & 0x50)) continue;
+                if (out && !(a.view & 0x50)) { a.far = false; continue; }
             }
         }
-        a.active = true;
+        a.active = true, a.far = false;
         if (!out) a.f24 &= ~4u;
         if (a.behaviour == 16 || a.behaviour == 35) a.f24 |= 4;
     }

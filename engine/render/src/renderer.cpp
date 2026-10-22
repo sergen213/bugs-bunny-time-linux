@@ -331,6 +331,7 @@ void Renderer::uploadScene(const Scene& scene) {
     std::vector<uint32_t> idx;
     if (!sceneVao_) glGenVertexArrays(1, &sceneVao_);
     appendMeshes(scene.meshes, sceneVao_, verts, idx, meshes_);
+    zones_ = scene.zones;
     upload(sceneVao_, sceneVbo_, sceneIbo_, verts, idx, GL_STATIC_DRAW);
 }
 
@@ -346,7 +347,7 @@ void Renderer::appendMeshes(std::span<const Mesh> in, uint32_t vao, std::vector<
         const bool texOk = m.texture >= 0 && size_t(m.texture) < sceneTextures_.size() && sceneTextures_[size_t(m.texture)];
         const bool animOk = m.textureAnim >= 0 && size_t(m.textureAnim) < texAnims_.size() && !texAnims_[size_t(m.textureAnim)].frames.empty();
         out.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
-                       uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1});
+                       uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1, m.zone});
         verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
         idx.insert(idx.end(), m.indices.begin(), m.indices.end());
     }
@@ -420,6 +421,8 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
 
     const glm::mat4 view = cam.view();
     const glm::mat4 vp3 = projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, s.zFar) * view;
+    const bool zoned = walkZones(zones_, vp3, zoneView_, zoneTable_, zoneDrawn_);
+    auto shown = [&](const GpuMesh& m) { return !zoned || m.zone < 0 || zoneDrawn_[size_t(m.zone)]; };
     glUseProgram(prog3D_);
     glUniformMatrix4fv(uViewProj_, 1, GL_FALSE, glm::value_ptr(vp3));
     glUniformMatrix4fv(uView_, 1, GL_FALSE, glm::value_ptr(view));
@@ -462,14 +465,14 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
         for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
             for (const GpuMesh& m : *list)
-                if (m.blend == pass) draw(m);
+                if (m.blend == pass && shown(m)) draw(m);
 
     // Pass 3: translucent (alpha, additive, subtractive), back-to-front by mesh centre, no depth writes.
     // ponytail: per-mesh sort; per-triangle sort if intersecting translucent meshes show artefacts.
     std::vector<const GpuMesh*> translucent;
     for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
         for (const GpuMesh& m : *list)
-            if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest) translucent.push_back(&m);
+            if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) translucent.push_back(&m);
     std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
         const glm::vec3 d = m->center - cam.pos;
         return glm::dot(d, d);

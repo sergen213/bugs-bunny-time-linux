@@ -133,7 +133,7 @@ struct Player : Mover {
     uint8_t frameSkip = 0;         // +0x149
     int32_t platform = -1;         // +0x70 actor ridden (LitWorld::actors index)
     int32_t carrier = -1;          // actor carrying Bugs (its +0x6c, item flag 0x20000000): Bugs follows it
-    bool carrierHand = false;      // attached at the carrier's hand part (+0x68), offset `local` (+0x1a4..) under it
+    int16_t carrierPart = -1;      // the carrier's hand part (+0x68) as of the attach, offset `local` (+0x1a4..) under it; -1 root
     uint16_t contact = 0;          // +0x34 entity id of the last actor touched / hit
     // Hanging on a type-8 rope (0x43a310 grab): +0x70 = the rope, +0xc0 -> local coordinate +0x18c whose super is the
     // rope's root +0x7c; world position = rope matrix · local trans (+0x1a4..+0x1ac), local yaw +0x19e.
@@ -174,14 +174,17 @@ struct LitActor : Mover {
     int32_t lo = 0, hi = 0;        // platform lift limits +0x184 / +0x194
     V3 base;                       // platform rest position +0x190..
     int32_t rider = -1;            // +0x6c actor carried (item 0x20000000 without 0x80; player = -2)
-    // Attached coordinate (+0xc4 super, +0x70 parent): parent actors index (kParentBugs = Bugs), at its hand part
-    // (+0x68) or root (+0x7c); local translation +0x134.. and local yaw +0x12e under the parent's frame.
+    // Attached coordinate (+0xc4 super, +0x70 parent): parent actors index (kParentBugs = Bugs), at the parent's hand
+    // part as of the attach (+0xc4 = the parent's +0x68 then: a later packet 10 on another part does not move it;
+    // runtime: LS01 time machine 620 stays on actor 89's part 0 while its anim 1 jitters part 1) or root (+0x7c, -1);
+    // local translation +0x134.. and local yaw +0x12e under the parent's frame.
     int32_t parent = -1;
-    bool parentHand = false;
+    int16_t parentPart = -1;
     V3 local;
     int16_t localYaw = 0;
     int16_t matYaw = 0;            // local yaw in the coordinate matrix +0x80: rebuilt after the world yaw is read (one tick behind)
     bool visible = true;           // +4 bit 2 (cleared when culled)
+    bool far = false;              // hidden only by the +0x3e distance (+0x3c & 0x42): Enhanced still draws it
     bool active = false;           // linked into the active list this tick
     bool dead = false;             // flags14 0x100 handled: freed
     V3 hand;                       // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet (+0x68)
@@ -284,9 +287,16 @@ public:
     std::vector<LitActor> actors;    // live actors (dead ones stay with dead = true so indices are stable)
     Player p;
     Camera cam;
+    int16_t camZone = -1;            // 0x4b39b4 +0x26: FindZone of the eye (0x4318f0), kept while the eye is in none
+    // Visible-zone table 0x4b3460 of the last rendered frame (its unflagged zone ids; app: Renderer::zoneTable). Actor
+    // flag +0x3c & 1 needs its zone listed. nullopt = not rendered (tests): every zone after the first tick.
+    std::optional<std::vector<int16_t>> zoneTable;
     Pad pad;
     std::array<uint8_t, 256> G{}, S{};
     uint32_t ticks = 0;
+    // Actor on-screen test (+0x3c & 0x20, 0x447d40): projected half-width at H = 400. The exe's 0x100 = the 4:3 PS1
+    // reference; the app widens it to its render FOV (wide Enhanced FOV / Hor+) so actors at the screen edges stay drawn.
+    double viewHalfX = 0x100;
     int nextLevel = -1;              // level change request (GD+0 / DAT_004b39bc = 1), LitWorld::levelName id
     // Sound voices (sfx.h): requests during the tick, one mixer pass after the behaviours (0x41edb0); the app drains
     // sfx.cmds. Replays of the audio-less Wine oracle set sfx.device = false (runtime: its 24 voices never free, all
@@ -476,7 +486,8 @@ private:
     void startScript(LitActor& a, uint16_t stateId);
     // Attached actors (0x440120 coordinate chain): parent frame (origin, yaw), attach / follow / detach.
     static constexpr int32_t kParentBugs = -2;
-    V3 frameWorld(int32_t parent, bool hand, const V3& local, int16_t* yaw = nullptr) const;  // a point of the parent coordinate
+    V3 frameWorld(int32_t parent, int16_t part, const V3& local, int16_t* yaw = nullptr) const;  // a point of the parent coordinate (part -1: root)
+    int16_t attachPart(int32_t parent, bool hand) const;  // the parent's hand part (+0x68) to hang on now, -1 = root
     int16_t coordYaw(const LitActor& c) const;  // heading of c's coordinate matrix walked from its current local rot
     void attach(LitActor& c, int32_t parent, bool hand);
     void followParent(LitActor& a, const V3& move);

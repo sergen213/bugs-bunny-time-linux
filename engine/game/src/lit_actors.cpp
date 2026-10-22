@@ -271,7 +271,7 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
             p.local = (e.f2 & 0x80) ? V3{} : V3{p.pos.x - hand.x, p.pos.y - hand.y, p.pos.z - hand.z};
             p.pos = hand;
             p.carrier = meIdx;
-            p.carrierHand = true;
+            p.carrierPart = attachPart(meIdx, true);
             p.state = e.id;
             p.seq = 0;
             p.anim = 0;
@@ -284,7 +284,7 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
             if (e.f2 & 0x80) p.pos = hand;
             p.yaw = int16_t(self->yaw + 0x800);
             p.carrier = -1;
-            p.carrierHand = false;
+            p.carrierPart = -1;
             p.local = {};
             self->rider = -1;
             p.state = e.id;
@@ -363,14 +363,15 @@ void LitWorld::startScript(LitActor& a, uint16_t stateId) {
 // ---- attached actors: the 0x440120 coordinate chain (+0x7c coordinate, +0xc4 super, +0x70 parent, +0x11c local) ----
 
 // A point given in the parent coordinate, in the world: its root (+0x7c: position, yaw; ponytail: its x/z rotation
-// is not applied) or, at its hand (+0x68), the last packet-10 part's matrix through the animated part chain (Bugs:
-// his hand point, turned by his yaw). `yaw` gets the coordinate's heading (0x440120: atan2 of its z axis).
-V3 LitWorld::frameWorld(int32_t parent, bool hand, const V3& l, int16_t* yaw) const {
+// is not applied) or, at the hand part `part` (the parent's +0x68 when attached), that part's matrix through the
+// animated part chain (Bugs: his hand point, turned by his yaw). `yaw` gets the coordinate's heading (0x440120: atan2
+// of its z axis).
+V3 LitWorld::frameWorld(int32_t parent, int16_t part, const V3& l, int16_t* yaw) const {
     if (parent >= 0) {
         const LitActor& c = actors[size_t(parent)];
-        if (hand && c.handPart >= 0) {
+        if (part >= 0) {
             auto at = [&](const V3& q) {
-                return partOriginQ12(c.animState, size_t(c.handPart), c.pos, {c.rot[0], coordYaw(c), c.rot[2]}, c.scale, q);
+                return partOriginQ12(c.animState, size_t(part), c.pos, {c.rot[0], coordYaw(c), c.rot[2]}, c.scale, q);
             };
             if (const auto o = at(l)) {
                 if (yaw) {
@@ -387,10 +388,10 @@ V3 LitWorld::frameWorld(int32_t parent, bool hand, const V3& l, int16_t* yaw) co
     int16_t my = m.yaw;
     if (parent >= 0 && actors[size_t(parent)].parent != -1) {
         const LitActor& c = actors[size_t(parent)];
-        frameWorld(c.parent, c.parentHand, {}, &my);
+        frameWorld(c.parent, c.parentPart, {}, &my);
         my = int16_t(my + c.matYaw);
     }
-    const V3 o = hand && parent == kParentBugs && p.handSet ? p.hand : m.pos, w = rotY(my, l.x, l.y, l.z);
+    const V3 o = part >= 0 && parent == kParentBugs && p.handSet ? p.hand : m.pos, w = rotY(my, l.x, l.y, l.z);
     if (yaw) *yaw = my;
     return {o.x + w.x, o.y + w.y, o.z + w.z};
 }
@@ -401,15 +402,19 @@ V3 LitWorld::frameWorld(int32_t parent, bool hand, const V3& l, int16_t* yaw) co
 int16_t LitWorld::coordYaw(const LitActor& c) const {
     if (c.parent == -1) return c.yaw;
     int16_t py = 0;
-    frameWorld(c.parent, c.parentHand, {}, &py);
+    frameWorld(c.parent, c.parentPart, {}, &py);
     return int16_t(py + c.localYaw);
 }
 
-// Item 0x20000000 / spawn 0x80 / item 0x1000: c's coordinate becomes a child of the parent's (local identity), its
-// zone the parent's, world position recomputed at once.
+int16_t LitWorld::attachPart(int32_t parent, bool hand) const {
+    return !hand ? -1 : parent == kParentBugs ? 0 : actors[size_t(parent)].handPart;
+}
+
+// Item 0x20000000 / spawn 0x80 / item 0x1000: c's coordinate becomes a child of the parent's (local identity; at its
+// hand: the part +0x68 points to now, kept), its zone the parent's, world position recomputed at once.
 void LitWorld::attach(LitActor& c, int32_t parent, bool hand) {
     c.parent = parent;
-    c.parentHand = hand;
+    c.parentPart = attachPart(parent, hand);
     c.local = {};
     c.localYaw = c.matYaw = 0;
     c.rot[0] = c.rot[2] = 0;
@@ -427,10 +432,10 @@ void LitWorld::followParent(LitActor& a, const V3& move) {
     if (a.parent == -1) return;
     if (a.parent >= 0) actors[size_t(a.parent)].flags18 |= 0x800;
     int16_t yaw = 0;
-    frameWorld(a.parent, a.parentHand, {}, &yaw);
+    frameWorld(a.parent, a.parentPart, {}, &yaw);
     const V3 l = rotY(int16_t(-(a.parent == kParentBugs ? p.yaw : actors[size_t(a.parent)].yaw)), move.x, move.y, move.z);
     a.local = {a.local.x + l.x, a.local.y + l.y, a.local.z + l.z};
-    a.pos = frameWorld(a.parent, a.parentHand, a.local);
+    a.pos = frameWorld(a.parent, a.parentPart, a.local);
     a.yaw = int16_t(yaw + a.matYaw);
     a.zone = a.parent == kParentBugs ? p.zone : actors[size_t(a.parent)].zone;
 }
@@ -456,29 +461,31 @@ void LitWorld::actorsTick() {
         LitActor& a = actors[i];
         a.active = false;
         if (a.dead || (a.flagsC & 0x40)) continue;
-        a.visible = true;
+        a.visible = true, a.far = false;
         a.flags18 &= ~0x100u;
         if (a.entityId != 5 && a.type != 20 && int(i) != p.platform && int(i) != p.rope && a.act3c != 0) {
             if ((a.act3c & 2) && approxLen(ref.x - a.pos.x, ref.y - a.pos.y, ref.z - a.pos.z) > a.act3e) {  // beyond +0x3e
-                if (!(a.act3c & 0x40)) continue;
-                a.visible = false;
+                a.visible = false, a.far = true;  // the exe clears the draw bit on both paths; Enhanced still draws far
                 a.flags18 |= 0x100;
-            }
-            // +0x3c & 1 portal-zone visibility: the visible-zone table 0x4b3460 is filled by drawing, so it is empty
-            // for the load update and the first tick (runtime: L01A's zone-gated start director fires on the 2nd
-            // tick, counter 5); afterwards every zone counts as visible (portal visibility not simulated).
-            if ((a.act3c & 1) && a.visible && ticks <= 1) {
                 if (!(a.act3c & 0x40)) continue;
-                a.visible = false;
-                a.flags18 |= 0x100;
             }
-            // & 0x20: projected centre within ±0x100 of the 512-wide 4:3 reference at H = 400 (vertical test and
-            // multi-part corners omitted).
+            // +0x3c & 1 portal-zone visibility: the actor's zone must be in the visible-zone table 0x4b3460 unflagged.
+            // The table is filled by drawing, so it is empty for the load update and the first tick (runtime: L01A's
+            // zone-gated start director fires on the 2nd tick, counter 5). Without a renderer (zoneTable unset)
+            // every zone counts as visible afterwards.
+            if ((a.act3c & 1) && a.visible &&
+                (ticks <= 1 || (zoneTable && std::ranges::find(*zoneTable, a.zone) == zoneTable->end()))) {
+                a.visible = false;  // the exe clears the draw bit (+4 & 2) on both paths (0x447d40)
+                a.flags18 |= 0x100;
+                if (!(a.act3c & 0x40)) continue;
+            }
+            // & 0x20: projected centre within ±viewHalfX (exe 0x100 of the 512-wide 4:3 reference at H = 400; the app
+            // widens it to its render FOV) (vertical test and multi-part corners omitted).
             if ((a.act3c & 0x20) && a.visible) {
                 const double rx = a.pos.x - cam.eye.x, rz = a.pos.z - cam.eye.z;
                 const double cz = (rx * fwd.x + rz * fwd.z) / fl, cx = (rx * fwd.z - rz * fwd.x) / fl;
                 const double r = std::max({std::abs(a.box[0]), std::abs(a.box[3]), std::abs(a.box[2]), std::abs(a.box[5])});
-                if (cz <= 0 || std::abs(cx * 400 / cz) - r * 400 / cz > 0x100) {
+                if (cz <= 0 || std::abs(cx * 400 / cz) - r * 400 / cz > viewHalfX) {
                     if (!(a.act3c & 0xc0)) continue;
                     a.visible = false;
                     a.flags18 |= 0x100;
@@ -486,7 +493,7 @@ void LitWorld::actorsTick() {
             }
         }
         if (a.type == 16 || a.type == 36) {
-            a.visible = false;
+            a.visible = false, a.far = false;
             a.flags18 |= 0x100;
         }
         a.active = true;
@@ -536,10 +543,13 @@ void LitWorld::actorsTick() {
     // offset is turned by the carrier's yaw, not the part matrix).
     if (p.carrier >= 0 && actors[size_t(p.carrier)].dead) p.carrier = -1;
     const bool held = p.carrier >= 0;
-    const V3 heldAt = held ? frameWorld(p.carrier, p.carrierHand, p.local) : V3{};
+    // World yaw = the coordinate chain's: the carrier's, or its hand part's matrix (runtime: CCMERLIN's walk to the
+    // castle hangs Bugs on a type-14 part animated across the level; +0xde reads −660 throughout, the carrier's 0).
+    int16_t heldYaw = 0;
+    const V3 heldAt = held ? frameWorld(p.carrier, p.carrierPart, p.local, &heldYaw) : V3{};
     if (held) {
         p.pos = heldAt;
-        p.yaw = actors[size_t(p.carrier)].yaw;
+        p.yaw = heldYaw;
         p.zone = actors[size_t(p.carrier)].zone;
     }
     if (!paused) {
@@ -926,7 +936,7 @@ void LitWorld::type14(size_t i) {
                     a.yaw = int16_t(a.yaw + dlt);
                 } else {
                     int16_t py = 0;
-                    frameWorld(a.parent, a.parentHand, {}, &py);
+                    frameWorld(a.parent, a.parentPart, {}, &py);
                     a.yaw = int16_t(py + a.localYaw);
                     int32_t dlt = wrap(a.yaw - want);
                     if (root) lean(pw);
@@ -960,7 +970,7 @@ void LitWorld::type14(size_t i) {
         // rebuilds only (runtime: 98 on 57 steps (8, −17) at counter 749 with yaw 1738, not the turned 1708).
         int16_t py = 0;
         const int16_t worldYaw = a.yaw;
-        if (a.parent != -1) frameWorld(a.parent, a.parentHand, {}, &py), a.yaw = int16_t(py + a.localYaw);
+        if (a.parent != -1) frameWorld(a.parent, a.parentPart, {}, &py), a.yaw = int16_t(py + a.localYaw);
         const Mover* tgt = &p;
         if (fa & 0x200000) {
             const int k = findActor(uint16_t(st->w[1]));
@@ -1039,7 +1049,7 @@ void LitWorld::type14(size_t i) {
                 a.local = apply(inv, {centred ? 0 : int16_t(a.pos.x - o.pos.x), o.box[4] + 4, centred ? 0 : int16_t(a.pos.z - o.pos.z)});
                 a.localYaw = a.matYaw = int16_t(a.yaw - o.yaw);
                 a.parent = h;
-                a.parentHand = false;
+                a.parentPart = -1;
                 a.pos.y = o.pos.y + o.box[4];
                 w.y = 0;
                 a.flags14 = (a.flags14 & 0xfffffdf6) | 0x40000014;
@@ -1261,7 +1271,7 @@ void LitWorld::type14(size_t i) {
                             // are left alone (runtime: 2 throughout the L01a walk-in) and the turn error 0x4b3c20 reset.
                             if (f & 0x1000000) p.reg = a.reg;
                             p.carrier = int32_t(i);
-                            p.carrierHand = a.handSet;
+                            p.carrierPart = attachPart(int32_t(i), a.handSet);
                             p.local = {};
                             p.platform = p.rope = -1;
                             turnErr_ = -1;
@@ -1301,9 +1311,9 @@ void LitWorld::type14(size_t i) {
                 }
                 if ((f & 0x4000) && a.rider == -2) {  // release Bugs at his attached world position = the carrier's
                     a.rider = -1;                       // current one (coordinate chain), x/z rotation cleared
-                    const V3 at = frameWorld(int32_t(i), p.carrierHand, p.local);
+                    const V3 at = frameWorld(int32_t(i), p.carrierPart, p.local);
                     p.carrier = -1;
-                    p.carrierHand = false;
+                    p.carrierPart = -1;
                     p.pos = at;
                     p.zone = a.zone;
                     p.lean = 0;

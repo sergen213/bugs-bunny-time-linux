@@ -60,6 +60,20 @@ F3 overlay shows `mods: N active, M overrides`.
 Other buttons: **New mod…** (creates the folder, `mod.json` and the empty sub-folders), **Open folder**, **Install
 from .zip…** (an archive with `mod.json` at its root or in one top folder), **Remove**, **Export assets…**.
 
+The **3-D model viewer** tab (next to the details) previews a mod's model and animation glTF files and, with **Show
+originals**, the original models of a level (exported once with `bbtime-modkit` into
+`$XDG_CACHE_HOME/bbtime/viewer/`; originals the selected mod replaces are marked), so a replacement and the model it
+replaces can be compared. It shows the static rest / bind pose with the base colour texture (animations and skins are
+not played); drag to orbit, wheel to zoom, double-click to reset.
+
+**Replace model…** there does the copying for you: select the original (or the mod's file), pick your edited
+`.gltf` / `.glb`, and the launcher copies it into the selected mod at the path the game looks up for that model
+(the same relative path as in the list), plus the `.bin` / images its relative URIs name at the same relative place
+(an edited export's `../../textures/…` images land in the mod's `textures/` and so also replace that level texture,
+as when copied by hand). Files that don't parse are refused; missing part / world node names, absolute or
+out-of-mod URIs (not copied) and overwrites are listed before anything is written. **Remove replacement** deletes
+the mod's file and the side files no other model of the mod uses.
+
 ## Exporting the originals
 
 Launcher: Mods → **Export assets…** (game, level, what, output folder; default

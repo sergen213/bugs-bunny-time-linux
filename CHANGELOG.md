@@ -3,6 +3,28 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## Unreleased
+
+- LiT carried actors / Bugs stay on the hand part their parent had when they were attached (the exe's +0xc4 =
+  +0x68 at attach time), not on whatever part a later animation's attach packet names: Bugs no longer jitters out
+  of the LS01 time machine seat while eras are cycled (seat = oracle every counter). Bugs carried at a hand part
+  takes the part's heading: he faces his walk to Merlin's castle (CCMERLIN) instead of the camera.
+- Launcher Mods page: **3-D model viewer** tab — previews a mod's model / animation glTF files and a level's
+  original models (exported once by `bbtime-modkit` into `$XDG_CACHE_HOME/bbtime/viewer/`, replaced ones marked),
+  textured, orbit / zoom / reset; static rest pose (`bb::mods::loadPreview`, `QOpenGLWidget`; docs/LAUNCHER.md).
+  **Replace model…** copies a picked glTF (+ its relative buffers / images) into the selected mod at the model's
+  resolver path after a parse check and part-name / overwrite confirmation; **Remove replacement** undoes it.
+- Wide FOV: the actor screen culls follow the render view instead of the exes' fixed 4:3 / 51.3° frustum (LiT
+  `+0x3c & 0x20` half-width `LitWorld::viewHalfX`, TB view list 0x45eee0 `TbWorld::viewTanX/Y`), so objects no longer
+  vanish at the left / right edges with FOV 90 / Hor+. 4:3 at 51.28° gives exactly the exe values (Original Fidelity
+  with pillarbox unchanged).
+- Enhanced draw distance: actors / entities hidden only by their activation range (LiT `+0x3e`, TB `+0x76` range and
+  its sleep) are still drawn, frozen and not ticked, so the simulation is unchanged (`far` flag). Original Fidelity
+  now also hides LiT range-culled actors without `+0x3c & 0x40` (the exe clears their draw bit; they were drawn).
+- LiT zone / portal visibility (exe 0x44c270): only the camera's and Bugs' zones and the zones their portals reveal
+  in the render frustum are drawn (GL + VK, both fidelities), so LS01 "Nowhere" no longer shows the other eras' sets;
+  zone-gated actors (`+0x3c & 1`) follow the same table.
+
 ## 0.9.2 — 2026-10-22 (fix: release channel stuck on 0.8.0)
 
 - A manifest URL saved by the pre-0.9 launcher (e.g. `…/releases/download/v0.8.0/manifest.json` in settings.ini

@@ -10,13 +10,18 @@
 #include "updater.h"
 
 #include <QtConcurrent/QtConcurrent>
+#include <QtOpenGL>
+#include <QtOpenGLWidgets>
 #include <QtWidgets>
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
+#include <set>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -312,6 +317,144 @@ protected:
             p.setPen(QPen(c, 2));
             p.drawRect(QRectF(rect()).adjusted(d, d, -d, -d));
         }
+    }
+};
+
+// Mods page 3-D viewer: one glTF (bb::mods::loadPreview, static rest / bind pose), base colour texture × vertex
+// colour × 2 (0.5 = the PS1's neutral 128, as in the game). Drag = orbit, wheel = zoom, double-click = reset.
+class ModelView : public QOpenGLWidget, protected QOpenGLFunctions {
+public:
+    QString load(const fs::path& file) {
+        QString err;
+        try {
+            model_ = bb::mods::loadPreview(file);
+        } catch (const std::exception& e) {
+            model_ = {};
+            err = QString::fromUtf8(e.what());
+        }
+        lo_ = QVector3D(1e30f, 1e30f, 1e30f), hi_ = -lo_, tris_ = 0;
+        for (const auto& g : model_.groups) {
+            tris_ += g.vertices.size() / 27;
+            for (size_t i = 0; i < g.vertices.size(); i += 9) {
+                const QVector3D p(g.vertices[i], g.vertices[i + 1], g.vertices[i + 2]);
+                lo_ = QVector3D(std::min(lo_.x(), p.x()), std::min(lo_.y(), p.y()), std::min(lo_.z(), p.z()));
+                hi_ = QVector3D(std::max(hi_.x(), p.x()), std::max(hi_.y(), p.y()), std::max(hi_.z(), p.z()));
+            }
+        }
+        dirty_ = true;
+        reset();
+        return err;
+    }
+    size_t triangles() const { return tris_; }
+    ~ModelView() override {  // GL objects die with a current context
+        makeCurrent();
+        gpu_.clear();
+        white_.reset();
+        prog_.removeAllShaders();
+        doneCurrent();
+    }
+    void reset() {
+        yaw_ = 30, pitch_ = 15, zoom_ = 1;
+        update();
+    }
+
+protected:
+    void initializeGL() override {
+        initializeOpenGLFunctions();
+        prog_.addShaderFromSourceCode(QOpenGLShader::Vertex,
+            "attribute vec3 pos; attribute vec2 uv; attribute vec4 col; uniform mat4 mvp; varying vec2 v_uv; varying vec4 v_col;\n"
+            "void main() { v_uv = uv; v_col = col; gl_Position = mvp * vec4(pos, 1.0); }\n");
+        prog_.addShaderFromSourceCode(QOpenGLShader::Fragment,
+            "#ifdef GL_ES\nprecision mediump float;\n#endif\n"
+            "uniform sampler2D tex; uniform float cut; varying vec2 v_uv; varying vec4 v_col;\n"
+            "void main() { vec4 t = texture2D(tex, v_uv); if (t.a < cut) discard;\n"
+            "  gl_FragColor = vec4(min(t.rgb * v_col.rgb * 2.0, 1.0), t.a * v_col.a); }\n");
+        prog_.bindAttributeLocation("pos", 0), prog_.bindAttributeLocation("uv", 1), prog_.bindAttributeLocation("col", 2);
+        prog_.link();
+        QImage white(1, 1, QImage::Format_RGBA8888);
+        white.fill(Qt::white);
+        white_ = std::make_unique<QOpenGLTexture>(white);
+    }
+    void paintGL() override {
+        if (dirty_) upload();
+        glClearColor(0.05f, 0.05f, 0.12f, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (gpu_.empty()) return;
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        const QVector3D c = (lo_ + hi_) / 2;
+        const float r = std::max((hi_ - lo_).length() / 2, 1e-6f), dist = r * 3.2f * zoom_;  // sphere fits the 40° view
+        QMatrix4x4 mvp;
+        mvp.perspective(40, float(width()) / float(std::max(height(), 1)), dist / 100, dist + r * 4);
+        mvp.translate(0, 0, -dist);
+        mvp.rotate(pitch_, 1, 0, 0);
+        mvp.rotate(yaw_, 0, 1, 0);
+        mvp.translate(-c);
+        prog_.bind();
+        prog_.setUniformValue("mvp", mvp);
+        prog_.setUniformValue("tex", 0);
+        for (Gpu& g : gpu_) {
+            g.buf->bind();
+            for (int a = 0; a < 3; ++a) prog_.enableAttributeArray(a);
+            prog_.setAttributeBuffer(0, GL_FLOAT, 0, 3, 36);
+            prog_.setAttributeBuffer(1, GL_FLOAT, 12, 2, 36);
+            prog_.setAttributeBuffer(2, GL_FLOAT, 20, 4, 36);
+            prog_.setUniformValue("cut", g.alphaTest ? 0.5f : 0.0f);
+            (g.tex ? g.tex.get() : white_.get())->bind(0);
+            glDrawArrays(GL_TRIANGLES, 0, g.count);
+        }
+        prog_.release();
+    }
+    void mousePressEvent(QMouseEvent* e) override { last_ = e->position(); }
+    void mouseMoveEvent(QMouseEvent* e) override {
+        const QPointF d = e->position() - last_;
+        last_ = e->position();
+        yaw_ += float(d.x()) * 0.5f, pitch_ = std::clamp(pitch_ + float(d.y()) * 0.5f, -89.0f, 89.0f);
+        update();
+    }
+    void wheelEvent(QWheelEvent* e) override {
+        zoom_ = std::clamp(zoom_ * std::pow(0.999f, float(e->angleDelta().y())), 0.05f, 20.0f);
+        update();
+    }
+    void mouseDoubleClickEvent(QMouseEvent*) override { reset(); }
+
+private:
+    struct Gpu {
+        std::unique_ptr<QOpenGLBuffer> buf;
+        std::unique_ptr<QOpenGLTexture> tex;
+        int count = 0;
+        bool alphaTest = false;
+    };
+    bb::mods::Preview model_;
+    std::vector<Gpu> gpu_;
+    QOpenGLShaderProgram prog_;
+    std::unique_ptr<QOpenGLTexture> white_;
+    QVector3D lo_, hi_;
+    float yaw_ = 30, pitch_ = 15, zoom_ = 1;
+    QPointF last_;
+    bool dirty_ = false;
+    size_t tris_ = 0;
+
+    void upload() {
+        dirty_ = false;
+        gpu_.clear();
+        for (const auto& g : model_.groups) {
+            Gpu& o = gpu_.emplace_back();
+            o.buf = std::make_unique<QOpenGLBuffer>();
+            o.buf->create();
+            o.buf->bind();
+            o.buf->allocate(g.vertices.data(), int(g.vertices.size() * sizeof(float)));
+            o.count = int(g.vertices.size() / 9);
+            o.alphaTest = g.alphaTest;
+            QImage img = g.image.empty() ? QImage::fromData(g.imageBytes.data(), int(g.imageBytes.size())) : QImage(q(g.image));
+            if (img.isNull()) continue;
+            o.tex = std::make_unique<QOpenGLTexture>(img.convertToFormat(QImage::Format_RGBA8888), QOpenGLTexture::DontGenerateMipMaps);
+            o.tex->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);  // the exporter's sampler: PS1 look
+            o.tex->setWrapMode(QOpenGLTexture::Repeat);
+        }
+        model_ = {};  // on the GPU now
     }
 };
 
@@ -818,7 +961,8 @@ private:
         showModInfo();
     }
 
-    void newMod() {
+    // Returns the new mod's id (selected in the table), empty if cancelled / failed.
+    std::string newMod() {
         QDialog d(this);
         d.setWindowTitle("New mod");
         auto* f = new QFormLayout(&d);
@@ -835,17 +979,20 @@ private:
         f->addRow(bb);
         connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
         connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
-        if (d.exec() != QDialog::Accepted || id->text().isEmpty()) return;
+        if (d.exec() != QDialog::Accepted || id->text().isEmpty()) return {};
         bb::mods::Info i;
         i.id = id->text().toStdString(), i.name = name->text().isEmpty() ? i.id : name->text().toStdString();
         i.version = version->text().toStdString(), i.author = author->text().toStdString();
         i.description = desc->toPlainText().toStdString(), i.game = game->currentData().toString().toStdString();
         i.dir = modsRoot() / i.id;
-        if (fs::exists(i.dir)) { QMessageBox::warning(this, "New mod", "A mod folder with that id exists."); return; }
+        if (fs::exists(i.dir)) { QMessageBox::warning(this, "New mod", "A mod folder with that id exists."); return {}; }
         const std::string e = bb::mods::writeInfo(i);
         for (const char* sub : {"textures", "models", "animations", "sounds", "music"}) fs::create_directories(i.dir / sub);
         statusBar()->showMessage(e.empty() ? "Created " + q(i.dir) : q(e), 8000);
         refreshMods();
+        for (int r = 0; r < mods_->rowCount(); ++r)
+            if (mods_->item(r, 0)->data(Qt::UserRole).toString() == q(i.id)) mods_->setCurrentCell(r, 0);
+        return e.empty() ? i.id : std::string();
     }
 
     // .zip with mod.json at its root or in one top folder; extracted with unzip (or bsdtar), which refuse ../ paths.
@@ -921,12 +1068,7 @@ private:
         auto* out = new QLineEdit(q(bbtime::dataDir() / "modkit-export"));
         auto fill = [this, game, level] {
             level->clear();
-            const QString dir = findCi(root(cfg_, game->currentData().toInt()), {"Datas", "bze"});
-            QStringList l;
-            for (const QFileInfo& fi : QDir(dir).entryInfoList({"*.bze", "*.BZE"}, QDir::Files)) l << fi.completeBaseName().toUpper();
-            l.removeDuplicates();
-            l.sort();
-            level->addItems(l);
+            level->addItems(levels(game->currentData().toInt()));
             level->setCurrentText(game->currentData().toInt() ? "ARCA01" : "L01A");
         };
         connect(game, &QComboBox::currentIndexChanged, &d, fill);
@@ -956,6 +1098,279 @@ private:
         p->start(exe, args);
     }
 
+    QStringList levels(int g) {
+        const QString dir = findCi(root(cfg_, g), {"Datas", "bze"});
+        QStringList l;
+        for (const QFileInfo& fi : QDir(dir).entryInfoList({"*.bze", "*.BZE"}, QDir::Files)) l << fi.completeBaseName().toUpper();
+        l.removeDuplicates();
+        l.sort();
+        return l;
+    }
+
+    // ------------------------------------------------------------ model viewer (Mods page)
+    ModelView* view_{};
+    QListWidget* models_{};
+    QLabel* viewNote_{};
+    QComboBox *viewGame_{}, *viewLevel_{};
+
+    // Originals of one level, exported once by bbtime-modkit (--what models) into the user's cache.
+    fs::path originalsDir() const {
+        return path(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)) / "bbtime" / "viewer" /
+               kKeys[viewGame_->currentData().toInt()] / viewLevel_->currentText().toUpper().toStdString();
+    }
+
+    static std::vector<fs::path> gltfFiles(const fs::path& dir) {
+        std::vector<fs::path> files;
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+            if (const QString e = q(it->path().extension()).toLower(); e == ".gltf" || e == ".glb") files.push_back(it->path());
+        std::ranges::sort(files);
+        return files;
+    }
+
+    // Lists the glTF files under base/<subs>; keys = the mod's files (originals they replace get a note).
+    // Item data: UserRole file, +1 path relative to the mod / export root, +2 true for an original.
+    void addModels(const QString& head, const fs::path& base, std::initializer_list<const char*> subs, std::set<std::string>& keys, bool original) {
+        std::vector<fs::path> files;
+        for (const char* sub : subs) std::ranges::copy(gltfFiles(base / sub), std::back_inserter(files));
+        auto* h = new QListWidgetItem(QString("%1 (%2)").arg(head).arg(files.size()));
+        h->setFlags(Qt::NoItemFlags);
+        models_->addItem(h);
+        for (const fs::path& f : files) {
+            const fs::path rel = f.lexically_relative(base);
+            const std::string key = bb::mods::keyOf(rel);
+            auto* it = new QListWidgetItem(q(rel.generic_string()) + (original && keys.contains(key) ? "   ← replaced by the mod" : ""));
+            it->setData(Qt::UserRole, q(f));
+            it->setData(Qt::UserRole + 1, q(rel.generic_string()));
+            it->setData(Qt::UserRole + 2, original);
+            models_->addItem(it);
+            if (!original) keys.insert(key);
+        }
+    }
+
+    void refreshModels(const QString& select = {}) {
+        models_->clear();
+        std::set<std::string> keys;
+        if (const std::string id = selectedMod(); !id.empty()) addModels(q("Mod " + id), modsRoot() / id, {"models", "animations"}, keys, false);
+        const fs::path orig = originalsDir();
+        if (fs::exists(orig / "models"))
+            addModels("Originals " + viewLevel_->currentText().toUpper(), orig, {"models"}, keys, true);
+        for (int r = 0; !select.isEmpty() && r < models_->count(); ++r)
+            if (models_->item(r)->data(Qt::UserRole).toString() == select) models_->setCurrentRow(r);
+    }
+
+    // External files of a .gltf (buffers, images) as written in its URIs, percent-decoded; data: URIs and .glb
+    // (embedded) have none. ponytail: external URIs inside a .glb are not followed.
+    static std::vector<std::string> sideUris(const fs::path& file) {
+        std::vector<std::string> out;
+        QFile f(q(file));
+        if (q(file.extension()).toLower() != ".gltf" || !f.open(QIODevice::ReadOnly)) return out;
+        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        for (const char* arr : {"buffers", "images"})
+            for (const QJsonValue v : o.value(arr).toArray())
+                if (const QString u = v.toObject().value("uri").toString(); !u.isEmpty() && !u.startsWith("data:"))
+                    out.push_back(QUrl::fromPercentEncoding(u.toUtf8()).toStdString());
+        return out;
+    }
+    // Where a URI of a glTF at `at` lands; empty if absolute or outside `dir`.
+    static fs::path inside(const fs::path& dir, const fs::path& at, const std::string& uri) {
+        if (fs::path(uri).is_absolute()) return {};
+        const fs::path p = (at.parent_path() / uri).lexically_normal(), rel = p.lexically_relative(dir);
+        return rel.empty() || *rel.begin() == ".." ? fs::path() : p;
+    }
+
+    // Copies a picked .gltf/.glb (+ the files it refers to, same relative URIs) into the selected mod at the path
+    // the resolver looks up for the selected model (docs/MODDING.md "Ids").
+    void replaceModel() {
+        QListWidgetItem* it = models_->currentItem();
+        if (!it || it->data(Qt::UserRole).isNull()) { viewNote_->setText("Select the model to replace in the list."); return; }
+        // Read the item now: New mod… refreshes (and so deletes) the list items.
+        const fs::path rel(it->data(Qt::UserRole + 1).toString().toStdString()), current = path(it->data(Qt::UserRole).toString());
+        const bool isOriginal = it->data(Qt::UserRole + 2).toBool();
+        std::string id = selectedMod();
+        if (id.empty()) {
+            if (QMessageBox::question(this, "Replace model", "Replacements are stored in a mod and no mod is selected.\nCreate a new mod?") != QMessageBox::Yes)
+                return;
+            if ((id = newMod()).empty()) return;
+        }
+        const QString pick = QFileDialog::getOpenFileName(this, "Replace " + q(rel.generic_string()), QDir::homePath(), "glTF models (*.gltf *.glb)");
+        if (pick.isEmpty()) return;
+        const fs::path src = path(pick), modDir = modsRoot() / id;
+        const fs::path dest = modDir / fs::path(rel).replace_extension(q(src.extension()).toLower().toStdString());
+        std::error_code ec;
+        if (fs::equivalent(src, dest, ec)) { viewNote_->setText("That file is already the mod's replacement."); return; }
+        bb::mods::Preview next;
+        try {
+            next = bb::mods::loadPreview(src);
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, "Replace model", "Cannot read " + pick + ":\n" + QString::fromUtf8(e.what()));
+            return;
+        }
+        if (next.groups.empty()) { QMessageBox::warning(this, "Replace model", pick + " has no triangles."); return; }
+        QStringList warn, copies{q(dest.lexically_relative(modDir).generic_string())}, overwrite;
+        // The part<N> / "<index>#" world nodes the game addresses (MODDING.md "Models"): the original's, else the current file's.
+        fs::path ref = originalsDir() / fs::path(rel).replace_extension(".gltf");
+        if (isOriginal || !fs::exists(ref)) ref = current;
+        try {
+            static const QRegularExpression named(R"(^(part\d+|\d+#.*)$)");
+            QStringList missing;
+            for (const std::string& n : bb::mods::loadPreview(ref).nodes)
+                if (named.match(q(n)).hasMatch() && std::ranges::find(next.nodes, n) == next.nodes.end()) missing << q(n);
+            if (!missing.isEmpty())
+                warn << QString("%1 node(s) of the original are missing (the game moves parts by these names): %2%3")
+                            .arg(missing.size()).arg(missing.mid(0, 12).join(", "), QString(missing.size() > 12 ? ", …" : ""));
+        } catch (const std::exception&) {}
+        const QString game = q(rel.generic_string()).section('/', 1, 1);  // models/<game>/...
+        if (const bb::mods::Info info = bb::mods::readInfo(modDir); info.game != "both" && q(info.game) != game)
+            warn << QString("the mod is for '%1', this model is a '%2' model").arg(q(info.game), game);
+        std::vector<std::pair<fs::path, fs::path>> side;
+        for (const std::string& u : sideUris(src)) {
+            const fs::path from = (src.parent_path() / u).lexically_normal(), to = inside(modDir, dest, u);
+            if (to.empty()) warn << q("not copied (absolute or outside the mod folder): " + u);
+            else if (!fs::is_regular_file(from)) warn << q("missing next to the model: " + u);
+            else if (!fs::equivalent(from, to, ec)) side.emplace_back(from, to), copies << q(to.lexically_relative(modDir).generic_string());
+        }
+        for (const QString& c : copies)
+            if (fs::exists(modDir / path(c))) overwrite << c;
+        for (const char* e : {".gltf", ".glb"})  // one file per key: the other format goes
+            if (const fs::path o = fs::path(dest).replace_extension(e); o != dest && fs::exists(o)) overwrite << q(o.lexically_relative(modDir).generic_string()) + " (removed)";
+        if (!warn.isEmpty() || !overwrite.isEmpty()) {
+            QMessageBox box(QMessageBox::Question, "Replace model", QString("Copy into mod '%1':\n  %2").arg(q(id), copies.join("\n  ")),
+                            QMessageBox::Yes | QMessageBox::No, this);
+            QString info;
+            if (!overwrite.isEmpty()) info += "Overwrites:\n  " + overwrite.join("\n  ") + "\n";
+            if (!warn.isEmpty()) info += "Warnings:\n  " + warn.join("\n  ");
+            box.setInformativeText(info);
+            if (box.exec() != QMessageBox::Yes) return;
+        }
+        side.emplace_back(src, dest);
+        for (const auto& [from, to] : side) {
+            fs::create_directories(to.parent_path(), ec);
+            if (!fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec)) {
+                QMessageBox::warning(this, "Replace model", q("Copy failed: " + to.string() + ": " + ec.message()));
+                return;
+            }
+        }
+        for (const char* e : {".gltf", ".glb"})
+            if (const fs::path o = fs::path(dest).replace_extension(e); o != dest) fs::remove(o, ec);
+        statusBar()->showMessage(QString("Replaced %1 in mod %2 (%3 file(s))").arg(q(rel.generic_string()), q(id)).arg(side.size()), 10000);
+        showModInfo();
+        refreshModels(q(dest));
+    }
+
+    // Deletes the selected mod's file for the selected model plus the side files no other glTF of the mod uses.
+    void removeReplacement() {
+        QListWidgetItem* it = models_->currentItem();
+        const std::string id = selectedMod();
+        if (!it || it->data(Qt::UserRole).isNull() || id.empty()) { viewNote_->setText("Select a mod and one of its models (or the original it replaces)."); return; }
+        const fs::path modDir = modsRoot() / id;
+        const std::string key = bb::mods::keyOf(fs::path(it->data(Qt::UserRole + 1).toString().toStdString()));
+        std::vector<fs::path> files, keep;
+        for (const fs::path& f : gltfFiles(modDir)) (bb::mods::keyOf(f.lexically_relative(modDir)) == key ? files : keep).push_back(f);
+        if (files.empty()) { viewNote_->setText(q("Mod " + id + " does not replace this model.")); return; }
+        std::set<fs::path> used, gone(files.begin(), files.end());
+        for (const fs::path& f : keep)
+            for (const std::string& u : sideUris(f)) used.insert(inside(modDir, f, u));
+        for (const fs::path& f : files)
+            for (const std::string& u : sideUris(f))
+                if (const fs::path p = inside(modDir, f, u); !p.empty() && !used.contains(p) && fs::is_regular_file(p)) gone.insert(p);
+        QStringList l;
+        for (const fs::path& p : gone) l << q(p.lexically_relative(modDir).generic_string());
+        if (QMessageBox::question(this, "Remove replacement", QString("Delete from mod '%1':\n  %2").arg(q(id), l.join("\n  "))) != QMessageBox::Yes)
+            return;
+        std::error_code ec;
+        for (const fs::path& p : gone) fs::remove(p, ec);
+        statusBar()->showMessage(QString("Removed %1 file(s) from mod %2").arg(gone.size()).arg(q(id)), 10000);
+        showModInfo();
+        refreshModels();
+    }
+
+    void loadOriginals() {
+        if (viewLevel_->currentText().trimmed().isEmpty()) return;
+        if (fs::exists(originalsDir() / "models")) return refreshModels();
+        const QString exe = modkitBinary();
+        if (exe.isEmpty()) { viewNote_->setText("Cannot find bbtime-modkit."); return; }
+        const int g = viewGame_->currentData().toInt();
+        const fs::path out = originalsDir();
+        auto* p = new QProcess(this);
+        p->setProcessChannelMode(QProcess::MergedChannels);
+        viewNote_->setText("Exporting the original models…");
+        connect(p, &QProcess::finished, this, [this, p, out](int code) {
+            if (code) {
+                viewNote_->setText("Export failed: " + QString::fromUtf8(p->readAll()).trimmed().right(300));
+                std::error_code ec;
+                fs::remove_all(out, ec);  // no half export in the cache
+            } else {
+                viewNote_->setText("Originals exported to " + q(out));
+            }
+            refreshModels();
+            p->deleteLater();
+        });
+        p->start(exe, {"export", "--game", kKeys[g], "--level", viewLevel_->currentText(), "--what", "models", "--out", q(out),
+                       "--root", q(root(cfg_, g))});
+    }
+
+    QWidget* viewerPage() {
+        auto* w = new QWidget;
+        auto* l = new QHBoxLayout(w);
+        auto* side = new QVBoxLayout;
+        models_ = new QListWidget;
+        viewGame_ = new QComboBox;
+        viewGame_->addItem(kTitles[0], 0), viewGame_->addItem(kTitles[1], 1);
+        viewLevel_ = new QComboBox;
+        viewLevel_->setEditable(true);
+        auto fill = [this] {
+            const int g = viewGame_->currentData().toInt();
+            viewLevel_->clear();
+            viewLevel_->addItems(levels(g));
+            viewLevel_->setCurrentText(g ? "ARCA01" : "L01A");
+        };
+        connect(viewGame_, &QComboBox::currentIndexChanged, this, fill);
+        fill();
+        auto* load = new QPushButton("Show originals");
+        load->setToolTip("Exports this level's original models once (bbtime-modkit) into the cache and lists them");
+        auto* pick = new QHBoxLayout;
+        pick->addWidget(viewLevel_, 1);
+        pick->addWidget(load);
+        auto* edit = new QHBoxLayout;
+        models_->setContextMenuPolicy(Qt::ActionsContextMenu);
+        for (const auto& [text, tip, fn] : {std::tuple<const char*, const char*, void (Launcher::*)()>{
+                 "Replace model…", "Copy a .gltf / .glb (and its files) into the selected mod at this model's path", &Launcher::replaceModel},
+                 {"Remove replacement", "Delete the selected mod's file for this model", &Launcher::removeReplacement}}) {
+            auto* a = new QAction(text, models_);
+            a->setToolTip(tip);
+            connect(a, &QAction::triggered, this, fn);
+            models_->addAction(a);
+            auto* b = new QPushButton(text);
+            b->setToolTip(tip);
+            connect(b, &QPushButton::clicked, a, &QAction::trigger);
+            edit->addWidget(b);
+        }
+        side->addWidget(models_, 1);
+        side->addLayout(edit);
+        side->addWidget(viewGame_);
+        side->addLayout(pick);
+        view_ = new ModelView;
+        view_->setMinimumSize(320, 240);
+        viewNote_ = new QLabel("Static rest / bind pose (animations are not played). Drag = orbit, wheel = zoom, "
+                               "double-click = reset.");
+        viewNote_->setWordWrap(true);
+        auto* right = new QVBoxLayout;
+        right->addWidget(view_, 1);
+        right->addWidget(viewNote_);
+        l->addLayout(side, 2);
+        l->addLayout(right, 3);
+        connect(load, &QPushButton::clicked, this, [this] { loadOriginals(); });
+        connect(viewLevel_, &QComboBox::currentTextChanged, this, [this] { refreshModels(); });
+        connect(models_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* it) {
+            if (!it || it->data(Qt::UserRole).isNull()) return;
+            const QString file = it->data(Qt::UserRole).toString();
+            const QString err = view_->load(path(file));
+            viewNote_->setText(err.isEmpty() ? QString("%1 triangles · %2").arg(view_->triangles()).arg(file) : "Cannot read " + file + ": " + err);
+        });
+        return w;
+    }
+
     QWidget* modsTab() {
         auto* w = new QWidget;
         auto* l = new QVBoxLayout(w);
@@ -968,9 +1383,12 @@ private:
         mods_->setSelectionMode(QAbstractItemView::SingleSelection);
         modInfo_ = new QTextBrowser;
         modInfo_->setOpenExternalLinks(true);
+        auto* tabs = new QTabWidget;
+        tabs->addTab(modInfo_, "Details");
+        tabs->addTab(viewerPage(), "3-D model viewer");
         auto* split = new QSplitter(Qt::Vertical);
         split->addWidget(mods_);
-        split->addWidget(modInfo_);
+        split->addWidget(tabs);
         auto* row = new QHBoxLayout;
         const std::pair<const char*, std::function<void()>> buttons[] = {
             {"▲", [this] { moveMod(-1); }},
@@ -985,7 +1403,7 @@ private:
             {"Install from .zip…", [this] { installZip(); }},
             {"Remove", [this] { removeMod(); }},
             {"Export assets…", [this] { exportAssets(); }},
-            {"Refresh", [this] { refreshMods(); }}};
+            {"Refresh", [this] { refreshMods(), refreshModels(); }}};
         for (const auto& [text, fn] : buttons) {
             auto* b = new QPushButton(text);
             connect(b, &QPushButton::clicked, this, fn);
@@ -997,8 +1415,9 @@ private:
         connect(mods_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* it) {
             if (it->column() == 0) collectMods(), showModInfo();
         });
-        connect(mods_, &QTableWidget::itemSelectionChanged, this, [this] { showModInfo(); });
+        connect(mods_, &QTableWidget::itemSelectionChanged, this, [this] { showModInfo(), refreshModels(); });
         refreshMods();
+        refreshModels();
         return w;
     }
 

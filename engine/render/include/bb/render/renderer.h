@@ -2,6 +2,7 @@
 // (images, rects, 8x8 bitmap text) for menus and diagnostics.
 #pragma once
 #include "bb/render/camera.h"
+#include "bb/render/zones.h"
 #include "bb/scene.h"
 
 #include <cstdint>
@@ -103,6 +104,10 @@ public:
     void setActorMeshes(std::span<const Mesh> meshes);
     // 30 Hz simulation tick selecting the current frame of Scene::textureAnims (Mesh::textureAnim).
     void setTextureTick(uint32_t tick) { texTick_ = tick; }
+    // LiT zone/portal visibility (zones.h) for the next drawScene calls; default = draw every zone.
+    void setZoneView(const ZoneView& v) { zoneView_ = v; }
+    // Visible-zone table of the last drawScene (0x4b3460 order); empty = no zone walk (everything drawn).
+    const std::vector<ZoneEntry>& zoneTable() const { return zoneTable_; }
 
     // 2D images (e.g. title-screen BMPs). Returns a GL texture name, 0 on invalid input.
     uint32_t createImage(const Texture& tex);
@@ -125,7 +130,7 @@ public:
     int drawCalls() const { return drawCalls_; }
 
 private:
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; };
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; int16_t zone; };
     struct GpuTexAnim { std::vector<uint32_t> frames; uint32_t start, hold; };
     struct V2 { float x, y, u, v; uint8_t rgba[4]; };
 
@@ -158,6 +163,10 @@ private:
     std::vector<GpuMesh> meshes_;
     std::vector<GpuTexAnim> texAnims_;
     uint32_t texTick_ = 0;
+    std::vector<WorldZone> zones_;  // Scene::zones of the uploaded scene
+    ZoneView zoneView_;
+    std::vector<ZoneEntry> zoneTable_;
+    std::vector<uint8_t> zoneDrawn_;
     uint32_t actorVao_ = 0, actorVbo_ = 0, actorIbo_ = 0;
     std::vector<GpuMesh> actorMeshes_;
     std::vector<Vertex> actorVerts_; // staging, reused per frame

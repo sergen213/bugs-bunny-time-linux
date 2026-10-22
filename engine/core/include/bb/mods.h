@@ -92,6 +92,20 @@ size_t exportTextures(const Scene& s, const fs::path& out);
 // extra: models the simulation builds itself (TbWorld::builtModels), listed as "simulation" in <level>-ids.txt.
 size_t exportModels(const Scene& s, const fs::path& out, std::span<const ActorModel* const> extra = {});
 
+// Static preview of a glTF / .glb (launcher Mods viewer): the triangles of its default scene with node transforms
+// applied (rest / bind pose: skins and animations are ignored), one group per primitive. Throws on unreadable files.
+struct Preview {
+    struct Group {
+        std::vector<float> vertices;      // x y z u v r g b a per vertex (COLOR_0 × base colour factor; 0.5 = neutral)
+        fs::path image;                   // base colour image file, or
+        std::vector<uint8_t> imageBytes;  // the embedded one (glb buffer view / data: URI)
+        bool alphaTest = false;           // alphaMode MASK or BLEND
+    };
+    std::vector<Group> groups;
+    std::vector<std::string> nodes;       // every node name (launcher: part / world node checks before replacing)
+};
+Preview loadPreview(const fs::path& file);
+
 // Validation of one mod folder (Mods page / bbtime-modkit validate). scene(game, level) optionally decodes a level for
 // id checks (return nullptr when the game data is unavailable; then ids are not checked).
 struct Issue {

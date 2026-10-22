@@ -1348,7 +1348,12 @@ void LitWorld::cameraTick() {
     const int ti = camTarget_;
     camTarget_ = -1;
     Mover& T = ti >= 0 && size_t(ti) < actors.size() && !actors[size_t(ti)].dead ? static_cast<Mover&>(actors[size_t(ti)]) : p;
-    if (const Zone* z = hf.findZone(T.pos, T.zone)) p.zone = int16_t(z->id);
+    const Zone* pz = hf.findZone(T.pos, T.zone);
+    if (pz) p.zone = int16_t(pz->id);
+    // Camera pseudo-actor zone (0x4b39c8): the (previous tick's) eye, else the target's record; kept when neither.
+    const Zone* cz = hf.findZone(cam.eye, -1);
+    if (!cz) cz = pz;
+    if (cz) camZone = int16_t(cz->id);
     if (!p.initialised) return;
     cameraFollow(T, ti >= 0 && &T != &p && actors[size_t(ti)].type == 14);
     cameraShake();

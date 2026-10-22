@@ -220,8 +220,15 @@ faces: corners 0..7). Same reject test over the `n_faces*4` corners; invariant h
 Purpose beyond culling (collision?) is Research Required.
 
 `0x10` portal (20 bytes): u16 i0..i3 @8..14 (object-table indices), u16 `zone id` @16, u16 pad. The renderer
-accumulates the portal's clamped screen rectangle per zone id (`DAT_004b3460` table, ≤ `DAT_004b39dc` zones)
-— zone/portal visibility system. Inferred.
+accumulates the portal's clamped screen rectangle per zone id (`DAT_004b3460` table, ≤ `DAT_004b39dc` zones).
+**Zone/portal visibility (Implemented; LS01 Verified, GAMEPLAY_STATUS.md):** each world chunk 0x20 is one zone —
+tag 0x21 = zone id (zone object table `0x4b37a0[id]`, loader 0x42e7a0), tag 0x43 = walk depth limit (+0xb5; LiT data:
+200 zones 1, 6 zones 2). The portals of a zone's model name the zones visible through them. Frame order 0x44c270:
+camera pseudo-actor zone (FindZone of the eye) → player zone (skipped under a camera node, else it restarts the table)
+→ breadth-first over the table; a portal adds its zone when not all 4 corners lie outside one frustum plane (near =
+view z ≤ 1, no bottom-edge test), flagged (bit 0, not walked, actors hidden) when the generation exceeds the walked
+zone's +0xb5. In all 79 LiT levels no portal lies inside a cell / hull record range, so cell culling never hides one
+[DATA, 1527 portals].
 
 **Collision:** no collision-specific data has been identified in section 4. Hulls/portals are only used for
 visibility in the renderer. Research Required (look for users of the world model other than [WR], e.g. the

@@ -201,9 +201,9 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 33:  // 0x42cd20: drop the carried actor (or Bugs) where it is: flags14 & ~0x814 | 0x1000, self's zone / rotation
         if (!self || self->rider == -1) return;
         if (self->rider == -2) {
-            p.pos = frameWorld(int32_t(self - actors.data()), p.carrierHand, p.local);
+            p.pos = frameWorld(int32_t(self - actors.data()), p.carrierPart, p.local);
             p.carrier = -1;
-            p.carrierHand = false;
+            p.carrierPart = -1;
             p.flags14 = (p.flags14 & 0xfffff7ebu) | 0x1000;
             p.zone = self->zone;
             p.yaw = self->yaw;
@@ -220,7 +220,7 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
         return;
     case 63:  // 0x42d370: free the carried actor (Bugs is never freed: only unlinked)
         if (!self || self->rider == -1) return;
-        if (self->rider == -2) p.carrier = -1, p.carrierHand = false;
+        if (self->rider == -2) p.carrier = -1, p.carrierPart = -1;
         else actors[size_t(self->rider)].flags14 |= 0x100, actors[size_t(self->rider)].parent = -1;
         self->rider = -1;
         return;

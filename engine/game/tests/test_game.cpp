@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#include <span>
 
 using namespace bb;
 using namespace bb::game;
@@ -1040,6 +1041,34 @@ void testFocusL03acom(const std::filesystem::path& file) {
     std::printf("L03ACOM camera focus actor 398 matches the original\n");
 }
 
+// Hand-carried Bugs (local/wine/compare/w10/ls01/{b03,walk}.csv, Proton-GE /b03 and LS01 → CCMERLIN): in the time
+// machine he hangs on carrier 620, itself on actor 89's part 0 (its +0x68 at the attach, kept while 89's anim 1
+// jitters part 1): seated at (28800, bob, 3800) yaw −1949 as the oracle every counter from 245; CCMERLIN's walk takes
+// the hand part's heading (−660, not the carrier's 0); its position is the oracle's one tick earlier (known carry lag).
+void testCarriedLs01(const std::filesystem::path& dir) {
+    struct At { int cnt; V3 pos; int16_t yaw; };
+    auto run = [](const std::filesystem::path& file, const char* name, std::span<const At> want) {
+        const BzeFile bze = loadBze(file);
+        const Scene scene = buildLitScene(bze, name);
+        LitWorld w = LitWorld::load(bze, &scene);
+        w.sfx.device = false;
+        w.loadUpdate();
+        size_t k = 0;
+        for (int t = 0; k < want.size(); ++t) {
+            w.tick({});
+            if (2 * t + 3 != want[k].cnt) continue;
+            assert(w.p.carrier >= 0 && w.p.pos == want[k].pos && w.p.yaw == want[k].yaw);
+            ++k;
+        }
+    };
+    const At seat[] = {{259, {28800, -476, 3800}, -1949}, {299, {28800, -480, 3800}, -1948}, {397, {28800, -441, 3800}, -1948},
+                       {577, {28800, -441, 3800}, -1948}, {607, {28800, -491, 3800}, -1949}};
+    run(dir / "LS01.bze", "LS01", seat);
+    const At walk[] = {{105, {11218, -589, 6449}, -660}, {401, {10198, -589, 7453}, -660}, {603, {5664, -572, 10212}, -660}};
+    run(dir / "CCMerlin.bze", "CCMERLIN", walk);
+    std::printf("LS01 time machine seat and CCMERLIN walk heading match the original\n");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPad();
@@ -1081,6 +1110,7 @@ int main() {
     testSeesawL01a(bze, scene);
     testRateL03c1(file.parent_path());
     testFocusL03acom(file.parent_path() / "L03ACOM.bze");
+    testCarriedLs01(file.parent_path());
     {  // L04B3 actor 98 hops onto pillar 57 and rides it (actor contact 0x433500, flagsB/flags8 riders), turns there
        // through its local yaw (local/wine/compare/w9lit6/o_L04B3.csv: every counter 3-341 equal for 98 / 57 / 269);
        // its anim-233 event spawns ball 100 at its hand, whose first move (x, x >> 16, y) is pushed out of 98's box

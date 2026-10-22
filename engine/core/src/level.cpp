@@ -86,6 +86,7 @@ struct Builder {
     ActorModel* actor = nullptr;            // set while building an actor model: meshes go to actor->meshes
     std::vector<uint16_t>* slots = nullptr; // the current actor mesh's slot list
     bool world = false;                     // building a chunk-0x20 world model (stats split)
+    int16_t zone = -1;                      // world model: its chunk's zone id (tag 0x21), -1 = none
 
     // Face texture id -> texture index (>= 0), texture link (-2 - anim index), or -1 = alias 0: the original resolves
     // ids through the alias table DAT_004e5e80 and never draws bucket 0 (TEXTURE_GAP.md §1).
@@ -138,6 +139,7 @@ struct Builder {
             m.textureAnim = anim;
             m.blend = b;
             m.twoSided = twoSided;
+            m.zone = world ? zone : -1;
         }
         return s.meshes[it->second];
     }
@@ -194,6 +196,18 @@ struct Builder {
                         ++group;
                         ++s.stats.cells;
                         cellName = std::format("{}/cell{}", gname, s.stats.cells);
+                    }
+                    // Portal (0x40fe90): object-table corner indices, target zone. Cell / hull rejects would skip portals
+                    // inside their record range, but no LiT portal lies inside one (all 1527 in 79 levels), so not modelled.
+                    if (t == 0x10 && world && zone >= 0) {
+                        ZonePortal pt{in.u16(p + 16), {}};
+                        bool ok = true;
+                        for (size_t i = 0; i < 4; ++i) {
+                            const uint16_t vi = in.u16(p + 8 + 2 * i);
+                            if (!(ok = vi < objv.size())) break;
+                            pt.quad[i] = xf.apply(objv[vi][0], objv[vi][1], objv[vi][2]);
+                        }
+                        if (ok) s.zones[size_t(zone)].portals.push_back(pt);
                     }
                     p += t == 0x08 || t == 0x0c ? 56 : t == 0x10 ? 20 : 16;
                     nprim -= 1;
@@ -500,7 +514,16 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             if (it.scale) xf.s[0] = xf.s[1] = xf.s[2] = float((*it.scale)[0]) / 4096.0f;  // X word for all axes
             if (it.position) for (int k = 0; k < 3; ++k) xf.t[k] = float((*it.position)[size_t(k)]);
             ++s.stats.worldModels;
+            // Zone object table 0x4b37a0[tag 0x21] = this chunk (0x42e7a0 chunk 0x20); tag 0x43 = its +0xb5 depth limit.
+            const auto zid = tagData(it, 0x21), depth = tagData(it, 0x43);
+            b.zone = zid.size() >= 2 && uint16_t(zid[0] | zid[1] << 8) < 0x3c ? int16_t(zid[0] | zid[1] << 8) : -1;
+            if (b.zone >= 0) {
+                if (s.zones.size() <= size_t(b.zone)) s.zones.resize(size_t(b.zone) + 1);
+                s.zones[size_t(b.zone)].present = true;
+                s.zones[size_t(b.zone)].depth = depth.empty() ? 0 : depth[0];
+            }
             b.model(s4, le32(mdl, 0), le32(mdl, 4), xf, group, true, std::format("world{}", s.stats.worldModels));
+            b.zone = -1;
         } else if (it.code == 0x07 || it.code == 0x08 || it.code == 0x0a) {
             // Entity positions are in world units (not 20.12): L01a player (23700,-640,8830) lies inside the world bounds.
             // No position tag = origin (templates, and e.g. L01A's type-2 ambient actors whose TOD clips hold frame 0).
