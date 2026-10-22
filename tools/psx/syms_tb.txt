@@ -1,0 +1,10 @@
+# TB PS1 (SLUS_011.44) RAM symbols, for PSX_TRACE (tools/psx/run.sh). Found by RAM diffs in GRANNY after the
+# "Welcome to Granwich!" intro (state local/psx/states/tb_x40.sav, hold Up from vsync 40). Status: Consistent
+# (one level, one run); which of the two copies the game logic owns is not known yet.
+# name            address     type    notes
+bugs_pos          0x80093b50  s32*3   Bugs x, y, z (PC convention); 30 Hz updates (every 2nd vsync)
+bugs_pos_copy     0x800964c8  s32*3   same values every sampled vsync
+taz_pos           0x800964f0  s32*3   Taz x, y, z (follows Bugs)
+taz_pos_copy      0x80096550  s32*3   same values every sampled vsync
+level            0x80010000  u16     current level = PC table index (GRANNY 4, ARCA01 28); {LBA,size} table 0x80080dc8
+# Level redirect not working yet: a breakpoint at 0x80012348 (a0 = level, after PSX_LOAD) never fired.

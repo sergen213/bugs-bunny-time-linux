@@ -3,6 +3,71 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.9.0 — 2026-10-22 (Wave 9: Vulkan RT shadows/AO/reflections + FSR 3.1 upscaling and frame generation, modkit, restyled launcher with auto-updates, TB intro/camera/pause, many LiT behaviours)
+- Mod kit for both games (`docs/MODDING.md`): mods in `~/.local/share/bbtime/mods/<id>/` replace textures (PNG,
+  any size — upscaled packs work), character / NPC / prop / pickup models (incl. TB entities the game builds from
+  level data) and world meshes (glTF with the original part
+  names; edited geometry, vertex counts and textures allowed; collision stays the original's), animation clips
+  (replace or add by anim id, glTF), sounds (WAV) and music (Ogg / WAV); `mod.json` can swap a whole model for
+  another (`"swap": {"tb:taz": "tb:bugs"}`) and alias clips. New launcher **Mods** page (enable, load order, new mod,
+  install from .zip, remove, conflicts, validation, "Export assets…"), `bbtime-modkit` exporter / validator
+  (originals as PNG / glTF / WAV in the mod layout, editable in GIMP, Blender, Audacity), `mods` setting and
+  `--mods` / `--no-mods` flags, F3 line `mods: N active, M overrides`. With no mod enabled the output is unchanged.
+- LiT attached actors and explosions (Verified against the original, RUNTIME_REFERENCE §24): an actor caught on another's hand now sits where the original puts it (the hand turns with its owner at once, the catch move is turned by the owner's heading and resolved against the ground), so L04B3's thrower keeps facing the ball like the original; sprite-built actors (e.g. the ball's explosion) get their hit box, reach and size from their sprite and the spawning hand, so L04B3's ball explosion now lasts its 16 ticks and damages the pillar and Bugs as in the original. Ground traces along one axis look one floor cell ahead like the original, so Bugs knocked back toward a ledge starts falling where the original does; actors falling into a level's kill volume are removed (trigger flag 0x10000).
+- LiT actor collision fidelity (Verified against the hooked original, RUNTIME_REFERENCE §23): a spawned projectile's first move is pushed out of its thrower like the original (the exe hands 0x433500 the move as (x, x >> 16, y)), so the L04A1 / L04B3 throws now leave from the original's spot; attach / hand points use the exe's integer coordinate chain (no more 1-unit drift); Bugs gets the merged push of every actor he touches, in the original's collision-list order, re-traced against the walls (L02A2: the spawner's growing box now shoves him exactly as the original); attached actors step with their world yaw of the previous tick; flags14 0x1000 / 0x80000 clear when an animation reaches its last frame.
+- LiT actor-vs-actor contact (0x433500 for moving actors): actors push each other, ride platforms (L04B3's thrower now lands on and stays on its pillar instead of falling out of the level, Verified), attach to their target on contact (flagsB 0x200000) and hurt actors (flagsA 0x20000); attached actors turn through their local yaw (Verified); Bugs stepping off a platform slides along walls; a carried Bugs no longer reports falling (Verified, L03C1).
+- LiT: a carrier no longer hurts the Bugs it carries (L03C1 intro killed him every 60 ticks; the contact test now skips parent / carried links like 0x433500, Verified); camera focus actors (0x4b3950: the follow camera turns toward them, L03ACOM, Verified); the l04e cart leans into its turns (Verified); Bugs is drawn tilted with the platform he rides; trigger 0x2000 on Bugs ported.
+- LiT sprite effects (behaviour 4: torch and lantern flames, dust puffs, sparkles in 38 levels) now animate and are drawn in both renderers as the original's camera-facing sprites (Verified against the Wine oracle in L02C4 and L02A2).
+- LiT animation-rate steps (flagsB 0x2000000, A56; L03C1/L03C2 intro rides) and the TOD frame skip run as the original (Verified, L03C1); director flag 0x400000 (start another actor's state, LB02) ported.
+- TB trigger zones (chunk 0x09, 0x44f550) run: ARCA01's zone starts the original intro fly-over (template 425's camera node, 0x464820) with its letterbox and caption, skippable with ✕ after 3 s, the camera springing out from behind Bugs afterwards as the original's reset — Verified against the Wine oracle (camera within 1 unit for all 670 ticks). `BBTIME_TB_GD=a9=20` no longer needed.
+- TB music now follows the level logic at runtime (TRQ02 first visit → Track14 fallback, VIQ02 switches to Track7 at tick 27; Verified).
+- TB follow camera transcribed from the original (0x437800): after the ARCA01 intro or its skip the camera now springs out and rises to the original's rest height exactly (Verified, every oracle sample); level scripts' camera settings ('_' sub-ops) apply.
+- TB pause Inventory / era pages: page scroll, era page models (coins, medals, crates, statues), carrot / coin / % counters and Left/Right era paging as the original (Verified tick for tick); Level hints pages; the pause text panels slide in on the original's ticks (Verified).
+- TB pause screen as the original: title, hint lines with key names (op 0x14), text panels (S75 / R 0x3b / S32), health bars over their panels, glyphs at the TB 512x240 scale, no dimming (Verified by side-by-side).
+- TB camera and view list closer to the original: the follow camera resets behind the player after a far jump as the original does (2500-unit snap), class-16 directors can take over the camera target, the first level's camera starts at the player's height, and entities tick by the original's 51.3° view frustum with its box refinement. Entities now tick in the original's order — the player in control first, then the partner, then the rest (Verified: view list and every rand() call traced in Wine) — so idle fidgets and NPC random picks come out as in the original: Taz's spin into the ARCA01 guard matches the original for the whole 240-tick capture for the guard, Taz and Bugs (was 240 / 232 / unchecked); the knock-back slide stops dead as in the original. The Level hints page shows the original's ◂ / ▸ arrows (Verified).
+- LiT pause menu: Esc pauses levels as the original (Backspace / gamepad Back leave to the collection menu); pause totals 0x449d80 (golden carrots, clocks, completion %, level lines), the menu's item-table / volume opcodes (C92, C93, C97, A102–A105, A109, A110, A119–A127) and the grey pause veil; Quit Game → hub. Verified against the Wine oracle (L01A).
+- LiT camera shake A59/A68 (Verified, L01A start), camera target A85, type-36 eye point relative to an actor (0x20000).
+- `BBTIME_LIT_POKE="C:x,y,z[,yaw];C:S2d=1"` replays oracle pokes at a level counter (rope / float side-by-sides).
+- LiT actors carry each other and Bugs (coordinate chain at the hand part), anim-event grabs / releases, hovering flyers, pad-steered rides, slope rollers, aimed arcs, the 0x434740 side test and trigger 0x2000 (Verified: L02A2 carrier bird, l04e cart).
+- LiT seesaws: Bugs rides platforms as the original's child coordinate, tilts the seesaw and slides off it — L01A
+  matches the original counter for counter. Stationary type-14 actors (doors, props) no longer run the motion block
+  (flags14 as the original), the 0x434740 side test uses the right box face, type-31 projectiles fly, hit and expire
+  (0x446d10). The L02A2 bird is now tick-exact (the old one-tick lead was the test's poke timing). L04A1 thrower /
+  doors checked against the original (`docs/re/RUNTIME_REFERENCE.md` §19).
+
+- Collection menu navigation follows its layout: Left / Right picks the game, Up / Down moves to Options and Quit;
+  the debug level list moved from Right to L (gamepad □ / X).
+- PS1 originals as a second reference: `tools/psx/run.sh` runs the USA discs headless in PCSX-Redux (scripted pad,
+  RAM / screenshot dumps, save states); the level loader also reads PS1 Time Busters `.BZZ` files (LZSS sections).
+- Launcher in the games' own style: the TB menu spiral as background, the original TB menu picture buttons (hover
+  glow), the Brady Bunch font and TB text colours, pages in the LiT title panel, and both title screens as game
+  cards that pick what Play starts. Without imported games it falls back to painted rings and the system font.
+- Updates need no setup: the launcher checks the signed manifest of the latest GitHub release (no URL field;
+  `update_url` stays as a dev override). Releases now also ship the AppImage as the update artifact
+  `bbtime-launcher`; after installing it the launcher restarts into the new one, and an older launcher hands off
+  to a newer installed one on start (`docs/UPDATES.md`).
+- Launcher: "Shadows (Vulkan)" choice for the new `shadows` setting.
+- Vulkan, Enhanced mode: real-time sun shadows for the world and every character (Bugs, Taz, NPCs), with ray
+  tracing where the GPU has ray queries — ray-traced shadows plus ray-traced ambient occlusion — and cascaded shadow
+  maps otherwise. New `shadows = off|map|rt|rt_ao` setting (default `rt_ao`), `--shadows` flag and a "Shadows" row
+  in the collection Options; the F3 overlay shows the mode in use. LiT's blob shadows give way to the real ones in
+  that mode; Original Fidelity and the OpenGL renderer look exactly as before. `BBTIME_VK_NO_RT=1` forces the
+  shadow-map path.
+- Vulkan, Enhanced mode: ray-traced shading now uses smooth vertex normals (hard edges stay hard), so characters,
+  rocks and creatures get round light/shadow edges and ambient occlusion instead of faceted ones; the AO is free of
+  grain.
+- Vulkan, Enhanced mode: ray-traced reflections on water, ice and polished floors (e.g. LiT pirate-ship water, the TB
+  Viking ice rink, the Arabian marble square), new `reflections` setting (on by default, needs ray tracing), Options
+  row and launcher checkbox.
+- Vulkan, Enhanced mode: AMD FSR 3.1.4 upscaling (`upscaling = fsr_quality|fsr_balanced|fsr_performance|native_aa`) and
+  FSR frame generation (`frame_generation = on`, one interpolated frame between each pair of rendered frames), as
+  Options rows, launcher settings and `--upscaling` / `--frame-generation` flags. Off by default; the FidelityFX SDK
+  (MIT) is bundled under `third_party/fidelityfx-sdk`.
+- Frame generation is paced: a present thread shows the generated frame and then the real one half a frame later, so
+  shown frames are evenly spaced with or without vsync (before, both went out back to back). FSR now also gets a
+  reactive mask for glows, translucent water, sprites, animated textures and reflections, so they no longer smear or
+  trail behind moving things.
+
 ## 0.8.0 — 2026-10-21 (Wave 8: TB saves + dialog boxes, LiT level music, TB menu extras, new collection menu)
 
 - Time Busters saves in play: Start / Esc opens the original pause menu (save game, inventory, level hints,

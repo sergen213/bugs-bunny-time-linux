@@ -29,9 +29,11 @@
 #include <map>
 #include <optional>
 #include <print>
+#include <ranges>
 #include <set>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -59,6 +61,9 @@ struct Args {
     fs::path roots[2];  // per-game install roots (contain Datas/): [0] lit, [1] tb
     bool vsync = true;
     int msaa = 4;
+    bb::render::Shadows shadows = bb::render::Shadows::RtAo;
+    bool reflections = true, frameGeneration = false;
+    bb::render::Upscaling upscaling = bb::render::Upscaling::Off;
     float fov = 60.0f;
     std::map<std::string, std::string> bindings;  // action -> SDL key names (settings.ini, launcher)
     std::vector<bb::game::PadInput> autoplay;     // --autoplay: one pad input per tick, lockstep rendering
@@ -67,6 +72,7 @@ struct Args {
     int slot = -1;                                // --slot: LiT save slot 1..6 (saveDir()/lit/Savegame<N>.dat)
     fs::path importSaves;                         // --import-saves: original Datas/bin (or install root) to import
     bool menu = false;                            // --menu: start in --game's original front end
+    std::vector<std::string> mods;                // enabled mods in load order (settings.ini mods, --mods, --no-mods)
 };
 
 fs::path defaultDataRoot() {
@@ -80,10 +86,13 @@ constexpr const char* kUsage =
     "usage: bbtime [--data DIR] [--game lit|tb] [--level NAME] [--fidelity original|enhanced]\n"
     "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute] [--no-hud]\n"
     "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
-    "              [--renderer gl|vk] [--vk-validation] [--autoplay KEYS*TICKS,...]\n"
+    "              [--renderer gl|vk] [--vk-validation] [--shadows off|map|rt|rt_ao] [--reflections on|off]\n"
+    "              [--upscaling off|fsr_quality|fsr_balanced|fsr_performance|native_aa] [--frame-generation on|off]\n"
+    "              [--autoplay KEYS*TICKS,...]\n"
     "              [--players 1|2] [--autoplay2 KEYS*TICKS,...]  (TB co-op; autoplay2 = player 2)\n"
     "              [--slot 1-6] [--import-saves DIR]  (LiT saves in $XDG_DATA_HOME/bbtime/saves/lit)\n"
     "              [--menu]  (with --game, no --level: start in that game's original front end)\n"
+    "              [--mods ID,ID,...] [--no-mods]  (mods in $XDG_DATA_HOME/bbtime/mods, later wins; docs/MODDING.md)\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -99,9 +108,26 @@ std::optional<Args> parseArgs(int argc, char** argv) {
     a.fullscreen = cfg.fullscreen;
     a.vsync = cfg.vsync;
     a.msaa = cfg.msaa;
+    auto shadowMode = [](std::string_view v) -> std::optional<bb::render::Shadows> {
+        constexpr std::string_view names[] = {"off", "map", "rt", "rt_ao"};
+        for (int i = 0; i < 4; ++i)
+            if (v == names[i]) return bb::render::Shadows(i);
+        return std::nullopt;
+    };
+    a.shadows = shadowMode(cfg.shadows).value_or(a.shadows);
+    auto upscaleMode = [](std::string_view v) -> std::optional<bb::render::Upscaling> {
+        constexpr std::string_view names[] = {"off", "fsr_quality", "fsr_balanced", "fsr_performance", "native_aa"};
+        for (int i = 0; i < 5; ++i)
+            if (v == names[i]) return bb::render::Upscaling(i);
+        return std::nullopt;
+    };
+    a.upscaling = upscaleMode(cfg.upscaling).value_or(a.upscaling);
+    a.reflections = cfg.reflections;
+    a.frameGeneration = cfg.frameGeneration;
     a.fov = cfg.fov;
     a.vulkan = cfg.renderer == "vk";
     a.bindings = cfg.bindings;
+    a.mods = cfg.mods;
     bool dataExplicit = std::getenv("BBTIME_DATA") && *std::getenv("BBTIME_DATA");
     for (int i = 1; i < argc; ++i) {
         const std::string_view f = argv[i];
@@ -139,6 +165,23 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             if (ok) a.vulkan = *v == "vk";
         }
         else if (f == "--vk-validation") a.vkValidation = true;
+        else if (f == "--shadows") {
+            auto v = value();
+            auto m = v ? shadowMode(*v) : std::nullopt;
+            ok = bool(m);
+            if (ok) a.shadows = *m;
+        }
+        else if (f == "--upscaling") {
+            auto v = value();
+            auto m = v ? upscaleMode(*v) : std::nullopt;
+            ok = bool(m);
+            if (ok) a.upscaling = *m;
+        }
+        else if (f == "--reflections" || f == "--frame-generation") {
+            auto v = value();
+            ok = v && (*v == "on" || *v == "off");
+            if (ok) (f == "--reflections" ? a.reflections : a.frameGeneration) = *v == "on";
+        }
         else if (f == "--autoplay" || f == "--autoplay2") {
             auto v = value();
             auto script = v ? bbtime::parseAutoplay(*v) : std::nullopt;
@@ -153,6 +196,17 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         else if (f == "--slot") ok = number(a.slot) && a.slot <= 6;
         else if (f == "--import-saves") { auto v = value(); ok = bool(v); if (v) a.importSaves = *v; }
         else if (f == "--menu") a.menu = true;
+        else if (f == "--no-mods") a.mods.clear();
+        else if (f == "--mods") {
+            auto v = value();
+            ok = bool(v);
+            a.mods.clear();
+            for (std::string_view rest = v.value_or(""); !rest.empty();) {
+                const size_t cut = std::min(rest.find(','), rest.size());
+                if (cut) a.mods.emplace_back(rest.substr(0, cut));
+                rest.remove_prefix(std::min(cut + 1, rest.size()));
+            }
+        }
         else if (f == "--screenshot") { auto v = value(); ok = bool(v); if (v) a.screenshot = *v; }
         else if (f == "--camera") {
             auto v = value();
@@ -282,7 +336,7 @@ void loadGame(Game& g, const fs::path& root, R& r) {
 }
 
 enum class Screen { Main, Options, Game, Level, TbFront };
-enum class Action { Up, Down, Left, Right, Accept, Back };
+enum class Action { Up, Down, Left, Right, Accept, Back, Levels };
 
 template <class R> // bb::render::Renderer (GL) or bb::render_vk::Renderer: same interface shape
 struct App {
@@ -314,6 +368,7 @@ struct App {
     bbtime::KeyMap tbKeys[2] = {bbtime::tbKeyMap(0), bbtime::tbKeyMap(1)};
     size_t autoplay2At = 0;
     std::optional<std::array<uint8_t, 0x300>> tbCarry;  // TB GAME_DATA for the next enterLevel (reload 0x4014c0 keeps it)
+    bool tbEntered = false;               // B+0x134 is 0 only for the session's first TB level (TbWorld::loadLookH)
     int tbLevel = -1;                     // current TB level-table index (GD+0), -1 = not in the table
     int tbSaveSlot = -1;                  // exe 0x48840c: the Savegame%d.dat of this game (-1 = none yet)
     std::string playStatus;               // why a LiT level stayed in viewer mode
@@ -339,6 +394,16 @@ struct App {
     std::optional<LitLoading> litLoading;
     bool litFadingOut = false, litEnter = false;
     bool escKey = false;                  // LiT Esc pressed since the last tick (PadInput::esc, title C96)
+    struct LitPoke { int counter = 0; char array = 0; uint8_t index = 0, value = 0; bb::game::V3 at; int yaw = -1; };
+    std::vector<LitPoke> litPokes;        // BBTIME_LIT_POKE (enterLevel): oracle pokes replayed at their level counter
+    void litPoke(bb::game::LitWorld& w) {
+        for (const LitPoke& k : litPokes)
+            if (k.counter == int(2 * w.ticks + 3)) {
+                if (k.array) (k.array == 'S' ? w.S : w.G)[k.index] = k.value;
+                else w.p.pos = k.at;
+                if (!k.array && k.yaw >= 0) w.p.yaw = int16_t(k.yaw);
+            }
+    }
     bool frontEnd = false;                // session started from a game's original front end: leaving returns to Main
     std::vector<uint32_t> fontImages;     // per Scene::overlayFont entry (0 = missing), built by drawOverlayText
     Fidelity fontFidelity = Fidelity::Original;
@@ -371,6 +436,27 @@ struct App {
                     bb::game::V3 at{};
                     if (std::sscanf(s, "%d,%d,%d", &at.x, &at.y, &at.z) == 3) w.start(at, 0, -1);
                 }
+                // Debug: BBTIME_LIT_POKE="351:S2d=1;401:21040,-2100,7280[,yaw]" replays the Wine oracle's memsrv pokes in
+                // the first LiT level entered: at level counter C (tick t = (C - 3) / 2, as the tests' PROBE_TELEPORT)
+                // Bugs' position (+0xe4, yaw +0xde) or a byte of S[] / G[] (hex index = value) is written before that
+                // tick (rope / float side-by-sides, RUNTIME_REFERENCE §13).
+                static bool litPokeUsed = false;
+                if (const char* s = std::getenv("BBTIME_LIT_POKE"); s && !litPokeUsed) {
+                    litPokeUsed = true;
+                    for (std::string_view rest = s; !rest.empty();) {
+                        const size_t cut = std::min(rest.find(';'), rest.size());
+                        const std::string str(rest.substr(0, cut));
+                        rest.remove_prefix(std::min(cut + 1, rest.size()));
+                        LitPoke k;
+                        char arr = 0;
+                        unsigned idx = 0, val = 0;
+                        if (std::sscanf(str.c_str(), "%d:%c%x=%u", &k.counter, &arr, &idx, &val) == 4 && (arr == 'S' || arr == 'G'))
+                            k.array = arr, k.index = uint8_t(idx), k.value = uint8_t(val);
+                        else if (std::sscanf(str.c_str(), "%d:%d,%d,%d,%d", &k.counter, &k.at.x, &k.at.y, &k.at.z, &k.yaw) < 4)
+                            continue;
+                        litPokes.push_back(k);
+                    }
+                }
                 if (globals) w.G = *globals;
                 else if (litSave) std::ranges::copy(litSave->G(), w.G.begin());
                 litLevel = 0;
@@ -390,6 +476,7 @@ struct App {
                         w.keyNames[n] = k.size() == 1 ? k : kDik.contains(k) ? kDik.at(k) : "KEY_" + k;
                     }
                 w.joystick = pad != nullptr;  // config use-joystick: on with a connected gamepad (">DJ" adds "/Button<n>")
+                bb::applySoundMods(w.sfx, GameId::LostInTime, level);
                 w.loadUpdate();  // as 0x430f80: player + camera initialised before the first rendered frame
                 play.emplace(std::move(w));
                 litEnter = true, litFadingOut = false;
@@ -401,6 +488,8 @@ struct App {
             try {
                 tbPlay.emplace(bb::game::TbWorld::load(bze, scene, tbCarry ? &*tbCarry : nullptr));
                 tbPlay->world.setTwoPlayer(players == 2);
+                bb::applySoundMods(tbPlay->world.sfx, GameId::TimeBusters, level);
+                tbPlay->world.loadLookH = std::exchange(tbEntered, true) ? 300 : 0;
                 // Debug (first TB level entered; smokes compared with the oracle's pokes): BBTIME_TB_START="x,y,z,yaw"
                 // (PS1 units, 4.12) places Bugs (+0xfc/+0xf6); BBTIME_TB_GD="a0=0,a2=2,a5=1" writes GAME_DATA bytes
                 // (hex offset = value: lives, down flags, health) before the first tick.
@@ -497,7 +586,7 @@ struct App {
     }
 
     // A game entry of the collection menu (Accept, or --menu): that game's original front end. Its own Quit (and
-    // Esc on the LiT title page / Backspace) returns to Screen::Main; Right / X opens the debug level list instead.
+    // Esc on the LiT title page / Backspace) returns to Screen::Main; L / □ (Action::Levels) opens the debug level list.
     void openFrontEnd(int gi) {
         gameIdx = mainSel = gi;
         levelSel = 0;
@@ -585,9 +674,12 @@ struct App {
         const int step = a == Action::Up || a == Action::Left ? -1 : 1;
         switch (screen) {
         case Screen::Main:
-            if (a == Action::Up || a == Action::Down) mainSel = (mainSel + step + 4) % 4;
+            // Layout: the two games side by side (Left/Right), Options and Quit below them (Up/Down).
+            if (a == Action::Left || a == Action::Right) { if (mainSel < 2) mainSel ^= 1; }
+            else if (a == Action::Down) mainSel = std::min(mainSel < 2 ? 2 : mainSel + 1, 3);
+            else if (a == Action::Up) mainSel = mainSel == 3 ? 2 : styleIdx;  // from Options: the last game
             else if (a == Action::Back) running = false;
-            else if (a == Action::Right && mainSel < 2) { gameIdx = mainSel; levelSel = 0; screen = Screen::Game; }
+            else if (a == Action::Levels && mainSel < 2) { gameIdx = mainSel; levelSel = 0; screen = Screen::Game; }
             else if (a == Action::Accept) {
                 if (mainSel < 2) openFrontEnd(mainSel);
                 else if (mainSel == 2) screen = Screen::Options;
@@ -595,8 +687,8 @@ struct App {
             }
             break;
         case Screen::Options:
-            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 8) % 8;
-            else if (a == Action::Back || (a == Action::Accept && optSel == 7)) screen = Screen::Main;
+            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 12) % 12;
+            else if (a == Action::Back || (a == Action::Accept && optSel == 11)) screen = Screen::Main;
             else if (a != Action::Back) changeOption(a == Action::Left ? -1 : 1);
             break;
         case Screen::Game: {
@@ -631,6 +723,10 @@ struct App {
         case 4: vsync = !vsync; r.setVsync(vsync); break;
         case 5: fullscreen = !fullscreen; r.setFullscreen(fullscreen); break;
         case 6: players = 3 - players; break;  // applies when the next TB level starts
+        case 7: s.shadows = bb::render::Shadows((int(s.shadows) + 4 + dir) % 4); break;
+        case 8: s.reflections = !s.reflections; break;
+        case 9: s.upscaling = bb::render::Upscaling((int(s.upscaling) + 5 + dir) % 5); break;
+        case 10: s.frameGeneration = !s.frameGeneration; break;
         }
     }
 
@@ -679,7 +775,7 @@ struct App {
             case SDL_GAMEPAD_BUTTON_SOUTH: case SDL_GAMEPAD_BUTTON_START: menu(Action::Accept); break;
             case SDL_GAMEPAD_BUTTON_EAST: case SDL_GAMEPAD_BUTTON_BACK: menu(Action::Back); break;
             case SDL_GAMEPAD_BUTTON_NORTH: overlay = !overlay; break;
-            case SDL_GAMEPAD_BUTTON_WEST: if (screen == Screen::Main) menu(Action::Right); break;  // level list
+            case SDL_GAMEPAD_BUTTON_WEST: if (screen == Screen::Main) menu(Action::Levels); break;  // level list
             default: break;
             }
             break;
@@ -688,8 +784,9 @@ struct App {
             if (screen == Screen::TbFront && tbFront->capturing()) { tbFrontAction(tbFront->captureKey(e.key.scancode)); break; }
             if (k == SDLK_F3) overlay = !overlay;
             else if (k == SDLK_F11) { fullscreen = !fullscreen; r.setFullscreen(fullscreen); }
-            // LiT title (level 0) past its logo page: Esc is the game's C96 (back to the slot menu).
-            else if (k == SDLK_ESCAPE && screen == Screen::Level && play && litLevel == 0 && play->world.S[0x1b]) escKey = true;
+            // LiT: Esc is the game's (pause menu / resume in levels, C96 on the title past its logo page); Backspace
+            // or the gamepad's Back leave to the collection menu.
+            else if (k == SDLK_ESCAPE && screen == Screen::Level && play && (litLevel != 0 || play->world.S[0x1b])) escKey = true;
             else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) menu(Action::Back);
             else if (screen == Screen::Level) {
                 if (k == SDLK_F2) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
@@ -709,6 +806,7 @@ struct App {
             else if (k == SDLK_DOWN || k == SDLK_S) menu(Action::Down);
             else if (k == SDLK_LEFT || k == SDLK_A) menu(Action::Left);
             else if (k == SDLK_RIGHT || k == SDLK_D) menu(Action::Right);
+            else if (k == SDLK_L && screen == Screen::Main) menu(Action::Levels);
             else if (k == SDLK_RETURN || k == SDLK_SPACE || k == SDLK_KP_ENTER) menu(Action::Accept);
             break;
         }
@@ -729,6 +827,7 @@ struct App {
             if (down & PadDown) menu(Action::Down);
             if (down & PadLeft) menu(Action::Left);
             if (down & PadRight) menu(Action::Right);
+            if ((down & PadSquare) && screen == Screen::Main) menu(Action::Levels);
             if (down & (PadCross | PadStart)) menu(Action::Accept);
             if (down & 0x10000u) menu(Action::Back);
             return;
@@ -765,11 +864,11 @@ struct App {
             }
             if (litEnter) {  // 0x4065e0 after the load: the second unrendered tick (counter 5; loadUpdate stood for the
                 litEnter = false;  // load pass and counter 3), update 1 of the fade in, then tick + draw (counter 7)
-                play->tick(input());
+                litPoke(play->world), play->tick(input());
                 play->world.fadeIn(1, 0x100);
                 play->world.fadeTick();
             }
-            play->tick(input());
+            litPoke(play->world), play->tick(input());
             pumpSfx(play->world.sfx);
             // 0x407190: title requests 4/5 + the Savedata read (a game started: its GAME_DATA image), then save (6).
             if (auto g = bb::game::litFrontEnd(play->world, bbtime::saveDir() / "lit")) {
@@ -951,46 +1050,63 @@ struct App {
         for (int i = 0; i < 2; ++i)
             text(styleIdx, f.x(320), f.y(366.0f + 36.0f * float(i)), (tb ? 30.0f : 18.0f) * f.u, i ? "Quit" : "Options",
                  mainSel == 2 + i ? (tb ? kTbSel : kLitSel) : (tb ? kTbRed : kLitText), 0.5f);
-        hints("Enter/A: play   Right/X: level list   Esc/B: quit   F3: diagnostics   F11: fullscreen");
+        hints("Enter/A: play   L/X: level list   Esc/B: quit   F3: diagnostics   F11: fullscreen");
     }
 
     void drawOptions() {
         const Ref f = ref();
         const bool tb = styleIdx == 1;
         auto onoff = [](bool b) { return b ? "On" : "Off"; };
-        const std::string rows[7][2] = {
+        static constexpr const char* kShadowNames[] = {"Off", "Shadow map", "Ray-traced", "Ray-traced + AO"};
+        static constexpr const char* kUpscaleNames[] = {"Off", "FSR Quality", "FSR Balanced", "FSR Performance", "FSR Native AA"};
+        const std::string rows[11][2] = {
             {"Renderer mode", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"},
             {"Vertical FOV", std::format("{:.0f} deg", s.vfovDeg)},
             {"4:3 pillarbox", onoff(s.pillarbox)},
             {"MSAA", std::format("{} (x{})", onoff(s.msaa), r.msaaSamples())},
             {"VSync", onoff(vsync)},
             {"Fullscreen", onoff(fullscreen)},
-            {"TB players", std::to_string(players)}};
-        const std::string_view notes[8] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
-                                           "Original Fidelity mode", "Enhanced mode", "", "F11 switches it anywhere",
-                                           players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend", ""};
+            {"TB players", std::to_string(players)},
+            {"Shadows", kShadowNames[int(s.shadows)]},
+            {"Reflections", onoff(s.reflections)},
+            {"Upscaling", kUpscaleNames[int(s.upscaling)]},
+            {"Frame generation", onoff(s.frameGeneration)}};
+        std::string shadowNote = "Enhanced mode, Vulkan renderer", reflNote = "water / ice / polished floors; Vulkan, ray tracing",
+                    fsrNote = "AMD FSR 3.1.4; Enhanced, Vulkan; replaces MSAA",
+                    fgNote = "FSR frame interpolation: two frames shown per frame rendered";
+        if constexpr (requires { r.rayTracing(); }) {
+            if (!r.rayTracing() && s.shadows >= bb::render::Shadows::Rt) shadowNote = "no ray tracing on this GPU: shadow map";
+            if (!r.rayTracing()) reflNote = "no ray tracing on this GPU: off";
+            if (!r.fsrSupported()) fsrNote = fgNote = "FSR unsupported on this GPU: off";
+        } else {
+            shadowNote = reflNote = fsrNote = fgNote = "Vulkan renderer only";
+        }
+        const std::string_view notes[12] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
+                                            "Original Fidelity mode", "Enhanced mode (off while FSR is on)", "", "F11 switches it anywhere",
+                                            players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend", shadowNote,
+                                            reflNote, fsrNote, fgNote, ""};
         if (tb) {  // config page pc03: labels in the key-label orange, values white (Controls page), Back image + red label
             page(games[1].options, 255);
             text(1, f.x(320), f.y(14), 30 * f.u, "Options", kTbRed, 0.5f);
-            for (int i = 0; i < 7; ++i) {
+            for (int i = 0; i < 11; ++i) {
                 const bool sel = optSel == i;
-                text(1, f.x(60), f.y(70.0f + 34.0f * float(i)), 26 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
-                text(1, f.x(600), f.y(70.0f + 34.0f * float(i)), 26 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
+                text(1, f.x(60), f.y(62.0f + 23.0f * float(i)), 22 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
+                text(1, f.x(600), f.y(62.0f + 23.0f * float(i)), 22 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
             }
             text(1, f.x(320), f.y(318), 22 * f.u, notes[optSel], kTbGrey, 0.5f);
-            const Game::Image& b = optSel == 7 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
+            const Game::Image& b = optSel == 11 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
             if (b.img) r.drawImage(b.img, f.x(35), f.y(375), float(b.w) * f.u, float(b.h) * f.u, s.fidelity == Fidelity::Enhanced);
-            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 7 ? kTbSel : kTbRed, 0.5f);
+            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 11 ? kTbSel : kTbRed, 0.5f);
         } else {  // the title slot-menu panel
             page(games[0].bg, 60);
             litPanel(f.x(70), f.y(56), 500 * f.u, 370 * f.u, f.u);
             text(0, f.x(320), f.y(74), 24 * f.u, "Options", kLitSel, 0.5f);
-            for (int i = 0; i < 8; ++i) {
-                const uint8_t* c = optSel == i ? (i == 7 ? kLitSel : kLitCur) : kLitText;
-                const float y = f.y(120.0f + 30.0f * float(i));
-                if (i == 7) { text(0, f.x(320), y, 16 * f.u, "Back", c, 0.5f); break; }
-                text(0, f.x(96), y, 16 * f.u, rows[i][0], c);
-                text(0, f.x(544), y, 16 * f.u, rows[i][1], c, 1.0f);
+            for (int i = 0; i < 12; ++i) {
+                const uint8_t* c = optSel == i ? (i == 11 ? kLitSel : kLitCur) : kLitText;
+                const float y = f.y(108.0f + 23.0f * float(i));
+                if (i == 11) { text(0, f.x(320), y, 14 * f.u, "Back", c, 0.5f); break; }
+                text(0, f.x(96), y, 14 * f.u, rows[i][0], c);
+                text(0, f.x(544), y, 14 * f.u, rows[i][1], c, 1.0f);
             }
             text(0, f.x(320), f.y(386), 12 * f.u, notes[optSel], kLitText, 0.5f);
         }
@@ -1106,7 +1222,7 @@ struct App {
             if (play && a.player) {
                 const auto v = play->view(alpha, lerp);
                 bb::poseActor(scene.actorModels[a.model], play->world.p.animState, {v.player.x, v.player.y, v.player.z},
-                              {0, v.yaw, v.lean}, a.scale, actorMeshes);
+                              {0, int16_t(v.yaw - v.parent[1]), v.lean}, a.scale, actorMeshes, v.parent);
                 continue;
             }
             if (play || tbPlay) continue;  // the simulation's actors are drawn below
@@ -1117,14 +1233,50 @@ struct App {
                 if (e.active && e.drawn() && e.model && !e.anim.parts.empty())
                     bb::poseActor(*e.model, e.anim, {e.pos.x, e.pos.y, e.pos.z}, {e.pitch, e.yaw, e.roll},
                                   {e.scale[0], e.scale[1], e.scale[2]}, actorMeshes);
-        if (play)
+        // Enhanced sun shadows (Vulkan): actorMeshes[0, casters) cast and receive them. LiT's sky dome (behaviour 9,
+        // follows the eye) is posed after that range then, as are the HUD models.
+        bool sunShadows = false;
+        if constexpr (requires { R::dynamicShadows(s); }) sunShadows = R::dynamicShadows(s);
+        auto poseLit = [&](bool sky) {
             for (const bb::game::LitActor& a : play->world.actors) {
                 const int32_t m = play->world.defs[size_t(a.def)].model;
-                if (a.dead || !a.visible || m < 0 || a.animState.parts.empty()) continue;
+                if (a.dead || !a.visible || m < 0 || a.animState.parts.empty() || (sunShadows && (a.type == 9) != sky)) continue;
                 bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
                               {a.rot[0], a.yaw, a.rot[2]}, a.scale, actorMeshes);
             }
-        if (play) {  // ground shadows (0x44bb50): the shadow entity's model on one identity part
+        };
+        if (play) poseLit(false);
+        const size_t casters = actorMeshes.size();
+        if (play && sunShadows) poseLit(true);
+        if (play) {  // type-4 sprite effects (0x44c170 / 0x438280): screen-aligned quads after the shadow casters
+            const glm::mat4 view = c.view(), toWorld = glm::inverse(view);
+            const uint8_t white = uint8_t(std::min(255.0f, std::round(255.0f / s.colorScale(scene.colorScale))));
+            for (const bb::game::LitActor& a : play->world.actors) {
+                const bb::game::ActorDef& d = play->world.defs[size_t(a.def)];
+                if (a.type != 4 || a.dead || !a.visible || !a.boxInit) continue;
+                const auto sp = scene.sprites.find(d.sprite);
+                if (sp == scene.sprites.end() || a.animState.frame >= sp->second.size()) continue;
+                const bb::SpriteFrame& f = sp->second[a.animState.frame];
+                const glm::vec4 v = view * glm::vec4(float(a.pos.x), -float(a.pos.y), -float(a.pos.z), 1.0f);
+                if (f.texture < 0 || -v.z < 150.0f) continue;  // 0x438280: not drawn nearer than 150
+                // Sorted at depth z - 50 (+0xd4): the quad moves 50 toward the eye at the same screen size. Size 2w x 2h
+                // (box +-w/2 and -h, doubled) under the actor scale; bottom at the position, centred with flagsC 0x8000000.
+                const float k = (-v.z - 50.0f) / -v.z;
+                const float hw = float(2 * (uint16_t(d.spriteW) >> 1)) * float(a.scale[0]) / 4096.0f * k;
+                const float h = float(2 * d.spriteH) * float(a.scale[1]) / 4096.0f * k;
+                const float y0 = (a.flagsC & 0x8000000) ? -h * 0.5f : 0.0f;
+                const glm::vec3 o = glm::vec3(v) * k;
+                bb::Mesh& m = actorMeshes.emplace_back();
+                m.name = "sprite", m.texture = f.texture, m.blend = f.blend, m.twoSided = true;
+                m.indices = {2, 3, 1, 2, 1, 0};
+                using Corner = std::array<float, 4>;  // view dx, dy, u, v
+                for (const Corner& q : {Corner{-hw, y0 + h, 0, 0}, Corner{hw, y0 + h, 1, 0}, Corner{-hw, y0, 0, 1}, Corner{hw, y0, 1, 1}}) {
+                    const glm::vec4 w = toWorld * glm::vec4(o.x + q[0], o.y + q[1], o.z, 1.0f);
+                    m.vertices.push_back({.pos = {w.x, w.y, w.z}, .uv = {q[2], q[3]}, .rgba = {white, white, white, f.alpha}});
+                }
+            }
+        }
+        if (play && !sunShadows) {  // ground shadows (0x44bb50): the shadow entity's model on one identity part
             // The PC exe orders polygons by ordering-table bucket (the shadow +9 deeper in view space), not per pixel;
             // with a depth buffer the quad would sink into the visual floor (which differs from the collision heights
             // it is placed on), so its vertices are pulled kShadowPull units toward the eye (Inferred value; ponytail:
@@ -1143,9 +1295,25 @@ struct App {
                     }
             }
         }
-        if (play) poseHud(c, play->world.hud);
+        if (play) {
+            poseHud(c, play->world.hud);
+            // Pause / help veil (0x44c4b0 -> GL 0x40be10 while S[12] != 0): a screen quad of grey 0.2 at alpha 0.5 over the
+            // world, under the HUD and the text; posed like the HUD just behind its deepest elements (z 1500).
+            if (play->world.S[12]) {
+                const glm::mat4 toWorld = glm::inverse(c.view());
+                const float f = 192.0f / std::tan(s.vfovRad() * 0.5f), dd = 1800.0f * s.zNear * 2.0f / 1000.0f;
+                const uint8_t grey = 51;  // untextured vertex colours are drawn as is
+                bb::Mesh& m = actorMeshes.emplace_back();
+                m.blend = bb::Blend::Alpha, m.twoSided = true, m.indices = {0, 1, 2, 0, 2, 3};
+                for (const auto& [sx, sy] : {std::pair{-2048.0f, -1536.0f}, {2048.0f, -1536.0f}, {2048.0f, 1536.0f}, {-2048.0f, 1536.0f}}) {
+                    const glm::vec4 w = toWorld * glm::vec4(sx * dd / f, -sy * dd / f, -dd, 1.0f);
+                    m.vertices.push_back({.pos = {w.x, w.y, w.z}, .uv = {0, 0}, .rgba = {grey, grey, grey, 128}});
+                }
+            }
+        }
         if (tbPlay) poseHud(c, tbPlay->world.hud);
-        r.setActorMeshes(actorMeshes);
+        if constexpr (requires { r.setActorMeshes(actorMeshes, casters); }) r.setActorMeshes(actorMeshes, casters);
+        else r.setActorMeshes(actorMeshes);
     }
 
     // HUD (LiT 0x44b370 over LitWorld::hud, TB 0x463ef0 over TbWorld::hud): each shown element's template model on one
@@ -1207,12 +1375,15 @@ struct App {
         // 0x4efb84 steps with the width scale: >= 2 -> 2, >= 1.5 -> 1.5, >= 1 -> 1, else 0.85 (640x480: 16x16 px).
         const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
         // Enhanced: glyphs follow the position scale so text stays legible and evenly spaced above ~768 px height.
-        const float ss = s.fidelity == Fidelity::Enhanced ? sx : sx >= 2.0f ? 2.0f : sx >= 1.5f ? 1.5f : sx >= 1.0f ? 1.0f : 0.85f;
+        float ssx = s.fidelity == Fidelity::Enhanced ? sx : sx >= 2.0f ? 2.0f : sx >= 1.5f ? 1.5f : sx >= 1.0f ? 1.0f : 0.85f, ssy = ssx;
+        // TB 0x4662f0: glyph quads are texel-sized in the 512x240 overlay space (oracle pause menu at 640x480: 12-px
+        // tall caps, as the y scale H/240), not the LiT sprite scale.
+        if (tbPlay) ssx = sx, ssy = sy;
         for (const bb::game::OverlayGlyph& g : glyphs) {
             if (!g.glyph || g.glyph > fontImages.size() || !fontImages[g.glyph - 1u]) continue;
             const bb::Texture& tx = scene.textures[size_t(scene.overlayFont[g.glyph - 1u])];
             r.drawImage(fontImages[g.glyph - 1u], W * 0.5f + std::trunc(float(g.x) * sx), H * 0.5f + std::trunc(float(g.y) * sy),
-                        float(tx.width) * ss, float(tx.height) * ss, s.fidelity == Fidelity::Enhanced,
+                        float(tx.width) * ssx, float(tx.height) * ssy, s.fidelity == Fidelity::Enhanced,
                         g.pal < 5 ? kPal[g.pal] : kWhite);
         }
     }
@@ -1257,7 +1428,9 @@ struct App {
     void drawTbSprites() {
         const float W = float(r.width()), H = float(r.height()), sx = H / 384.0f, sy = H / 240.0f;
         const float gamma = s.texGamma(scene.pcTexGamma);
-        for (const auto& sp : tbPlay->world.hudSprites) {
+        // Reverse index order (PS1 ordering-table prepend): the health bars (0, 2, 4, 5) lie over their panels (1, 3),
+        // as in the oracle pause screen (local/wine/tbintro/pause_menu.png).
+        for (const auto& sp : tbPlay->world.hudSprites | std::views::reverse) {
             if (!sp.shown || sp.frame >= scene.hudSheet.size() || scene.hudSheet[sp.frame] < 0) continue;
             const int cw = sp.w + 1, ch = sp.h + 1;  // the prim spans texels u..u+w
             auto [it, fresh] = hudImages.try_emplace({sp.frame, sp.u, sp.v, sp.w, sp.h}, 0u);
@@ -1293,20 +1466,26 @@ struct App {
     void drawOverlay() {
         const int sc = std::max(1, (r.height() + 300) / 600);
         const bool enh = s.fidelity == Fidelity::Enhanced;
+        bool fsrOn = false;
+        if constexpr (requires { r.fsrActive(); }) fsrOn = r.fsrActive();
         std::string text = std::format(
             "{} | {}\n{}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
             "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (GAMEPLAY 1.1)  alpha {:.2f}",
             r.glVendor(), r.glRenderer(), r.glVersion(), 1.0 / frameTime, frameTime * 1000.0, r.drawCalls(), r.width(),
             r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy())
                                                           : scene.game == bb::GameId::LostInTime ? "linear" : "nearest",
-            enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", glm::degrees(s.vfovRad()),
+            fsrOn ? "off (FSR)" : enh && s.msaa && r.msaaSamples() ? std::format("x{}", r.msaaSamples()) : "off", glm::degrees(s.vfovRad()),
             (!enh && s.pillarbox) || s.frame43 ? "4:3 pillarbox" : "Hor+", vsync ? "on" : "off", bb::kTickHz, alpha);
         if constexpr (requires { r.diagnostics(); }) text += std::format("\n{}", r.diagnostics());
+        if constexpr (requires { r.frameGenerated(); })  // frame generation: one interpolated frame shown per rendered frame
+            if (r.frameGenerated()) text += std::format("  shown {:.1f} FPS", 2.0 / frameTime);
         if (screen == Screen::Level)
             text += std::format("\n{} {}  meshes {}  tris {}  textures {}  fog {}\npos {:.1f} {:.1f} {:.1f}  {}",
                                 game().shortName, scene.level, scene.meshes.size(), sceneTris, scene.textures.size(),
                                 s.fog ? "on" : "off", cam.pos.x, cam.pos.y, cam.pos.z,
                                 scene.placeholder ? "PLACEHOLDER SCENE" : "decoded data");
+        if (const bb::mods::ModSet& m = bb::mods::active(); !m.empty())
+            text += std::format("\nmods: {} active, {} overrides", m.mods().size(), m.appliedCount());
         if (screen == Screen::Level && play) {
             const bb::game::LitWorld& w = play->world;
             text += std::format("\nPLAY  tick {}  state {} seq {}  anim {}  flags14 {:08x}\nbugs {} {} {}  yaw {}  ground {}  zone {}"
@@ -1363,6 +1542,10 @@ int run(const std::optional<Args>& args) {
         wc.msaaSamples = args->msaa;
         app.s.vfovDeg = args->fov;
         app.s.msaa = args->msaa > 0;
+        app.s.shadows = args->shadows;
+        app.s.reflections = args->reflections;
+        app.s.upscaling = args->upscaling;
+        app.s.frameGeneration = args->frameGeneration;
         app.vsync = args->vsync;
         app.players = args->players;
         {
@@ -1470,11 +1653,15 @@ int run(const std::optional<Args>& args) {
                     paused = app.play->world.musicPaused;
                 }
             }
-            bbtime::playMusic(track, next, paused);
+            const auto modded = [&](const fs::path& t) {  // mod music (music/<game>/<track>.ogg|wav)
+                return bb::modMusic(t.string().starts_with(args->roots[1].string()) ? GameId::TimeBusters : GameId::LostInTime, t);
+            };
+            bbtime::playMusic(modded(track), modded(next), paused);
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
                 const bool ok = app.r.screenshot(args->screenshot);
-                std::println("bbtime: screenshot {} {}", args->screenshot.string(), ok ? "written" : "FAILED");
+                std::println("bbtime: screenshot {} {} (frame {:.2f} ms)", args->screenshot.string(), ok ? "written" : "FAILED",
+                             app.frameTime * 1000.0);
                 app.running = false;
             }
             app.r.present();
@@ -1499,6 +1686,7 @@ int run(const std::optional<Args>& args) {
 int main(int argc, char** argv) {
     auto args = parseArgs(argc, argv);
     if (!args) return 2;
+    if (!args->mods.empty()) bb::mods::setActive(bb::mods::ModSet::load(bb::mods::defaultRoot(), args->mods));
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::println(stderr, "SDL_Init: {}", SDL_GetError());
         return 1;

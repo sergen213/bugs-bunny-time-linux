@@ -76,11 +76,14 @@ struct Level {
     Scene scene;
     TbWorld w;
 };
-Level load(const fs::path& p) {
+// introSeen: ARCA01 with GD+0x11f = 1, as re-entered after its intro (the zone block skips template 425): the player
+// traces were captured after ✕ had skipped the fly-over.
+Level load(const fs::path& p, bool introSeen = true) {
     Level l{loadBze(p), {}, {}};
     l.scene = buildTbScene(l.bze, p.stem().string());
     addTbActors(l.scene, l.bze);
     l.w = TbWorld::load(l.bze, l.scene);
+    if (introSeen && p.stem() == "ARCA01") l.w.GD[0x11f] = 1;
     return l;
 }
 
@@ -106,10 +109,192 @@ std::vector<int> jump(TbWorld& w) {
     return h;
 }
 
+// ARCA01 intro = oracle local/wine/tbintro/{full,skip}/cam.csv (RUNNER=wine, /b28, counter 0x4d2708 = 2·tick + 1):
+// trigger zone block 10 (any player) sets GD[0xa9] = 20 and runs director 264's block 394, which spawns template 425;
+// its anim carries a camera node (0x464820) that holds the view from counter 3 until its last frame (1341), with the
+// letterbox GD+0x9f 2 -> 16, then -16 -> 0. ✕ (raw edge) skips once its state is 90 ticks old.
+void intro(const fs::path& dir) {
+    auto fly = [](const TbWorld& w) {
+        for (const TbActor& e : w.entities)
+            if (e.id == 425 && !(e.f20 & 0x2000)) return true;
+        return false;
+    };
+    {
+        Level l = load(dir / "ARCA01.bze", false);
+        TbWorld& w = l.w;
+        struct Cam { int c; V3 eye, look; };
+        const Cam want[] = {{3, {-170, -3900, 14779}, {-231, -3552, 13632}},   {201, {124, -3532, 8631}, {-319, -3109, 7599}},
+                            {401, {-3208, -1519, 4254}, {-3225, -1353, 3065}}, {701, {-1970, -1059, -4325}, {-969, -840, -4948}},
+                            {1001, {5185, -3439, -4259}, {6194, -3109, -3702}}, {1339, {12024, -3810, -2853}, {13018, -3295, -3283}}};
+        size_t k = 0;
+        int ended = -1;
+        for (int i = 0; i < 740; ++i) {
+            w.tick({});
+            const int c = 2 * i + 1;
+            // Follow camera 0x437800 after the node: spring-out, look settling 1 per tick, then the vertical band raises
+            // the body to -349 (eye -369) once 20 ticks passed without a contact; every tail sample of the oracle is
+            // matched exactly (local/shots/w9tb2/intro_tail_compare.csv), these rows are asserted.
+            struct Tail { int c; V3 eye, look, body; };
+            static const Tail tail[] = {{1345, {-4742, -299, -8236}, {-4107, -325, -7555}, {-4469, -310, -7943}},
+                                        {1347, {-4793, -301, -8289}, {-4107, -324, -7555}, {-4520, -310, -7997}},
+                                        {1365, {-4928, -308, -8431}, {-4107, -315, -7555}, {-4654, -310, -8139}},
+                                        {1379, {-4931, -321, -8438}, {-4107, -310, -7555}, {-4658, -317, -8145}},
+                                        {1401, {-4928, -342, -8434}, {-4107, -310, -7555}, {-4655, -331, -8142}},
+                                        {1419, {-4928, -369, -8434}, {-4107, -310, -7555}, {-4655, -349, -8142}}};
+            for (const Tail& t : tail)
+                if (t.c == c) assert(w.cam.eye == t.eye && w.cam.look == t.look && w.cam.body == t.body);
+            if (c == 1) assert(w.GD[0xa9] == 20 && w.GD[0x9f] == 2 && w.GD[0x11f] == 1 && w.music == 26 && fly(w));
+            // Counter 1 = the load placement at Bugs' height (B+0x134 still 0 on the session's first level).
+            if (c == 1) assert(w.cam.eye == (V3{-4176, -27, -7629}) && w.cam.look == (V3{-4107, -27, -7555}) && w.cam.body == w.cam.eye);
+            if (c == 15) assert(w.GD[0x9f] == 16);
+            if (k < std::size(want) && want[k].c == c) {
+                auto near = [](const V3& a, const V3& b) { return std::abs(a.x - b.x) <= 1 && std::abs(a.y - b.y) <= 1 && std::abs(a.z - b.z) <= 1; };
+                assert(near(w.cam.eye, want[k].eye) && near(w.cam.look, want[k].look));
+                ++k;
+            }
+            if (ended < 0 && !fly(w)) ended = c, assert(int8_t(w.GD[0x9f]) == -14);
+        }
+        // Rest pose behind Bugs once the bars are gone (oracle eye (-4928, -369, -8434) from counter 1419).
+        std::printf("  intro: camera node to counter %d, rest eye %d %d %d\n", ended, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z);
+        assert(k == std::size(want) && ended == 1341 && w.GD[0x9f] == 0);
+        assert(w.cam.eye == (V3{-4928, -369, -8434}) && w.cam.body == (V3{-4655, -349, -8142}));
+    }
+    {  // ✕ before the state is 90 ticks old does nothing; at counter 443 (oracle skip run) it ends the fly-over
+        Level l = load(dir / "ARCA01.bze", false);
+        TbWorld& w = l.w;
+        for (int i = 0; i < 40; ++i) w.tick(keys(i == 30 ? PadCross : 0));
+        assert(fly(w));
+        while (w.ticks < 221) w.tick({});
+        w.tick(keys(PadCross));
+        assert(!fly(w) && int8_t(w.GD[0x9f]) == -14);
+        // The same spring-out as the full run (oracle skip/cam.csv, every sample from 445 on matched exactly:
+        // local/shots/w9tb2/skip_tail_compare.csv).
+        for (int i = 0; i < 80; ++i) {
+            w.tick({});
+            if (2 * w.ticks - 1 == 447) assert(w.cam.eye == (V3{-4742, -299, -8236}) && w.cam.body == (V3{-4469, -310, -7943}));
+        }
+        assert(w.cam.eye == (V3{-4928, -369, -8434}) && w.cam.look == (V3{-4107, -310, -7555}));
+    }
+}
+
+// ARCA01 pause menu = oracle local/wine/tbintro/pause_menu.png (pause.sh: ✕ skips the intro, Esc pauses): title
+// "player 1 paused" (S[0x78] = 1 from the T4 pad-0 test), the menu, and the hint lines of text panel 6 (S75 / S32
+// script S[0xb] = 0x1c: Enter icon "select", "'f4' exit menu" via op 0x14), Bugs / Taz health bars and lives shown.
+void pauseMenu(const fs::path& dir) {
+    Level l = load(dir / "ARCA01.bze", false);
+    TbWorld& w = l.w;
+    w.GD[0] = 28;  // ARCA01 (the app sets GD+0 on load; the HUD needs it)
+    for (int i = 0; i < 161; ++i) w.tick(keys(i == 100 ? PadCross : 0));
+    w.tick(keys(PadStart));
+    // Text panel slides (0x4667a0, S75 starts panel 0 = the menu with record 8, panel 6 = the key hints with record
+    // 2) from the tick S[4] turns 1 = oracle local/shots/w9tb2/pages_trace.csv (0x4d59a0 per tick, counter 749..795).
+    std::vector<int> mx, hy;
+    for (int i = 0; i < 30; ++i) {
+        w.tick({});
+        if (w.S[4] == 1 && mx.size() < 24) mx.push_back(w.panelPos(0)[0]), hy.push_back(w.panelPos(6)[1]);
+    }
+    const std::vector<int> wantX = {0, -520, -460, -400, -340, -280, -220, -160, -100, -40, 20, 62, 86, 92, 80, 56,
+                                    20, -18, -38, -40, -24, 2, 10, 0};
+    const std::vector<int> wantY = {0, 240, 250, 250, 240, 220, 200, 180, 160, 140, 120, 100, 80, 60, 40, 20, 0, -15,
+                                    -15, -5, 0, 0, 0, 0};
+    std::string px, py;
+    for (size_t i = 0; i < mx.size(); ++i) px += std::format(" {}", mx[i]), py += std::format(" {}", hy[i]);
+    std::printf("  pause panels: menu x%s\n  pause panels: hints y%s\n", px.c_str(), py.c_str());
+    assert(mx == wantX && hy == wantY);
+    std::string text;
+    for (const OverlayGlyph& g : w.glyphs) text += char(g.ch);
+    std::printf("  pause menu: '%s'\n", text.c_str());
+    assert(w.S[9] == 1 && w.S[0x78] == 1);
+    assert(text == "\x01select'f4'exitmenuplayer1pausedsavegameinventorylevelhintsoptionsquittogranwichquitgame");
+    assert(w.hudSprites[0].shown && w.hudSprites[1].shown && w.hudSprites[2].shown && w.hudSprites[3].shown);
+    assert(!w.unsupported.contains("S32") && !w.unsupported.contains("S75") && !w.unsupported.contains("R0x3b") && !w.unsupported.contains("T4"));
+    // Inventory / era pages = oracle local/shots/w9tb2/pages_trace.csv (pages.sh: Esc, Down, Return, Right): the
+    // menu sets S[4] = 3 (page mode), 0x461db0 slides the page scroll 0x4d5960 from 4800 to 4000 (S[4] 0xa3 until it
+    // arrives), Right sets S[4] |= 4 -> era page S[5] = 1 (scroll 4000 -> 3200, 0xc3). Model 5's x per tick from the
+    // mode change (0x462fd0) and the S[4] sequence are the oracle's tick for tick.
+    w.tick(keys(PadDown));
+    for (int i = 0; i < 10; ++i) w.tick({});
+    w.tick(keys(PadCross));
+    auto run = [&](const std::vector<int>& want, uint8_t mode) {
+        std::vector<int> got;
+        for (int i = 0; i < 90 && got.size() < want.size(); ++i) {
+            if (got.empty() && w.S[4] != mode) { w.tick({}); continue; }
+            got.push_back(w.hud[5].x);
+            if (got.size() < want.size()) w.tick({});
+        }
+        std::string g;
+        for (int v : got) g += std::format(" {}", v);
+        std::printf("  page model 5 x:%s\n", g.c_str());
+        assert(got == want);
+    };
+    run({818, 778, 738, 698, 658, 618, 578, 538, 498, 458, 418, 378, 338, 298, 258, 218, 178, 138, 98, 58, 18, -20, -46,
+         -60, -62, -52, -32, -2, 32, 54, 64, 62, 50, 28, 4, -8, -8, 2, 20, 26, 20, 18}, 0xa3);
+    w.tick({});
+    assert(w.S[4] == 3);
+    for (int i = 0; i < 30; ++i) w.tick({});
+    w.tick(keys(PadRight));
+    run({18, 42, 56, 60, 54, 38, 12, -24, -64, -104, -144, -184, -224, -264, -304, -344, -384, 376, 336, 296, 256, 216,
+         176, 136, 96, 56, 16, -12, -28, -32, -24, -6, 21, 36, 39, 30, 15, 12}, 0xc3);
+    w.tick({});
+    text.clear();
+    for (const OverlayGlyph& g : w.glyphs) text += char(g.ch);
+    assert(w.S[4] == 3 && w.S[5] == 1 && w.hud[5].x == 18 && w.hud[6].shown && w.hud[11].shown && w.hud[12].shown);
+    assert(text.find("aztecera") != std::string::npos);
+    {
+        Level h = load(dir / "ARCA01.bze", false);
+        TbWorld& v = h.w;
+        v.GD[0] = 28;
+        for (int i = 0; i < 161; ++i) v.tick(keys(i == 100 ? PadCross : 0));
+        v.tick(keys(PadStart));
+        for (int i = 0; i < 45; ++i) v.tick({});
+        for (uint16_t k : {uint16_t(PadDown), uint16_t(0), uint16_t(PadDown), uint16_t(0), uint16_t(PadCross)})
+            for (int i = 0; i < 12; ++i) v.tick(keys(i < 3 ? k : 0));
+        for (int i = 0; i < 70; ++i) v.tick({});
+        // Level hints (oracle local/shots/w9tb2/o_hints.png, o_hints_right.png): S[4] 0, hint S[0x70] of S[0x71]; block
+        // 305 draws text 109 (▸ '{' at (210, -75)) while S[0x70] < S[0x71] (R 0x2d) and 107 (◂ '}' right-aligned at
+        // -210) from the second hint on.
+        auto arrows = [&] {
+            std::string t, a;
+            for (const OverlayGlyph& g : v.glyphs) {
+                t += char(g.ch);
+                if (g.y == -75 && (g.ch == '{' || g.ch == '}')) a += std::format("{}{}", char(g.ch), g.x);
+            }
+            return std::pair{t, a};
+        };
+        const auto [t1, a1] = arrows();
+        std::printf("  level hints: arrows '%s'\n", a1.c_str());
+        assert(v.S[4] == 0 && t1.find("maybethegeniesarebeingheld") != std::string::npos && a1 == "{210");
+        for (int i = 0; i < 12; ++i) v.tick(keys(i < 3 ? PadRight : 0));
+        for (int i = 0; i < 40; ++i) v.tick({});
+        const auto [t2, a2] = arrows();
+        std::printf("  level hints (right): arrows '%s'\n", a2.c_str());
+        assert(t2.find("breakallthevases") != std::string::npos && a2.find("{210") != std::string::npos && a2.find('}') != std::string::npos);
+    }
+}
+
+// Music = action 126 at runtime (0 at load, 0x407480): oracle local/wine/tbintro/music_{TRQ02,VIQ02}.csv (idle after a
+// /bze: boot, DAT_0063b9ec per tick). TRQ02's zone block 10 picks 46 (Track45, missing -> Track14) on the first visit
+// (GD+0x13c unset), 42 afterwards; VIQ02's director sets 22, then entity 317 switches to 8 at counter 55 (tick 27).
+void music(const fs::path& dir) {
+    Level t = load(dir / "TRQ02.bze");
+    assert(t.w.music == 0);
+    t.w.tick({});
+    assert(t.w.music == 46 && t.w.GD[0x13c] == 1);
+    Level v = load(dir / "VIQ02.bze");
+    int switched = -1;
+    for (int i = 0; i < 40; ++i) {
+        v.w.tick({});
+        if (i == 5) assert(v.w.music == 22);
+        if (switched < 0 && v.w.music == 8) switched = i;
+    }
+    std::printf("  music: TRQ02 46, VIQ02 22 -> 8 at tick %d\n", switched);
+    assert(switched == 27);
+}
+
 void arca(const fs::path& dir) {
     Level l = load(dir / "ARCA01.bze");
     TbWorld& w = l.w;
-    assert(w.music == 26 && w.edgeMask == 0xd0);  // §6.2 ARCA01 -> Track25; pad edge mask
+    assert(w.music == 0 && w.edgeMask == 0xd0);  // music 0 until the level logic runs (0x407480); pad edge mask
     assert(w.actors[0].model && w.actors[1].model);
     // Collision boxes from tag-0x61 record 0 = runtime peek of +0x60.. (local/wine/tbplay, probe after capture A).
     for (int i = 0; i < 5; ++i) w.tick({});
@@ -151,7 +336,8 @@ void arca(const fs::path& dir) {
     {  // camera-relative steering = runtime trace E: Left held from rest, camera state copied from the trace (tick 727)
         Level f = load(dir / "ARCA01.bze");
         for (int i = 0; i < 30; ++i) f.w.tick({});
-        f.w.cam.eye = {-4782, -428, -8547}, f.w.cam.look = {-4085, -310, -7555}, f.w.cam.body = {-4553, -389, -8221};
+        f.w.cam.prevEye = f.w.cam.eye = {-4782, -428, -8547}, f.w.cam.prevLook = f.w.cam.look = {-4085, -310, -7555};
+        f.w.cam.prevBody = f.w.cam.body = {-4553, -389, -8221};
         f.w.tick(keys(PadLeft));
         const TbActor& b = f.w.actors[0];
         assert(b.rec()->id == 37);
@@ -272,91 +458,98 @@ void arca(const fs::path& dir) {
     {  // ARCA01 entities: guard 267 (template 265) patrols, spots a player in front within 2500 and attacks (runtime
        // capture local/wine/tbnpc/B_guard_attack.pkl.gz: 357 522 -> 497 504 502 501 364 435 502 501 364; Bugs hurt by
        // the thrown template 401, health 6 -> 5).
-        Level f = load(dir / "ARCA01.bze");
-        TbWorld& w = f.w;
+        // Seed 1 (the CRT default) picks the 401 variant that misses first (as tbrand); seed 66 runs B's sequence (522,
+        // the throw that hits, 435), whose flight is checked per tick.
         TbActor* g = nullptr;
-        for (TbActor& e : w.entities)
-            if (e.id == 267) g = &e;
-        assert(g && g->hp == 5 && g->behaviour == 14 && (g->view & 0x41a) == 0x41a && g->range == 7500);
-        for (int i = 0; i < 30; ++i) w.tick({});
-        TbActor& b = w.actors[0];
-        b.pos = {g->pos.x + 1200, g->pos.y - 30, g->pos.z};  // as the capture: Bugs poked 1200 in front of it
-        g->yaw = 1024;                                         // facing +x
-        std::vector<std::pair<uint16_t, int>> seen;            // guard state, entry tick
-        int thrown = -1, gone = -1, hit = -1, flight = -1;
-        std::vector<V3> path;                                  // the thrown 401 per tick from its spawn
-        for (int i = 0; i < 300; ++i) {
-            w.tick({});
-            if (g->rec() && (seen.empty() || seen.back().first != g->rec()->id)) seen.emplace_back(g->rec()->id, i);
-            const TbActor* p = nullptr;
-            for (const TbActor& e : w.entities)
-                if (e.id == 401) p = &e;
-            if (p && thrown < 0) thrown = i, flight = p->rec() ? p->rec()->id : -1;
-            if (p && gone < 0 && thrown >= 0) path.push_back(p->pos);
-            if (!p && thrown >= 0 && gone < 0) gone = i;
-            if (hit < 0 && b.hp < 6) hit = i;
+        for (const uint32_t seed0 : {1u, 66u}) {
+            Level f = load(dir / "ARCA01.bze");
+            TbWorld& w = f.w;
+            w.rng.seed = seed0;
+            for (TbActor& e : w.entities)
+                if (e.id == 267) g = &e;
+            assert(g && g->hp == 5 && g->behaviour == 14 && (g->view & 0x41a) == 0x41a && g->range == 7500);
+            for (int i = 0; i < 30; ++i) w.tick({});
+            TbActor& b = w.actors[0];
+            b.pos = {g->pos.x + 1200, g->pos.y - 30, g->pos.z};  // as the capture: Bugs poked 1200 in front of it
+            g->yaw = 1024;                                         // facing +x
+            std::vector<std::pair<uint16_t, int>> seen;            // guard state, entry tick
+            int thrown = -1, gone = -1, hit = -1, flight = -1, hitS7a = -1;
+            std::vector<V3> path;                                  // the thrown 401 per tick from its spawn
+            for (int i = 0; i < 300; ++i) {
+                w.tick({});
+                if (g->rec() && (seen.empty() || seen.back().first != g->rec()->id)) seen.emplace_back(g->rec()->id, i);
+                const TbActor* p = nullptr;
+                for (const TbActor& e : w.entities)
+                    if (e.id == 401) p = &e;
+                if (p && thrown < 0) thrown = i, flight = p->rec() ? p->rec()->id : -1;
+                if (p && gone < 0 && thrown >= 0) path.push_back(p->pos);
+                if (!p && thrown >= 0 && gone < 0) gone = i;
+                if (hit < 0 && b.hp < 6) hit = i, hitS7a = w.S[0x7a];
+            }
+            std::string s;
+            for (auto [id, at] : seen) s += std::format(" {}@{}", id, at);
+            std::printf("  guard 267 states:%s; 401 (%d) thrown @%d, gone @%d, Bugs hurt @%d (health %d)\n", s.c_str(), flight,
+                        thrown, gone, hit, b.hp);
+            // Capture B per tick: 364 @55, its block 364 spawns 401 on anim frame 7 (@71) and sends it event 0x100/0x101
+            // (rand) -> 394/395 (the first-tick event 2 only applies without a state). B: 395 (flagsB 0x20000) follows
+            // its TOD 0xa00 point (0x45643b carry +0x58: next position = last tick's attach point) out and back to the
+            // hand and removes itself on its anim's last frame (V 0x400) @128; hitting Bugs ran its program (block 397:
+            // S[0x7a] = 1), so on 364's last frame the guard picks event 300 -> 435 @133, 502 @181, 501 @182, 364 @188.
+            // The patrol state before the notice (B 522, local/wine/tbrand 521) and the 401 variant are rand() picks of
+            // the shared stream: tbrand (rand() callers traced) throws a miss first, then 364's end -> 502 @+78, 501
+            // @+79, 364 @+85, and the second throw hits. A 502 before the first 501 is there in B, not in tbrand.
+            std::vector<uint16_t> ids;
+            for (auto [id, at] : seen) ids.push_back(id);
+            auto m = std::ranges::find(ids, 497);
+            assert(m != ids.end() && m - ids.begin() >= 2 && (m[-1] == 521 || m[-1] == 522) && m[-2] == 357);
+            size_t k = size_t(m - ids.begin()) + 1;
+            assert(ids[k++] == 504);
+            if (ids[k] == 502) ++k;
+            assert(ids[k] == 501 && ids[k + 1] == 364);
+            const int t364 = seen[k + 1].second;
+            const auto at = [&](size_t j) { return seen[k + 1 + j].second - t364; };
+            assert(thrown - t364 == 16 && gone - t364 == 73 && at(1) == 78 && flight == (seed0 == 1 ? 394 : 395));
+            if (flight == 395) {
+                assert(ids[k + 2] == 435 && ids[k + 3] == 502 && at(2) == 126 && ids[k + 4] == 501 && at(3) == 127 &&
+                       ids[k + 5] == 364 && at(4) == 133);
+                // Flight (B, guard yaw 1006; ticks 71..127, the removal tick unseen): per-tick dy exact, dx along the
+                // facing within 1 (ours yaw 1024: 104 where B has 104 · sin(1006) = 103.96 truncated).
+                const int dyB[] = {0, 0, -33, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, -1, -2, -3, -3, -4, -5, -5, -6, -6, -6, -6, -6, -6,
+                                   -6, -6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -3, -2, -1, 0, 0, 1, 2, 2, 4, 5, 6, 7, 8, 10, 11,
+                                   13, 14, 8, 0};
+                const int dxB[] = {0, 0, 103, 110, 105, 100, 96, 91, 86, 81, 76, 72, 67, 63, 58, 54, 50, 45, 41, 37, 33, 29, 25,
+                                   21, 17, 12, 8, 4, 1, -2, -7, -13, -19, -24, -29, -33, -38, -42, -46, -50, -54, -57, -60, -63,
+                                   -66, -69, -71, -73, -74, -76, -77, -79, -79, -80, -80, -19};
+                assert(path.size() == std::size(dyB) + 1);
+                for (size_t j = 0; j < std::size(dyB); ++j)
+                    assert(path[j + 1].y - path[j].y == dyB[j] && std::abs(path[j + 1].x - path[j].x - dxB[j]) <= 1);
+                assert(hit > thrown && hit < gone);  // B: health 6 -> 5 @83; where Bugs stands sets the tick
+            } else {
+                assert(ids[k + 2] == 502 && ids[k + 3] == 501 && at(2) == 79 && ids[k + 4] == 364 && at(3) == 85);
+            }
+            // A later throw hits too (B: -> 4 @221; tbrand: the second); S[0x7a] = 1 from block 397 on the hit (later
+            // S 7 rand() picks reuse the slot).
+            assert(hit > 0 && b.hp <= 5 && hitS7a == 1);
+            // Melee (capture C: Bugs poked next to it -> 502 394, Bugs hurt state 208, health -1, 60-tick flash).
+            b.pos = {g->pos.x + rotY(g->yaw, 0, 0, 300).x, g->pos.y - 30, g->pos.z + rotY(g->yaw, 0, 0, 300).z};
+            const int bugsHp = b.hp;
+            int hurt = -1;
+            for (int i = 0; i < 200 && hurt < 0; ++i) {
+                w.tick({});
+                if (b.hp < bugsHp) hurt = i;
+            }
+            std::printf("  melee: Bugs health %d after %d ticks (state %u, guard %u)\n", b.hp, hurt, b.rec()->id, g->rec()->id);
+            assert(b.hp == bugsHp - 1 && w.GD[0xa5] == b.hp && (b.f28 & 0x200) && w.flash[0] >= 0x40);
         }
-        std::string s;
-        for (auto [id, at] : seen) s += std::format(" {}@{}", id, at);
-        std::printf("  guard 267 states:%s; 401 (%d) thrown @%d, gone @%d, Bugs hurt @%d (health %d)\n", s.c_str(), flight,
-                    thrown, gone, hit, b.hp);
-        // Capture B per tick: 364 @55, its block 364 spawns 401 on anim frame 7 (@71) and sends it event 0x100/0x101
-        // (rand) -> 394/395 (the first-tick event 2 only applies without a state). B: 395 (flagsB 0x20000) follows
-        // its TOD 0xa00 point (0x45643b carry +0x58: next position = last tick's attach point) out and back to the
-        // hand and removes itself on its anim's last frame (V 0x400) @128; hitting Bugs ran its program (block 397:
-        // S[0x7a] = 1), so on 364's last frame the guard picks event 300 -> 435 @133, 502 @181, 501 @182, 364 @188.
-        // The patrol state before the notice (B 522, local/wine/tbrand 521) and the 401 variant are rand() picks of
-        // the shared stream: tbrand (rand() callers traced) throws a miss first, then 364's end -> 502 @+78, 501
-        // @+79, 364 @+85, and the second throw hits. A 502 before the first 501 is there in B, not in tbrand.
-        std::vector<uint16_t> ids;
-        for (auto [id, at] : seen) ids.push_back(id);
-        auto m = std::ranges::find(ids, 497);
-        assert(m != ids.end() && m - ids.begin() >= 2 && (m[-1] == 521 || m[-1] == 522) && m[-2] == 357);
-        size_t k = size_t(m - ids.begin()) + 1;
-        assert(ids[k++] == 504);
-        if (ids[k] == 502) ++k;
-        assert(ids[k] == 501 && ids[k + 1] == 364);
-        const int t364 = seen[k + 1].second;
-        const auto at = [&](size_t j) { return seen[k + 1 + j].second - t364; };
-        assert(thrown - t364 == 16 && gone - t364 == 73 && at(1) == 78 && (flight == 394 || flight == 395));
-        if (flight == 395) {
-            assert(ids[k + 2] == 435 && ids[k + 3] == 502 && at(2) == 126 && ids[k + 4] == 501 && at(3) == 127 &&
-                   ids[k + 5] == 364 && at(4) == 133);
-            // Flight (B, guard yaw 1006; ticks 71..127, the removal tick unseen): per-tick dy exact, dx along the
-            // facing within 1 (ours yaw 1024: 104 where B has 104 · sin(1006) = 103.96 truncated).
-            const int dyB[] = {0, 0, -33, 6, 5, 4, 4, 3, 2, 1, 0, 0, 0, -1, -2, -3, -3, -4, -5, -5, -6, -6, -6, -6, -6, -6,
-                               -6, -6, -6, -6, -6, -5, -5, -5, -4, -4, -3, -3, -2, -1, 0, 0, 1, 2, 2, 4, 5, 6, 7, 8, 10, 11,
-                               13, 14, 8, 0};
-            const int dxB[] = {0, 0, 103, 110, 105, 100, 96, 91, 86, 81, 76, 72, 67, 63, 58, 54, 50, 45, 41, 37, 33, 29, 25,
-                               21, 17, 12, 8, 4, 1, -2, -7, -13, -19, -24, -29, -33, -38, -42, -46, -50, -54, -57, -60, -63,
-                               -66, -69, -71, -73, -74, -76, -77, -79, -79, -80, -80, -19};
-            assert(path.size() == std::size(dyB) + 1);
-            for (size_t j = 0; j < std::size(dyB); ++j)
-                assert(path[j + 1].y - path[j].y == dyB[j] && std::abs(path[j + 1].x - path[j].x - dxB[j]) <= 1);
-            assert(hit > thrown && hit < gone);  // B: health 6 -> 5 @83; where Bugs stands sets the tick
-        } else {
-            assert(ids[k + 2] == 502 && ids[k + 3] == 501 && at(2) == 79 && ids[k + 4] == 364 && at(3) == 85);
-        }
-        // A later throw hits too (B: -> 4 @221; tbrand: the second); S[0x7a] = 1 from block 397.
-        assert(hit > 0 && b.hp <= 5 && w.S[0x7a] == 1);
-        // Melee (capture C: Bugs poked next to it -> 502 394, Bugs hurt state 208, health -1, 60-tick flash).
-        b.pos = {g->pos.x + rotY(g->yaw, 0, 0, 300).x, g->pos.y - 30, g->pos.z + rotY(g->yaw, 0, 0, 300).z};
-        const int bugsHp = b.hp;
-        int hurt = -1;
-        for (int i = 0; i < 200 && hurt < 0; ++i) {
-            w.tick({});
-            if (b.hp < bugsHp) hurt = i;
-        }
-        std::printf("  melee: Bugs health %d after %d ticks (state %u, guard %u)\n", b.hp, hurt, b.rec()->id, g->rec()->id);
-        assert(b.hp == bugsHp - 1 && w.GD[0xa5] == b.hp && (b.f28 & 0x200) && w.flash[0] >= 0x40);
-        // Taz spin into the facing guard (oracle local/wine/tbnpc/F2_taz_spin_rng.pkl.gz, RUNNER=wine, script
-        // spin_rng_capture.py there; F_taz_spin.pkl.gz is the same run without seeds): Taz poked 173 in front of the
-        // guard on its 502 tick, □ held 40 ticks, rand() (0x46afe0) replayed from the traced seed per tick. The spin
-        // reaches the guard through Taz's TOD 0xa00 probe once the spin anim set it (state entry clears +0x84, so the
-        // idle anim's hand point is not used on the first spin tick), not through mover contacts (neither side is in
-        // the other's 0x447490 list); the hit runs the guard's block 377 -> event 0x12a -> 433, which is not
-        // vulnerable, so the guard keeps its 5 health; its melee 394 then hurts Taz (190). 394's last frame draws
-        // S[0x1fe] = rand() % 2 (block 404): 0 -> 435 (F2), 1 -> 500 (F); 364 throws 401, which hurts Taz again.
+        // Taz spin into the facing guard (oracle local/shots/w9tb4/F9_taz_spin_rand.pkl.gz, RUNNER=wine, script
+        // local/wine/tbnpc/spin_rand_capture5.py: every rand() (0x46afe0) call with its tick and caller, tbrand/
+        // rand_hook2.s, plus guard / Taz entity bytes per tick): Taz poked 900 in front of the guard; on its 502 tick
+        // with Bugs and Taz idle (8), Taz poked 173 in front and both +0x82 set to 0; □ held 40 ticks; the traced seed
+        // replayed per tick. The spin reaches the guard through Taz's TOD 0xa00 probe once the spin anim set it (state
+        // entry clears +0x84, so the idle anim's hand point is not used on the first spin tick), not through mover
+        // contacts; the hit runs the guard's block 377 -> event 0x12a -> 433, which is not vulnerable, so the guard
+        // keeps its 5 health; its melee 394 then hurts Taz (190). 394's last frame draws S[0x1fe] = rand() % 2 (block
+        // 404): 0 -> 435, 1 -> 500; 364 throws 401, which hurts Taz again.
         Level h = load(dir / "ARCA01.bze");
         TbWorld& w2 = h.w;
         for (TbActor& e : w2.entities)
@@ -365,51 +558,59 @@ void arca(const fs::path& dir) {
         w2.tick(keys(PadR1));
         w2.tick({});
         TbActor& t = w2.actors[1];
+        TbActor& bb = w2.actors[0];
         g->yaw = 1024;
         t.pos = {g->pos.x + 900, g->pos.y - 30, g->pos.z};
-        for (int i = 0; i < 300 && !(g->rec()->id == 502); ++i) w2.tick({});
-        assert(g->rec()->id == 502);
-        const int hp0 = g->hp;
+        auto idle502 = [&] { return g->rec()->id == 502 && t.rec()->id == 8 && bb.rec()->id == 8; };
+        for (int i = 0; i < 2000 && !idle502(); ++i) w2.tick({});
+        assert(idle502());
+        const int hp0 = g->hp, tazHp0 = t.hp;
+        g->yaw = 781;  // F9: the guard had turned to 781 toward Taz by its 502 tick (ours still faces 1024)
         const V3 front = rotY(g->yaw, 0, 0, 173);
-        t.pos = {g->pos.x + front.x, g->pos.y, g->pos.z + front.z};
-        const char* draws =  // rand() calls per tick (F2 seeds), from seed 0xa2b04f55 before the press tick
-            "1325141212152514121413243212141212352512123444122212132332341614121212141432131425123412121212323234121632"
-            "5414122324252526141432141213321432121345252233421322351412123234121212161224123414142343432323321214123412"
-            "1616321215122512542738442514";
+        t.pos = {g->pos.x + front.x, g->pos.y, g->pos.z + front.z};  // F9: (161, 0, 63) from the guard
+        t.stateTicks = bb.stateTicks = 0;
+        const char* draws =  // rand() calls per tick (F9), from seed 0x26c3f4cf after the 502 tick
+            "000002000000002000000000000000011120302000001010100000110000003000000010000000010011004300110011001200000000"
+            "233001010000000000000000012000000000122111111111124342222222232222222322231000000000000000002000000000001111"
+            "111111200000100110020010";
         assert(std::strlen(draws) == 240);
-        uint32_t seed = 0xa2b04f55;
-        std::vector<uint16_t> gs, ts;
+        uint32_t seed = 0x26c3f4cf;
+        std::vector<uint16_t> gs, ts, bs;
         for (int i = 0; i < 240; ++i) {
             w2.rng.seed = seed;
             w2.tick(keys(i < 40 ? PadSquare : 0));
             for (int k = draws[i] - '0'; k > 0; --k) seed = seed * 214013u + 2531011u;
-            gs.push_back(g->rec()->id), ts.push_back(t.rec()->id);
+            gs.push_back(g->rec()->id), ts.push_back(t.rec()->id), bs.push_back(bb.rec()->id);
         }
         auto runs = [](std::initializer_list<std::pair<uint16_t, int>> r) {
             std::vector<uint16_t> v;
             for (auto [id, n] : r) v.insert(v.end(), size_t(n), id);
             return v;
         };
-        // The guard's draws land in its own register (+0x126 = S[0x1fe], 0x4d269e); its second pick at 364's end (tick
-        // 177: 435 in the oracle, ours 500: the per-tick draw counts still differ in this scene) takes another call
-        // index, so the guard is compared through tick 176.
-        const auto gWant = runs({{394, 2}, {433, 17}, {502, 1}, {394, 24}, {435, 48}, {502, 1}, {501, 6}, {364, 78}});
-        // Taz: the idle fidget picks follow the draws of the director logic's particle effects (V 0x200000) and the
-        // animation-asset logic in the same tick, now all on the shared stream: every state through tick 229 matches
-        // the oracle (fidgets 20/21/22 @48, the thrown 401 @120, 20/21/22 @146); its 9 @237 is ours @230.
-        const auto tWant = runs({{135, 6}, {136, 12}, {140, 5}, {190, 13}, {10, 12}, {20, 6}, {21, 25}, {22, 6}, {8, 35},
-                                 {190, 13}, {10, 13}, {20, 6}, {21, 29}, {22, 6}, {8, 43}});
+        // The guard's draws land in its own register (+0x126 = S[0x1fe], 0x4d269e). Draw order within a tick (the
+        // capture's callers): the focus Taz, then Bugs (idle fidget chance draws 0x45a6df, picks 0x430f76), then the
+        // others in list order (entity 270, the guard, the directors' S picks and particle effects V 0x200000), all
+        // on the shared stream. The knock-back slide must stop dead (ground grip 0x443f40 rounds only a positive
+        // product up), else Taz drifts 1 per tick and the guard's 401 hits him a tick late. The 900 poke resets the
+        // camera as in F3_taz_spin_cam.pkl.gz (snap at |body - focus|² >= 0x5f5e11).
+        const auto gWant = runs({{394, 2}, {433, 17}, {502, 1}, {394, 24}, {435, 48}, {502, 1}, {501, 6}, {364, 78},
+                                 {500, 56}, {502, 1}, {501, 6}});
+        const auto tWant = runs({{135, 6}, {136, 12}, {140, 5}, {190, 13}, {10, 12}, {20, 6}, {21, 45}, {32, 2}, {17, 5},
+                                 {18, 14}, {190, 13}, {10, 36}, {20, 6}, {21, 25}, {32, 2}, {17, 5}, {18, 28}, {19, 5}});
+        const auto bWant = runs({{8, 34}, {26, 4}, {27, 17}, {28, 6}, {8, 26}, {23, 6}, {24, 20}, {25, 8}, {8, 39}, {17, 4},
+                                 {18, 17}, {19, 4}, {8, 37}, {29, 4}, {30, 14}});
+        assert(gWant.size() == 240 && tWant.size() == 240 && bWant.size() == 240);
         auto show = [](const std::vector<uint16_t>& v) {
             std::string r;
             for (size_t k = 0; k < v.size(); ++k)
                 if (!k || v[k] != v[k - 1]) r += std::format(" {}@{}", v[k], k);
             return r;
         };
-        const bool tazOk = std::equal(tWant.begin(), tWant.end(), ts.begin());
-        const bool gOk = std::equal(gWant.begin(), gWant.end(), gs.begin());
-        std::printf("  Taz spin: guard health %d -> %d, Taz %d; guard%s (%s), Taz%s (%s the oracle)\n", hp0, g->hp, t.hp,
-                    show(gs).c_str(), gOk ? "match" : "DIFFER", show(ts).c_str(), tazOk ? "match" : "DIFFER from");
-        assert(gOk && tazOk && g->hp == hp0 && t.hp == 4);
+        const bool gOk = gs == gWant, tazOk = ts == tWant, bOk = bs == bWant;
+        std::printf("  Taz spin: guard health %d -> %d, Taz %d; guard%s (%s), Taz%s (%s), Bugs%s (%s)\n", hp0, g->hp, t.hp,
+                    show(gs).c_str(), gOk ? "match" : "DIFFER", show(ts).c_str(), tazOk ? "match" : "DIFFER",
+                    show(bs).c_str(), bOk ? "match" : "DIFFER");
+        assert(gOk && tazOk && bOk && g->hp == hp0 && t.hp == tazHp0 - 2);
     }
     {  // item pickup by touch = oracle local/wine/tbnpc/H_item_pickup.pkl.gz (RUNNER=wine, item_capture.py there): Bugs
        // poked 150 beside item gdBit 473 (its box comes from TOD packet 0x900, (-107,0,-17)-(107,-215,19) r 240, not
@@ -456,11 +657,11 @@ void arca(const fs::path& dir) {
         Level f = load(dir / "ARCA01.bze");
         TbWorld& w = f.w;
         w.GD[0] = 28;     // ARCA01 (the app sets GD+0 on load)
-        w.GD[0xa9] = 20;  // oracle state: set by the ARCA01 intro trigger zone (chunk 09, block 10), not ported
         TbActor* it = nullptr;
         for (TbActor& e : w.entities)
             if (e.gdBit == 473) it = &e;
         for (int i = 0; i < 30; ++i) w.tick({});
+        assert(w.GD[0xa9] == 20);  // the intro trigger zone's block 10 (chunk 09) set the level's counter slot
         assert(!w.hud[2].shown && !w.hudSprites[11].shown);  // nothing at idle
         w.actors[0].pos = {it->pos.x + 150, -10, it->pos.z};
         std::vector<int> xs, digit;
@@ -598,6 +799,9 @@ int main() {
         std::puts("BBTIME_DATA/tb not set: real-data part skipped");
         return 0;
     }
+    intro(dir);
+    music(dir);
+    pauseMenu(dir);
     arca(dir);
     allLevels(dir);
     return 0;

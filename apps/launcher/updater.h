@@ -58,6 +58,19 @@ std::expected<Manifest, std::string> check(const std::string& manifestUrl, const
 std::optional<std::string> currentVersion(const std::filesystem::path& installRoot);  // target of `current`
 std::optional<std::string> previousVersion(const std::filesystem::path& installRoot);
 
+// Release channel: the latest GitHub release's signed manifest. settings.ini `update_url` overrides it (tests/dev).
+inline constexpr const char* kDefaultManifestUrl =
+    "https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json";
+inline std::string manifestUrl(std::string_view override) { return override.empty() ? kDefaultManifestUrl : std::string(override); }
+
+// The release AppImage, installed as <installRoot>/current/bbtime-launcher; the launcher restarts into it.
+inline constexpr const char* kLauncherArtifact = "bbtime-launcher";
+inline constexpr const char* kHandoffEnv = "BBTIME_LAUNCHER_HANDOFF"; // set by a launcher that handed off: no further hop
+
+// The installed launcher to hand off to on start: current/bbtime-launcher when it is executable and `current` is newer
+// than `running`. Empty otherwise (no install, no launcher artifact, same or older version).
+std::filesystem::path handoffTarget(const std::filesystem::path& installRoot, std::string_view running);
+
 // Refuses unless m.version > max(current, runningVersion) or o.force. Downloads every artifact into a staging
 // directory, verifies size + SHA-256, renames it to versions/<v>, then swaps `current` (old one becomes
 // `previous`). Returns the installed version directory.

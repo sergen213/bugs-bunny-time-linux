@@ -1,5 +1,5 @@
 # assert()-based tests: keep asserts in every build type.
-foreach(t lzss bze realdata tim levels tb_levels actor)
+foreach(t lzss bze realdata tim levels tb_levels actor mods)
   add_executable(test_${t} test_${t}.cpp)
   target_link_libraries(test_${t} PRIVATE bb_core)
   target_compile_options(test_${t} PRIVATE -UNDEBUG)

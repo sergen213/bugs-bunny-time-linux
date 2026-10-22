@@ -1,5 +1,7 @@
 #include "level_hook.h"
 
+#include "bb/audio.h"
+#include "bb/game/sfx.h"
 #include "bb/level.h"
 #include "bb/tb_actor.h"
 #include "bb/tb_level.h"
@@ -7,9 +9,11 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <format>
 #include <glm/glm.hpp>
+#include <print>
 #include <string>
 
 namespace bb {
@@ -150,6 +154,7 @@ Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& l
             s.notes.push_back(std::format("{} skinned actors animated (packed TOD; initial anim from the start state)",
                                           s.actors.size() - props));
         }
+        mods::apply(s, mods::active(), tbBrightness);
         if (bzeOut) *bzeOut = std::move(bze);
         return s;
     } catch (const std::exception& e) {
@@ -157,6 +162,53 @@ Scene loadLevelScene(GameId game, const fs::path& gameRoot, const std::string& l
         s.notes.push_back(std::format("PLACEHOLDER - not original data: decode failed: {}", e.what()));
         return s;
     }
+}
+
+void applySoundMods(game::Sfx& sfx, GameId game, const std::string& level) {
+    const mods::ModSet& m = mods::active();
+    if (m.empty()) return;
+    auto patch = [&](std::shared_ptr<const std::vector<AiffSound>>& bank, const std::string& folder) {
+        const std::string pre = std::format("sounds/{}/{}/", mods::gameKey(game), folder);
+        const std::vector<std::string> keys = m.keys(pre);
+        if (keys.empty() || !bank) return;
+        auto out = std::make_shared<std::vector<AiffSound>>(*bank);
+        for (const std::string& k : keys) {
+            size_t i = 0;
+            const std::string idx = k.substr(pre.size());
+            if (std::from_chars(idx.data(), idx.data() + idx.size(), i).ec != std::errc{} || i >= out->size()) {
+                std::println(stderr, "bbtime: mod sound {}: no bank entry {} (bank has {})", k, idx, out->size());
+                continue;
+            }
+            try {
+                const Pcm p = loadPcm(*m.find(k));
+                AiffSound& a = (*out)[i];
+                const bool looped = a.loopEnd > 0;
+                a = AiffSound{.channels = p.channels, .bits = 16, .rate = p.rate, .truncated = false, .pcm = p.samples, .loopStart = 0, .loopEnd = 0};
+                if (p.loopEnd > p.loopStart) a.loopStart = p.loopStart, a.loopEnd = std::min(p.loopEnd, a.frames());
+                else if (looped) a.loopEnd = a.frames();  // the original looped: loop the whole replacement
+                m.applied(k);
+            } catch (const std::exception& e) {
+                std::println(stderr, "bbtime: mod sound {}: {}", m.find(k)->string(), e.what());
+            }
+        }
+        bank = std::move(out);
+    };
+    std::string lv = level;
+    std::ranges::transform(lv, lv.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    patch(sfx.bank, lv);
+    patch(sfx.speech, lv + "_speech");
+}
+
+fs::path modMusic(GameId game, const fs::path& track) {
+    if (track.empty() || mods::active().empty()) return track;
+    std::string stem = track.stem().string();
+    std::ranges::transform(stem, stem.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    const std::string key = std::format("music/{}/{}", mods::gameKey(game), stem);
+    if (const fs::path* p = mods::active().find(key)) {
+        mods::active().applied(key);
+        return *p;
+    }
+    return track;
 }
 
 Texture loadLitLoadingImage(const fs::path& gameRoot, const std::string& stem) {

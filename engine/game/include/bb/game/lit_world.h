@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -93,12 +94,21 @@ struct ActorDef {
     uint16_t shadow = 0;                            // tag 0x46 (+0x3a): shadow template entity id, 0 = none
     int32_t model = -1;                             // Scene::actorModels index (TOD actors), -1 none
     uint16_t idleAnim = 0;                          // ActorInstance::anim: looped by behaviours without script animation
+    uint16_t sprite = 0, spriteFrames = 0;          // first listed class-8 asset (Scene::sprites) and its record count
+    int16_t spriteW = 0, spriteH = 0;               // record 0 texel size: type-4 box / billboard size (2w x 2h)
     std::vector<PlayerState> states;
     std::vector<ActorStep> steps;
     std::vector<ActorItem> items;
     std::vector<std::pair<uint16_t, std::vector<uint8_t>>> flipbooks;  // listed tag-0x3f assets: anim id, {record, ticks}...
     std::vector<AnimFx> animFx;                     // listed animation assets with frame events (copies: counters per def)
 };
+
+// 0x44e400 packet 10 (+0x58 attach point) / 0x4393e0 child at the hand: part i's origin (+ local) walked up its
+// coordinate chain in the exe's integers — per level RotMatrix 0x407a50 + ScaleMatrix 0x408060 of the part's rot /
+// scale, ApplyMatrix 0x408a60 on the s16 vector, + its translation; the actor root (rot, scale, pos) last. nullopt for
+// a part index out of range.
+std::optional<V3> partOriginQ12(const AnimState& st, size_t i, const V3& pos, const std::array<int16_t, 3>& rot,
+                                const std::array<int32_t, 3>& scale, V3 local = {});
 
 // Fields MoveActor 0x437390 and the arc 0x43a250 act on; shared by Bugs and every actor (offsets of the 0x1f4-B actor).
 struct Mover {
@@ -123,6 +133,7 @@ struct Player : Mover {
     uint8_t frameSkip = 0;         // +0x149
     int32_t platform = -1;         // +0x70 actor ridden (LitWorld::actors index)
     int32_t carrier = -1;          // actor carrying Bugs (its +0x6c, item flag 0x20000000): Bugs follows it
+    bool carrierHand = false;      // attached at the carrier's hand part (+0x68), offset `local` (+0x1a4..) under it
     uint16_t contact = 0;          // +0x34 entity id of the last actor touched / hit
     // Hanging on a type-8 rope (0x43a310 grab): +0x70 = the rope, +0xc0 -> local coordinate +0x18c whose super is the
     // rope's root +0x7c; world position = rope matrix · local trans (+0x1a4..+0x1ac), local yaw +0x19e.
@@ -156,17 +167,26 @@ struct LitActor : Mover {
     int16_t damage = 0;            // +0x38 pending damage
     int16_t wander = 0, wanderDir = 0;  // +0x18e / +0x190
     int16_t p17e = 0;              // platform phase / offset +0x17e
-    int16_t hops = 0;              // +0x194 type 14: bounce count of a flagsA 0x8000000 hop (reset by the first call)
+    int16_t hops = 0;              // +0x194 type 14: bounce count of a flagsA 0x8000000 hop / hover drift direction
+    int16_t drift = 0;             // +0x192 type 14: hover drift ticks (flagsA 0x20000000) / slope speed (0x40000)
     int16_t pushX = 0, pushZ = 0;  // +0x40 / +0x44 type 5: Bugs' push move this tick (0x43a880 writes, 0x445a60 uses)
     bool boxInit = false;          // type 5 first call done (box rotated into the world frame)
     int32_t lo = 0, hi = 0;        // platform lift limits +0x184 / +0x194
     V3 base;                       // platform rest position +0x190..
-    int32_t rider = -1;            // +0x6c (player riding = -2)
+    int32_t rider = -1;            // +0x6c actor carried (item 0x20000000 without 0x80; player = -2)
+    // Attached coordinate (+0xc4 super, +0x70 parent): parent actors index (kParentBugs = Bugs), at its hand part
+    // (+0x68) or root (+0x7c); local translation +0x134.. and local yaw +0x12e under the parent's frame.
+    int32_t parent = -1;
+    bool parentHand = false;
+    V3 local;
+    int16_t localYaw = 0;
+    int16_t matYaw = 0;            // local yaw in the coordinate matrix +0x80: rebuilt after the world yaw is read (one tick behind)
     bool visible = true;           // +4 bit 2 (cleared when culled)
     bool active = false;           // linked into the active list this tick
     bool dead = false;             // flags14 0x100 handled: freed
     V3 hand;                       // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet (+0x68)
     bool handSet = false;
+    int16_t handPart = -1;         // the last packet-10 part: the coordinate attached children hang from (+0xc4 = +0x68)
     AnimState animState;
     // type 8 rope (0x43efc0): +0x140 swing phase (degrees, table 0x4addc8), +0x144 amplitude, +0x14e segment length,
     // +0x14c swing side (sound), +0x13c grabbed part (parts index, -1), root pitch +0xdc (kept out of rot[0], which
@@ -301,12 +321,27 @@ public:
     std::vector<std::array<uint8_t, 3>> musicZones;
     uint8_t music = 0, musicNext = 0;
     bool musicPaused = false;
+    // Pause menu (level logic, every playable level): item table 0x4b3e80 {link item, link value, value, count} (21 x
+    // 16 B; C92/C93, A102-A105, A109/A110), page lock 0x4b3fc0 (A120/A121: F1 / Esc ignored, pause kept), config
+    // volumes +0x30 / +0x34 (0x9ca850 / 0x9ca854, A122-A127; defaults 100).
+    std::array<std::array<int32_t, 4>, 21> menu{};
+    uint8_t menuLock = 0;
+    int32_t volume30 = 100, volume34 = 100;
     void musicTick();
     // Overlay font tables (lit_overlay.cpp): 0x4ae3a8 byte -> 1-based glyph (Scene::overlayFont), 0x4ae4a8 pen advance.
     static uint8_t fontGlyph(uint8_t c);
     static uint8_t fontAdvance(uint8_t c);
 
     int health() const { return G[1]; }
+    std::pair<int32_t, int32_t> rate() const { return {rateAcc_, rateY_}; }  // 0x4b3b8c / 0x4b3c44 (tests)
+    // Rotation of Bugs' parent coordinate for drawing: the ridden platform's (rx, yaw, rz), else zero (draw with
+    // local yaw p.yaw − parent yaw under it).
+    std::array<int16_t, 3> playerParentRot() const {
+        if (p.platform < 0) return {};
+        const LitActor& a = actors[size_t(p.platform)];
+        return {a.rot[0], a.yaw, a.rot[2]};
+    }
+    void behaviourForTest(size_t i) { behaviour(i); }  // one behaviour call of actor i (tests)
     int carrots() const { return G[3]; }
     int clocks() const { return G[5]; }
     int goldenCarrots() const { return G[7] | G[0xfc] << 8; }
@@ -360,6 +395,7 @@ private:
     int16_t turnErr_ = -1;         // 0x4b3c20
     int16_t camYawRef_ = 0;        // 0x4b39fe
     int32_t paceAcc_ = 0;          // 0x4b3bc0
+    int32_t rateAcc_ = 0, rateY_ = 0;  // 0x4b3b8c / 0x4b3c44: flagsB 0x2000000 animation-rate accumulator, last root y
     V3 safe_;                      // 0x4b3780
     int32_t invuln_ = 0;           // 0x4b3160
     V3 checkpoint_;                // 0x4b2460
@@ -378,12 +414,23 @@ private:
     int ropeGrab(int32_t& ly);
     int ropeClimb(int32_t v);
     V3 ropeWorld() const;
+    V3 platformWorld() const;                    // riding: platform matrix · p.local
+    // 0x434230: any box corner / centre of the rider m (rotation rot, box) over platform pl's box.
+    bool overPlatform(const LitActor& pl, const Mover& m, std::array<int16_t, 3> rot, const std::array<int16_t, 6>& box) const;
     void dropRope();
     void rope(size_t i);  // lit_actors.cpp: behaviour 0x43efc0
     int16_t playerInflate_ = 0;      // player +0x20 (tag 0x38) box inflation
     bool handHitsPlayer(const V3& h) const;
-    bool boxPush(const LitActor& o, V3& w) const;
+    // 0x433500's face push of mover m (inflation, radius, box) against actor o; top = o's box top − m's y in o's frame.
+    bool boxPush(const Mover& m, int32_t mInflate, int32_t mRadius, const std::array<int16_t, 6>& mBox, const LitActor& o,
+                 V3& w, int32_t* top = nullptr) const;
+    // 0x433500 for mover s (actor si or Bugs = kParentBugs) against the collision actors of `mask`: merged push in w
+    // (x/z), w.y = the contact's box top − s's y; the contact or -1.
+    int contactPush(const Mover& s, int32_t si, int32_t inflate, int32_t radius, const std::array<int16_t, 6>& box,
+                    uint32_t mask, V3& w);
+    bool linkedToBugs(size_t i, bool fromBugs) const;  // 0x433500 skip: parent / carried links between Bugs and actor i
     std::vector<uint32_t> order_;    // live list 0x4b3740 order (actors indices; spawns appended, dead removed)
+    std::vector<size_t> collide_;    // collision list 0x4b39ac order (rebuilt by actorsTick; spawns appended, dead removed)
     std::vector<size_t> spawned_;    // spawned during this actorsTick: run after the active list (0x448d40)
 
     uint32_t todTick(const ActorModel& m, AnimState& st, uint16_t anim, uint32_t mode, std::vector<AnimFx>& fx, LitActor* self);
@@ -396,6 +443,11 @@ private:
     void cameraReset();
     void cameraSnap(const V3& at);
     void cameraTick();
+    void cameraFollow(Mover& target, bool type14);  // 0x4318f0 body past the target checks
+    void cameraShake();                             // 0x4312c0
+    int32_t camTarget_ = -1;                        // 0x4b39b8 camera target (A85: actors index for one tick, -1 Bugs)
+    int32_t focus_ = -1;                            // 0x4b3950 camera focus actor (type 14 tail; consumed by 0x4318f0)
+    int16_t shakeSpeed_ = 0, shakeAmp_ = 0, shakePhase_ = 0;  // 0x4b3946 / 0x4b3948 / 0x4b394a (A59 / A68)
     void zoneTriggers(Mover& m, LitActor* self);
     void kill(int16_t deathState);
     void respawn();
@@ -415,11 +467,20 @@ private:
     void type2(size_t i);
     void platform(size_t i, uint32_t mode);
     void pushable(size_t i);
+    void projectile(size_t i);
     void director(size_t i);
     void cameraDirector(size_t i);
+    void spriteEffect(size_t i);  // behaviour 4 (0x4452a0)
     bool runItem(size_t i, const ActorItem& it, bool gated);  // item gates + condition; true = fires
     int findActor(uint16_t entityId) const;
     void startScript(LitActor& a, uint16_t stateId);
+    // Attached actors (0x440120 coordinate chain): parent frame (origin, yaw), attach / follow / detach.
+    static constexpr int32_t kParentBugs = -2;
+    V3 frameWorld(int32_t parent, bool hand, const V3& local, int16_t* yaw = nullptr) const;  // a point of the parent coordinate
+    int16_t coordYaw(const LitActor& c) const;  // heading of c's coordinate matrix walked from its current local rot
+    void attach(LitActor& c, int32_t parent, bool hand);
+    void followParent(LitActor& a, const V3& move);
+    void detach(LitActor& a);
     uint32_t animate(LitActor& a, uint16_t anim, uint32_t mode);
 
     // lit_overlay.cpp
@@ -433,6 +494,7 @@ private:
     int musicEntry_ = -1;            // 0x54efc4 current entry (index into musicZones)
     int32_t musicZone_ = 0xffff;     // 0x4b3b76 zone the entry was picked for (0xffff at level init)
     bool helpRequest_ = false;       // 0x4b1a2c F1 help request (consumed by tick step 7)
+    bool pauseRequest_ = false;      // 0x4b1908 Esc pause request (consumed by tick step 7)
 
     // lit_hud.cpp: HUD actor 0x44acc0 (type 6). Shown values start at 0xff / -1 (0x4474b0).
     struct HudState {
@@ -449,6 +511,7 @@ private:
     void hudHealth(size_t p, bool instant);                             // 0x44a710
     void hudTimer(size_t p, int32_t t, bool hide);                      // 0x44a800
     void hudBoss(size_t p);                                             // 0x44a580
+    void hudTotals();                                                   // 0x449d80 pause-screen totals
 };
 
 } // namespace bb::game

@@ -37,7 +37,22 @@ XaLayout xaLayoutFor(const std::filesystem::path& p);
 // Decodes every byte of `in`, appending interleaved s16 samples. `st` holds one state per channel.
 void decodeXa(std::span<const uint8_t> in, XaLayout layout, ImaState (&st)[2], std::vector<int16_t>& out);
 
-// File-backed streaming decoder. Throws std::runtime_error if the file cannot be opened.
+// Decoded PCM of a mod sound/music file (docs/MODDING.md): RIFF WAVE (8/16/24/32-bit integer or 32-bit float, mono or
+// stereo; a `smpl` chunk's first loop becomes loopStart/loopEnd in frames) or Ogg Vorbis (.ogg), chosen by extension.
+// Throws std::runtime_error / FormatError.
+struct Pcm {
+    uint16_t channels = 0;
+    uint32_t rate = 0;
+    std::vector<int16_t> samples;  // interleaved
+    uint32_t loopStart = 0, loopEnd = 0;
+};
+Pcm loadPcm(const std::filesystem::path& p);
+// 16-bit PCM WAV; loopEnd > 0 adds a `smpl` loop [loopStart, loopEnd). Returns false on I/O error.
+bool writeWav(const std::filesystem::path& p, uint16_t channels, uint32_t rate, std::span<const int16_t> samples,
+              uint32_t loopStart = 0, uint32_t loopEnd = 0);
+
+// File-backed streaming decoder. Throws std::runtime_error if the file cannot be opened. A .wav / .ogg path (mod
+// music) is decoded whole by loadPcm and streamed from memory with the same interface (rate() = its rate).
 class XaStream {
 public:
     XaStream(const std::filesystem::path& p, XaLayout layout);
@@ -48,8 +63,11 @@ public:
     XaLayout layout() const { return layout_; }
     uint64_t bytes() const { return bytes_; }
     uint64_t frames() const { return xaFrames(bytes_, layout_); }
+    uint32_t rate() const { return pcm_.rate ? pcm_.rate : kXaRate; }
 
 private:
+    Pcm pcm_;          // mod music
+    size_t pcmPos_ = 0; // next sample
     std::ifstream f_;
     XaLayout layout_;
     uint64_t bytes_ = 0;

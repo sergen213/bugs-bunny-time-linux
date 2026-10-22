@@ -17,7 +17,8 @@ Tod parseTod(std::span<const uint8_t> d, size_t off);
 // One GsCOORDINATE2 part (pool entry 0x4b2240) as the frame applier leaves it.
 struct TodPart {
     uint32_t id = 0;             // creating packet's id (parents and kills search by it)
-    uint16_t flags = 0x8008;     // 0x8000 unposed/hidden, 8 no object, 4 has object, 0x40 camera node, 0x80.. light nodes
+    uint16_t flags = 0x8008;     // 0x8000 unposed/hidden, 8 no object, 4 has object, 0x40 camera node, 0x80.. light nodes,
+                                 // 0x400 pose owned by code (the applier skips rot/scale/trans; type-2 packets clear it)
     int32_t object = -1;         // 0-based TMD object, -1 = none
     int32_t parent = -2;         // part index into the part list; -1 = actor root, -2 = none (unattached)
     bool dead = false;           // killed (type 8, odd flag other than 0xb); kept so indices stay stable
@@ -41,16 +42,17 @@ struct AnimState {
     uint16_t frame = 0;          // frame counter (+0x146)
     uint8_t ticksPerFrame = 0;   // resolution >> 1 (u8: 0 wraps to a 256-tick hold, as the original)
     uint8_t countdown = 0;
+    uint8_t skip = 0;            // +0x148 frame skip: the next frame step applies this many frames (then 0)
     uint32_t flags = 0;          // 0x100 finished, 0x200 playing, 0x1000 (re)started, 0x2000 last shown frame, 0x10 paused
     size_t next = 0;             // index of the next TOD frame the applier reads
     std::array<int16_t, 6> box{}; // TOD packet 9: actor box min xyz, max xyz (+0x48..+0x54), PS1 axes
     uint16_t radius = 0;         // TOD packet 9: +0x2e
     bool boxSet = false;         // a packet 9 was applied (the actor box then follows the animation)
     int16_t attachPart = -1;     // TOD packet 10: part whose origin is the attach point (+0x58, hand / spawn point)
-    bool attachNew = false;      // packet 10 applied since the caller last read attachPart
+    bool attachNew = false;      // a LiT frame applied since the caller last read attachPart (-1: none in it)
 };
 
-// One 30 Hz tick of 0x4393e0 (TOD path; frame skip, sound and logic events not ported). Any of mode bits
+// One 30 Hz tick of 0x4393e0 (TOD path; sound and logic events are the caller's). Any of mode bits
 // 0xb (re)starts `animId` (a role in the actor's tag-0x0f list) at frame 0. Each TOD frame is shown
 // resolution >> 1 ticks, no interpolation; the last TOD frame is never applied. Loop wraps to frame 0;
 // once returns AnimFinished on the tick its last shown frame expires (AnimPlaying instead with AnimHold) and
@@ -59,14 +61,17 @@ uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint3
 
 // Applies TOD frame `frame` to st.parts / st.box (0x44e400). Exposed for tests/tools.
 void applyTodFrame(AnimState& st, const Tod& tod, size_t frame);
+// Rebuilds part p's matrix from its rot / scale (RotMatrix 0x407a50 + ScaleMatrix 0x408060) after code changed them.
+void rebuildPart(TodPart& p);
 
 // Appends the posed model as engine-space meshes (Mesh::texture indexes Scene::textures). Root coordinate =
 // Trans(pos) * RotMatrix(rot) * Scale(scale) in PS1 space (actor +0xe4 / +0xdc / +0xcc). Parts are drawn when
 // they have an object, are not hidden (0x8000) and their world matrix is non-zero; blend slots are averaged in
 // world space (the original averages after projection: approximation). Triangles touching unwritten slots are
-// dropped.
+// dropped. parentRot: rotation of the root's parent coordinate (RotMatrix(parentRot) · RotMatrix(rot)), e.g. Bugs
+// riding a tilted platform (his coordinate is the platform's child).
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-               std::array<int32_t, 3> scale, std::vector<Mesh>& out);
+               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot = {});
 
 // Slot positions of the current pose in PS1 axes with an identity root; unwritten slots are NaN. For tests.
 std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimState& st);

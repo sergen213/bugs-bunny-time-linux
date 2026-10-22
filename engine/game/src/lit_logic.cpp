@@ -1,11 +1,13 @@
 // LiT level-logic VM: TestLogicCond 0x42a7d0 (99 conditions, table 0x4ac550) and RunLogicAction 0x42c6d0
 // (129 actions, table 0x4ac6e0). Semantics: docs/re/LOGIC.md §4/§5. `self` = the actor running the item
-// (nullptr = Bugs); P = Bugs. The title front end's opcodes (C96, A93, A100, A128) are ported; the pause-menu
-// options opcodes (C92-C95, C97, A102-A127, in every playable level) return false / do nothing and are listed in
+// (nullptr = Bugs); P = Bugs. The title front end's opcodes (C96, A93, A100, A128) and the pause menu's item table /
+// volume opcodes (C92, C93, C97, A102-A105, A109, A110, A119-A127) are ported; the key-capture and video-mode ones
+// (C94, C95, A106-A108, A111-A118: bbtime's own Options screen) return false / do nothing and are listed in
 // LitWorld::unsupported, as are camera effects without a simulated counterpart.
 // C55/C56, A49/A51/A52 run overlay text scripts (lit_overlay.cpp).
 #include "bb/game/lit_world.h"
 
+#include <algorithm>
 #include <format>
 
 namespace bb::game {
@@ -44,7 +46,7 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 10: return G[B] <= A;
     case 11: return (p.flags14 & 0x2000020) == 0;
     case 12: return p.state == A;
-    case 13: return true;                                   // self+0x6c (carried actor) == 0: carrying not simulated
+    case 13: return !self || self->rider == -1;             // self+0x6c (carried actor) == 0 (Bugs carries nothing here)
     case 14: return p.zone == A;
     case 15: case 61: return S[B] == S[A];
     case 16: case 62: return G[B] == G[A];
@@ -72,7 +74,7 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 38: return G[B] != A;
     case 41: return (p.flags14 & 0x40) != 0;
     case 42: return (p.flags14 & 0x40) == 0;
-    case 43: return false;                                  // self carries an actor: never (carrying not simulated)
+    case 43: return self && self->rider != -1;              // self+0x6c != 0: carrying an actor or Bugs
     case 44: return p.zone != A;
     case 45: return camHold_ != 0;
     case 46: return S[B] == A;
@@ -126,7 +128,14 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
     case 89: return s8(G[B]) < s8(A);
     case 90: return (pad.pressed & padMask(A)) != 0;
     case 91: return (pad.pressed & padMask(A)) == 0;
+    case 92: case 93: {  // 0x42ba20 / 0x42ba70: menu item B's value == A / != A, gated by its link item's value
+        const auto& m = menu[B % menu.size()];
+        const bool linked = m[0] == 0 || menu[size_t(m[0]) % menu.size()][2] == m[1];
+        if (it.cond == 92) return linked && m[2] == A;
+        return m[0] == 0 ? m[2] != A : !linked && m[2] == A;  // (sic: an unmet link compares equal)
+    }
     case 96: return (keys_ & 2) != 0;  // 0x42c670: Esc held (0x4b18d0 bit 1)
+    case 97: return helpRequest_;      // 0x42c680: F1 help request pending
     case 98: return joystick == (A != 0);  // 0x42c690: config use-joystick (selects >D vs >J hint scripts)
     default:
         unsupported.insert(std::format("C{}", it.cond));
@@ -189,7 +198,32 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 30: me.flags14 = (me.flags14 & ~0x400000u) | 0x200000; return;
     case 31: me.flags14 = (me.flags14 & ~0x200000u) | 0x400000; return;
     case 32: if (self) self->act3c &= ~0x40u; return;      // activation +0x3c &= ~0x40
-    case 33: case 63: return;                                // drop / destroy carried actor: none carried
+    case 33:  // 0x42cd20: drop the carried actor (or Bugs) where it is: flags14 & ~0x814 | 0x1000, self's zone / rotation
+        if (!self || self->rider == -1) return;
+        if (self->rider == -2) {
+            p.pos = frameWorld(int32_t(self - actors.data()), p.carrierHand, p.local);
+            p.carrier = -1;
+            p.carrierHand = false;
+            p.flags14 = (p.flags14 & 0xfffff7ebu) | 0x1000;
+            p.zone = self->zone;
+            p.yaw = self->yaw;
+            p.lean = self->rot[2];
+        } else {
+            LitActor& c = actors[size_t(self->rider)];
+            c.flags14 = (c.flags14 & 0xfffff7ebu) | 0x1000;
+            c.parent = -1;
+            c.zone = self->zone;
+            c.rot = self->rot;
+            c.yaw = self->yaw;
+        }
+        self->rider = -1;
+        return;
+    case 63:  // 0x42d370: free the carried actor (Bugs is never freed: only unlinked)
+        if (!self || self->rider == -1) return;
+        if (self->rider == -2) p.carrier = -1, p.carrierHand = false;
+        else actors[size_t(self->rider)].flags14 |= 0x100, actors[size_t(self->rider)].parent = -1;
+        self->rider = -1;
+        return;
     case 34: playSound(self, X); return;
     case 35: G[1] = 0; kill(int16_t(deathStateA92_ ? deathStateA92_ : defaultDeathState_)); return;
     case 36: sy = uint8_t(sy + X); return;
@@ -218,6 +252,10 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 54: if (self) self->animState.flags |= AnimPause; return;
     case 55: if (self) self->animState.flags &= ~uint32_t(AnimPause); return;
     case 57: case 58: case 66: case 67: return;              // rumble: PadSetAct is a no-op on PC
+    case 56:  // 0x42d240: clears the flagsB 0x2000000 rate accumulator and its last root y; +0x192 = 0, +0x196 = y
+        rateAcc_ = rateY_ = 0;
+        if (self) self->drift = 0, self->param = int16_t(self->pos.y);
+        return;
     case 60:
         for (int k = 0; k < X && k < 8; ++k)
             if (!(gy >> k & 1)) gAdd(7, 1);
@@ -291,8 +329,46 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
         c = uint8_t(v);
         return;
     }
+    case 102: case 103: case 104: case 105: case 109: case 110: case 119: case 126: case 127: {
+        if (it.y >= menu.size()) return;  // 0x42dbe0..: menu item Y (all but A109/A110 check the bound)
+        auto& m = menu[it.y];
+        int32_t& v = m[2];
+        switch (it.act) {
+        case 102: v = v < m[3] - 1 ? v + 1 : 0; return;  // next (wraps)
+        case 103: v = (v < 1 ? m[3] : v) - 1; return;    // previous (wraps)
+        case 104: if (v >= 0 && v <= m[3] - 1) v = X; return;
+        case 105: m[3] = X < 0x14 ? X : 0; return;
+        case 109: m[0] = X; return;
+        case 110: m[1] = X; return;
+        case 119:  // 0x42e1c0: item Y set -> item X clamped to <= 5
+            if (v && X < menu.size()) menu[X][2] = std::min(menu[X][2], 5);
+            return;
+        case 126: v = volume34 / 5 - 10; return;
+        default: v = volume30 / 10; return;
+        }
+    }
+    case 120: menuLock = 1; return;
+    case 121: menuLock = 0; return;
+    case 122: volume34 = volume34 < 0x5f ? volume34 + 5 : 0; return;  // config +0x34 (WriteConfig: app settings)
+    case 123: volume34 = volume34 < 0x33 ? 100 : volume34 - 5; return;
+    case 124: volume30 = volume30 < 100 ? volume30 + 10 : 0; return;  // config +0x30
+    case 125: volume30 = volume30 < 1 ? 100 : volume30 - 10; return;
+    case 59:  // 0x42d2c0 camera shake: speed X·11, amplitude / duration Y (phase restarts unless already shaking)
+        if (shakeAmp_ == 0) shakePhase_ = 0;
+        shakeSpeed_ = int16_t(X * 0xb), shakeAmp_ = int16_t(it.y);
+        return;
+    case 68:  // 0x42d460: the same, scaled down with self's distance from the look-at point (none at 0x800 or more)
+        if (shakeAmp_ == 0) {
+            const int32_t len = approxLen(me.pos.x - cam.target.x, me.pos.y - cam.target.y, me.pos.z - cam.target.z);
+            if (len < 0x800) {
+                shakePhase_ = 0, shakeSpeed_ = int16_t(X * 0xb);
+                shakeAmp_ = int16_t(it.y - int16_t(int32_t(uint32_t(len) * it.y) / 0x800));
+            }
+        }
+        return;
+    case 85: camTarget_ = self ? int32_t(self - actors.data()) : -1; return;  // 0x42d840: camera follows self next tick
     case 128: quitRequest = true; return;  // 0x42e350: 0x45f2b0 = 0x14, the "Do you really want to quit?" dialog
-    default: skip();  // A44 0x28, A56, A59/A68 shake, A85 camera target, A102-A127 pause-menu options
+    default: skip();  // A44 0x28, A106-A108 / A111-A118 video modes
     }
 }
 

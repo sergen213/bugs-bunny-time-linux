@@ -17,19 +17,24 @@ docker build -q -t $IMG tools/release/appimage >/dev/null
 rm -rf "$OUT" $B/AppDir && mkdir -p "$OUT"
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -w /src $IMG sh -euc "
     CXX=g++-14 CC=gcc-14 cmake -S . -B $B -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/ikv-sdl3 >/dev/null
-    cmake --build $B -j2 --target bbtime bbtime-launcher
+    cmake --build $B -j2 --target bbtime bbtime-launcher bbtime-modkit
     cd $B
+    mkdir -p AppDir/usr/share/licenses/fidelityfx AppDir/usr/share/licenses/stb
+    cp /src/third_party/fidelityfx-sdk/LICENSE.txt AppDir/usr/share/licenses/fidelityfx/LICENSE.txt
+    cp /src/third_party/stb/LICENSE AppDir/usr/share/licenses/stb/LICENSE
     LDAI_OUTPUT=bbtime-$VER-x86_64.AppImage linuxdeploy --appdir AppDir \
-        -e apps/launcher/bbtime-launcher -e apps/bbtime/bbtime \
+        -e apps/launcher/bbtime-launcher -e apps/bbtime/bbtime -e tools/bbtime-modkit \
         -d /src/tools/release/appimage/bbtime.desktop -i /src/tools/release/appimage/bbtime.svg \
         --plugin qt --output appimage"
 mv $B/bbtime-$VER-x86_64.AppImage "$OUT/"
 cp $B/apps/bbtime/bbtime "$OUT/bbtime"
 
-# Update channel: the launcher prefers app/current/bbtime, so only the game binary is an update artifact.
+# Update channel: the game binary (the launcher prefers app/current/bbtime) and the AppImage as
+# app/current/bbtime-launcher, which an older launcher restarts into (docs/UPDATES.md).
 python3 tools/release/make_manifest.py --version "$VER" \
     --base-url "https://github.com/$REPO/releases/download/v$VER" \
-    --exec bbtime -o "$OUT/manifest.json" "$OUT/bbtime"
+    --exec bbtime --exec bbtime-launcher -o "$OUT/manifest.json" \
+    "$OUT/bbtime" "bbtime-launcher=$OUT/bbtime-$VER-x86_64.AppImage"
 python3 tools/release/sign_manifest.py --key "$KEY" "$OUT/manifest.json"
 python3 tools/release/sign_manifest.py --verify "$OUT/manifest.json"
 git archive --format=tar.gz --prefix="bbtime-$VER/" -o "$OUT/bbtime-$VER-source.tar.gz" HEAD

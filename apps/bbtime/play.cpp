@@ -113,7 +113,8 @@ Play::Snap Play::view(float a, bool interpolate) const {
     };
     auto mixAngle = [a](int16_t p, int16_t q) { return int16_t(p + int16_t(std::lround(angleDiff(q, p) * a))); };
     return {mix(prev.eye, cur.eye), mix(prev.target, cur.target), mix(prev.player, cur.player), mixAngle(prev.yaw, cur.yaw),
-            mixAngle(prev.lean, cur.lean)};
+            mixAngle(prev.lean, cur.lean),
+            {mixAngle(prev.parent[0], cur.parent[0]), mixAngle(prev.parent[1], cur.parent[1]), mixAngle(prev.parent[2], cur.parent[2])}};
 }
 
 bb::render::Camera Play::camera(float a, bool interpolate) const {

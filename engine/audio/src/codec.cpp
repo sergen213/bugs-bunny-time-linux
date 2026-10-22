@@ -4,9 +4,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <format>
 #include <stdexcept>
 #include <string_view>
+
+extern "C" int stb_vorbis_decode_filename(const char* filename, int* channels, int* sample_rate, short** output);
 
 namespace bb {
 namespace {
@@ -70,14 +76,35 @@ void decodeXa(std::span<const uint8_t> in, XaLayout layout, ImaState (&st)[2], s
     }
 }
 
-XaStream::XaStream(const std::filesystem::path& p, XaLayout layout)
-    : f_(p, std::ios::binary | std::ios::ate), layout_(layout) {
+XaStream::XaStream(const std::filesystem::path& p, XaLayout layout) : layout_(layout) {
+    std::string ext = p.extension().string();
+    std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (ext == ".wav" || ext == ".ogg") {
+        pcm_ = loadPcm(p);
+        layout_ = pcm_.channels == 1 ? XaLayout::Mono : XaLayout::Stereo;
+        const uint64_t frames = pcm_.samples.size() / pcm_.channels;
+        bytes_ = layout_ == XaLayout::Stereo ? frames : (frames + 1) / 2;
+        return;
+    }
+    f_.open(p, std::ios::binary | std::ios::ate);
     if (!f_) throw std::runtime_error("cannot open " + p.string());
     bytes_ = uint64_t(f_.tellg());
     f_.seekg(0);
 }
 
 size_t XaStream::read(size_t maxBytes, std::vector<int16_t>& out) {
+    if (pcm_.rate) {  // 1 "byte" = 1 stereo frame / 2 mono frames, as for .xa; extra channels are dropped
+        const size_t ch = pcm_.channels, frames = layout_ == XaLayout::Stereo ? maxBytes : maxBytes * 2;
+        const size_t total = pcm_.samples.size() / ch;
+        size_t f = pcmPos_;
+        for (; f < total && f < pcmPos_ + frames; ++f) {
+            out.push_back(pcm_.samples[f * ch]);
+            if (layout_ == XaLayout::Stereo) out.push_back(pcm_.samples[f * ch + 1]);
+        }
+        const size_t n = f - pcmPos_;
+        pcmPos_ = f;
+        return layout_ == XaLayout::Stereo ? n : (n + 1) / 2;
+    }
     buf_.resize(maxBytes);
     f_.read(reinterpret_cast<char*>(buf_.data()), std::streamsize(maxBytes));
     const size_t n = size_t(f_.gcount());
@@ -86,9 +113,94 @@ size_t XaStream::read(size_t maxBytes, std::vector<int16_t>& out) {
 }
 
 void XaStream::rewind() {
+    pcmPos_ = 0;
+    if (pcm_.rate) return;
     f_.clear();
     f_.seekg(0);
     st_[0] = st_[1] = {};
+}
+
+Pcm loadPcm(const std::filesystem::path& p) {
+    std::string ext = p.extension().string();
+    std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    Pcm out;
+    if (ext == ".ogg") {
+        int ch = 0, rate = 0;
+        short* data = nullptr;
+        const int frames = stb_vorbis_decode_filename(p.string().c_str(), &ch, &rate, &data);
+        if (frames < 0 || !data || ch <= 0) throw std::runtime_error("cannot decode Ogg Vorbis " + p.string());
+        out.channels = uint16_t(ch), out.rate = uint32_t(rate);
+        out.samples.assign(data, data + size_t(frames) * size_t(ch));
+        std::free(data);
+        return out;
+    }
+    const std::vector<uint8_t> d = readFile(p);
+    const std::span<const uint8_t> s(d);
+    auto bad = [&](std::string_view what) { throw FormatError(std::format("WAV {}: {}", p.string(), what)); };
+    if (d.size() < 12 || std::string_view(reinterpret_cast<const char*>(d.data()), 4) != "RIFF" ||
+        std::string_view(reinterpret_cast<const char*>(d.data() + 8), 4) != "WAVE")
+        bad("not RIFF/WAVE");
+    uint16_t fmt = 0, bits = 0;
+    std::span<const uint8_t> data;
+    for (size_t o = 12; o + 8 <= d.size();) {
+        const std::string_view id(reinterpret_cast<const char*>(d.data() + o), 4);
+        const size_t len = le32(s, o + 4);
+        if (o + 8 + len > d.size()) bad("chunk past end of file");
+        if (id == "fmt " && len >= 16) {
+            fmt = uint16_t(d[o + 8] | d[o + 9] << 8), out.channels = uint16_t(d[o + 10] | d[o + 11] << 8);
+            out.rate = le32(s, o + 12), bits = uint16_t(d[o + 22] | d[o + 23] << 8);
+            if (fmt == 0xfffe && len >= 26) fmt = uint16_t(d[o + 32] | d[o + 33] << 8);  // WAVE_FORMAT_EXTENSIBLE subformat
+        } else if (id == "data") {
+            data = s.subspan(o + 8, len);
+        } else if (id == "smpl" && len >= 36 + 24 && le32(s, o + 8 + 28) > 0) {
+            out.loopStart = le32(s, o + 8 + 36 + 8), out.loopEnd = le32(s, o + 8 + 36 + 12) + 1;  // end is inclusive
+        }
+        o += 8 + len + (len & 1);
+    }
+    if (!out.channels || !out.rate) bad("no fmt chunk");
+    const size_t bps = bits / 8;
+    if (!((fmt == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) || (fmt == 3 && bits == 32)))
+        bad(std::format("unsupported encoding (format {}, {} bits): save as 16-bit PCM", fmt, bits));
+    for (size_t o = 0; o + bps <= data.size(); o += bps) {
+        int32_t v = 0;
+        if (fmt == 3) {
+            float f;
+            std::memcpy(&f, &data[o], 4);
+            v = int32_t(std::lround(std::clamp(f, -1.0f, 1.0f) * 32767.0f));
+        } else if (bits == 8) {
+            v = (int32_t(data[o]) - 128) << 8;
+        } else {
+            v = int16_t(data[o + bps - 2] | data[o + bps - 1] << 8);  // the top 16 bits
+        }
+        out.samples.push_back(int16_t(v));
+    }
+    out.samples.resize(out.samples.size() / out.channels * out.channels);
+    return out;
+}
+
+bool writeWav(const std::filesystem::path& p, uint16_t channels, uint32_t rate, std::span<const int16_t> samples, uint32_t loopStart,
+              uint32_t loopEnd) {
+    std::vector<uint8_t> o;
+    auto u32 = [&](uint32_t v) { for (int k = 0; k < 4; ++k) o.push_back(uint8_t(v >> (8 * k))); };
+    auto u16 = [&](uint16_t v) { o.push_back(uint8_t(v)), o.push_back(uint8_t(v >> 8)); };
+    auto tag = [&](const char* t) { o.insert(o.end(), t, t + 4); };
+    const uint32_t bytes = uint32_t(samples.size() * 2);
+    tag("RIFF"), u32(0), tag("WAVE"), tag("fmt "), u32(16), u16(1), u16(channels), u32(rate), u32(rate * channels * 2), u16(uint16_t(channels * 2)), u16(16);
+    if (loopEnd > loopStart) {
+        tag("smpl"), u32(36 + 24);
+        for (int k = 0; k < 7; ++k) u32(k == 2 ? 1000000000u / rate : k == 3 ? 60 : 0);  // manufacturer..SMPTE offset
+        u32(1), u32(0);                                                               // loops, sampler data
+        u32(0), u32(0), u32(loopStart), u32(loopEnd - 1), u32(0), u32(0);              // id, type, start, end (incl.)
+    }
+    tag("data"), u32(bytes);
+    for (const int16_t v : samples) u16(uint16_t(v));
+    const uint32_t riff = uint32_t(o.size() - 8);
+    for (int k = 0; k < 4; ++k) o[size_t(4 + k)] = uint8_t(riff >> (8 * k));
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(o.data()), std::streamsize(o.size()));
+    return bool(f);
 }
 
 AiffSound parseAiff(std::span<const uint8_t> d, BzeVariant game) {

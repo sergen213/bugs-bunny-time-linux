@@ -159,10 +159,15 @@ void Heightfield::trace(V3& p, int32_t& dx, int32_t& dz, Ground& r) const {
         first = false;
         // Next sub-cell along the segment (negative moves enter at boundary - 1, as the exe does). The entry point
         // uses the exe's Q12 slope and is clamped into the sub-cell so rounding never walks backwards.
+        // Single-axis traces step on while the end lies strictly beyond the current entry point (0x434cd0's x / z
+        // loops compare the move with the entry offset, not the next boundary), so they read one sub-cell past the
+        // end sub-cell: its kind / height / zone are the result (runtime: L04B3 Bugs knocked back −10 a tick from
+        // z 1168 finds the open sub-cell [1080, 1120) and falls at 1158; w9lit8/o_att_g.csv counter 1041).
+        // ponytail: diagonal traces keep the boundary-within-end rule (their 0x434cd0 branch is not re-derived).
         const int32_t bx = dx > 0 ? (cx + 1) * kSub : cx * kSub - 1;
         const int32_t bz = dz > 0 ? (cz + 1) * kSub : cz * kSub - 1;
-        const bool hx = dx != 0 && (dx > 0 ? bx <= ex : bx >= ex);
-        const bool hz = dz != 0 && (dz > 0 ? bz <= ez : bz >= ez);
+        const bool hx = dx != 0 && (diag ? (dx > 0 ? bx <= ex : bx >= ex) : (dx > 0 ? x < ex : x > ex));
+        const bool hz = dz != 0 && (diag ? (dz > 0 ? bz <= ez : bz >= ez) : (dz > 0 ? z < ez : z > ez));
         if (!hx && !hz) break;
         bool stepX = hx, stepZ = hz;
         if (hx && hz) {

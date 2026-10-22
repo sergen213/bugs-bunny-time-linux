@@ -1,0 +1,11 @@
+# LiT PS1 (SLUS_008.38) RAM symbols, for PSX_TRACE (tools/psx/run.sh). Found by RAM diffs on the PS1 "Nowhere"
+# drawbridge (state local/psx/states/lit_x40.sav, hold Up from vsync 40). Status: Consistent (one level only).
+# name            address     type    notes
+vsync_a           0x800619f8  s32     +1 per vsync (global)
+level_vsync       0x800695dc  s32     +1 per vsync, small after a level load (162 at vsync 40 of lit_x40)
+bugs_pos          0x8006ad30  s32*3   Bugs x, y, z (PC convention: y negative = up; start 5940,-560,10050); updates every 2nd vsync (30 Hz tick)
+bugs_pos_copy     0x8006ad70  s32*3   same values as bugs_pos every sampled vsync (second copy in the actor)
+level            0x80010000  s32     GD current level = PC level-table index (TITLE 0, LANGUAGE 2, L01A 4, MERLIN 51; logos 78-80)
+level_table      0x8005ee78  u32*2   {LBA, size} per level index, copied to the CdlFILE table 0x8005f200 (16 B each)
+level_loader     0x8004443c  code    a0 = level index; PSX_LEVEL=0x8004443c:0x80010000:2:4 boots straight into L01A
+cam_target        0x8006d934  s32*3   camera look-at x, y, z (follows bugs_pos with lag; y = bugs y - 203)

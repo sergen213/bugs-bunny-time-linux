@@ -6,11 +6,13 @@
 #include "bb/game/lit_world.h"
 #include "bb/level.h"
 
+#include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 using namespace bb;
 using namespace bb::game;
@@ -136,6 +138,74 @@ void testHelp(const BzeFile& bze, const Scene& scene) {
     assert(text(w).find("HelpMenu") == std::string::npos);
 }
 
+// L01A Esc pause menu (S[12] = 1, GAMEPLAY.md §7.6) vs the Wine oracle (2026-10-21, local/wine/compare/w9lit/:
+// o_pause{.png,_glyphs.txt,_hud.txt}, o_pause_hud2.txt with poked G, o_quitask.png): the menu's 44 glyphs, the
+// pause totals 0x449d80 (HUD slot templates / origins / depth), Quit Game -> "Do you really want to exit the
+// level?" -> Yes = level 3 (hub) with the pause cleared, Esc resumes.
+void testPause(const BzeFile& bze, const Scene& scene) {
+    LitWorld w0 = LitWorld::load(bze, &scene);
+    w0.loadUpdate();
+    for (int t = 0; t < 40; ++t) w0.tick({});
+    LitWorld w = w0;
+    w.tick({.esc = true});
+    assert(w.S[12] == 1 && w.S[14] == 1 && w.S[16] == 1);
+    for (int t = 0; t < 3; ++t) w.tick({});  // the pause director's overlay page
+    assert(text(w) == "GamePausedContinueVideoControlsSoundQuitGame");
+    constexpr int16_t kG[44][3] = {
+        {-55, -66, 1}, {-43, -66, 1}, {-32, -66, 1}, {-21, -66, 1}, {-7, -66, 1}, {4, -66, 1},  {15, -66, 1},
+        {25, -66, 1},  {33, -66, 1},  {41, -66, 1},  {-40, -45, 0}, {-29, -45, 0}, {-19, -45, 0}, {-8, -45, 0},
+        {0, -45, 0},   {5, -45, 0},   {16, -45, 0},  {26, -45, 0},  {-25, -30, 3}, {-12, -30, 3}, {-7, -30, 3},
+        {2, -30, 3},   {10, -30, 3},  {-40, -15, 3}, {-29, -15, 3}, {-19, -15, 3}, {-8, -15, 3}, {0, -15, 3},
+        {9, -15, 3},   {19, -15, 3},  {26, -15, 3},  {-27, 0, 3},   {-18, 0, 3},   {-8, 0, 3},    {2, 0, 3},
+        {13, 0, 3},    {-45, 14, 3},  {-31, 14, 3},  {-21, 14, 3},  {-16, 14, 3},  {-2, 14, 3},   {10, 14, 3},
+        {21, 14, 3},   {32, 14, 3}};
+    for (size_t i = 0; i < 44; ++i) assert(w.glyphs[i].x == kG[i][0] && w.glyphs[i].y == kG[i][1] && w.glyphs[i].pal == kG[i][2]);
+    // Oracle HUD slots 0x4b23a0 (shown, template +0x1c, part +0xa8..+0xb0) for {slot, template, x, y, z}.
+    using Slot = std::array<int, 5>;
+    const auto shown = [](const LitWorld& v) {
+        std::vector<Slot> s;
+        for (size_t i = 0; i < v.hud.size(); ++i)
+            if (v.hud[i].shown) s.push_back({int(i), v.hud[i].tmpl, v.hud[i].x, v.hud[i].y, v.hud[i].z});
+        return s;
+    };
+    assert((shown(w) == std::vector<Slot>{{0, 486, -228, -80, 1200}, {1, 472, -200, -80, 1200}, {2, 472, -176, -80, 1200},
+                                          {3, 485, 156, -80, 1200},  {4, 472, 180, -80, 1200},  {5, 472, 204, -80, 1200},
+                                          {6, 472, 228, -80, 1200},  {7, 487, 136, 80, 1200},   {8, 472, 180, 80, 1200},
+                                          {9, 472, 204, 80, 1200},   {10, 472, 228, 80, 1200},  {14, 489, -32, -80, 1200},
+                                          {15, 489, 0, -80, 1200},   {16, 489, 32, -80, 1200},  {22, 472, -176, 82, 1200},
+                                          {23, 924, -152, 82, 1200}}));
+    LitWorld r = w;  // Esc again: 2, then 0 at the end of the tick (HUD hidden)
+    r.tick({.esc = true});
+    assert(r.S[12] == 0 && shown(r).empty());
+    // Quit Game: ↓ x4, ✕ -> the confirm page (Yes white), ✕ -> level 3, unpaused.
+    for (int k = 0; k < 4; ++k) {
+        w.tick({.buttons = PadDown});
+        for (int t = 0; t < 6; ++t) w.tick({});
+    }
+    assert(w.menu[1][2] == 4 && w.menu[1][3] == 5);  // oracle 0x4b3e80: item 1 {0, 0, 4, 5}
+    w.tick({.buttons = PadCross});
+    for (int t = 0; t < 4; ++t) w.tick({});
+    assert(text(w) == "GamePausedDoyoureallywanttoexitthelevel?YesNo" && w.glyphs[40].pal == 0 && w.glyphs[43].pal == 3);
+    w.tick({.buttons = PadCross});
+    w.tick({});
+    assert(w.nextLevel == 3 && w.S[12] == 0);
+    // Totals with poked values (golden 300, clocks 57, carrots 17, level lines 4/12, 3/9, 2/5): o_pause_hud2.txt.
+    LitWorld v = w0;
+    v.G[3] = 17, v.G[7] = 44, v.G[0xfc] = 1, v.G[5] = 57, v.G[4] = 2;
+    v.G[0xb6] = 0x20, v.G[0x20] = 4, v.G[0xb7] = 12, v.G[0xb8] = 0x21, v.G[0x21] = 3, v.G[0xb9] = 9, v.G[0xba] = 5;
+    v.tick({.esc = true});
+    assert((shown(v) == std::vector<Slot>{
+                {0, 486, -228, -80, 1200}, {1, 473, -200, -80, 1200}, {2, 479, -176, -80, 1200}, {3, 485, 156, -80, 1200},
+                {4, 475, 180, -80, 1200},  {5, 472, 204, -80, 1200},  {6, 472, 228, -80, 1200},  {7, 487, 136, 80, 1200},
+                {8, 472, 180, 80, 1200},   {9, 477, 204, 80, 1200},   {10, 479, 228, 80, 1200},  {14, 489, -32, -80, 1200},
+                {15, 489, 0, -80, 1200},   {16, 489, 32, -80, 1200},  {21, 479, -200, 82, 1200}, {22, 480, -176, 82, 1200},
+                {23, 924, -152, 82, 1200}, {29, 485, -96, 58, 1500},  {30, 472, -28, 58, 1500},  {31, 476, -4, 58, 1500},
+                {32, 923, 20, 58, 1500},   {33, 473, 44, 58, 1500},   {34, 474, 68, 58, 1500},   {35, 487, -96, 30, 1500},
+                {36, 472, -28, 30, 1500},  {37, 475, -4, 30, 1500},   {38, 923, 20, 30, 1500},   {39, 472, 44, 30, 1500},
+                {40, 481, 68, 30, 1500},   {41, 925, -96, 86, 1500},  {42, 472, -28, 86, 1500},  {43, 474, -4, 86, 1500},
+                {44, 923, 20, 86, 1500},   {45, 472, 44, 86, 1500},   {46, 477, 68, 86, 1500}}));
+}
+
 // Template 68's font: 130 glyphs, each a whole 16x16 TIM except the icons (MERLIN glyphs 0x67..0x6e 20x16 / 64x32
 // / 32x16 button and arrow images).
 void testFont(const Scene& scene) {
@@ -162,6 +232,7 @@ int main() {
     const auto l01a = std::filesystem::path(env) / "lit/Datas/bze/L01a.bze";
     const BzeFile b2 = loadBze(l01a);
     testHelp(b2, buildLitScene(b2, "L01A"));
+    testPause(b2, buildLitScene(b2, "L01A"));
     std::printf("ok\n");
     return 0;
 }

@@ -1,7 +1,9 @@
 # Signed updates
 
-Status: **Implemented**, **Tested** (`launcher.updater` against a local HTTPS server). Releases are published at
-https://github.com/sergen213/bugs-bunny-time-linux; the launcher's `update_url` stays empty by default (opt-in).
+Status: **Implemented**, **Tested** (`launcher.updater` against a local HTTPS server; checked against the real
+v0.8.0 release on 2026-10-21). The launcher always uses the release channel
+`https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json` (+ `.sig`); there is no
+URL field. `settings.ini` `update_url` overrides it for tests/development only.
 
 ## Trust model
 
@@ -58,6 +60,17 @@ $XDG_DATA_HOME/bbtime/app/
 The updater writes only below `app/`; game data, copied `Datas/`, saves and original installs are never touched.
 The launcher prefers `app/current/bbtime` when starting the game.
 
+## Launcher restart and hand-off
+
+Releases from 0.9.0 on also ship the AppImage itself as the artifact `bbtime-launcher` (installed as
+`app/current/bbtime-launcher`, executable). After a successful install whose `current` is newer than the running
+launcher, the launcher saves its settings, quits and `execv`s `app/current/bbtime-launcher` with its original
+arguments. On every normal start, a launcher whose version is lower than `current` hands off the same way
+(`bbtime::update::handoffTarget`), so the desktop entry / old AppImage the user starts always ends up in the newest
+installed launcher. Loop guard: the handing-off launcher sets `BBTIME_LAUNCHER_HANDOFF=1`; a launcher started with
+it never hands off again (and clears it). A rollback or forced downgrade makes `current` older than the running
+launcher, so no hand-off happens. Releases without the artifact (0.8.0) only update the game binary.
+
 ## Releasing
 
 ```sh
@@ -69,11 +82,10 @@ gh release create vX.Y.Z -R sergen213/bugs-bunny-time-linux --notes-file NOTES.m
 
 The script builds in the `tools/release/appimage/Dockerfile` container (Ubuntu 24.04, g++-14, Qt 6.4), packs
 `bbtime-launcher` + `bbtime` into `bbtime-X.Y.Z-x86_64.AppImage` with linuxdeploy, and signs `manifest.json` with the
-private key. The manifest lists only `bbtime`: the launcher (also the AppImage's) prefers `app/current/bbtime`, so
-the game updates in place while the launcher updates by downloading a new AppImage.
-
-Users set `update_url = https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json`;
-the `.sig` is fetched from the same URL plus `.sig`. Tools need `python3` + `cryptography` (installed).
+private key. The manifest lists `bbtime` (the game, preferred by every launcher as `app/current/bbtime`) and the
+AppImage as `bbtime-launcher` (`make_manifest.py … "bbtime-launcher=$OUT/bbtime-X.Y.Z-x86_64.AppImage"`, its URL is
+the AppImage asset of the release). The `.sig` is fetched from the manifest URL plus `.sig`. Tools need `python3` +
+`cryptography` (installed).
 
 ## Tests (`launcher.updater`)
 
@@ -82,6 +94,8 @@ valid manifest; `http://` and `file://` refused; untrusted certificate refused; 
 signature and missing key rejected; signed manifests with `../`, absolute, hidden, `a/../b`, empty-component and
 backslash paths rejected; install + exec bit + progress; same version refused; tampered artifact (hash mismatch)
 and oversized artifact leave `current` and `versions/` unchanged with no staging left; downgrade refused against
-both installed and running version; forced downgrade; upgrade prunes; rollback both ways; version parser; and the
+both installed and running version; forced downgrade; upgrade prunes; rollback both ways; the default release URL
+and the `update_url` override; launcher hand-off only to an executable `current/bbtime-launcher` newer than the
+running version; version parser; and the
 Python release scripts (keygen → make → sign → verify) cross-checked with the C++ verifier. Exit 77 (skip) if
 `python3`/`cryptography` is missing.

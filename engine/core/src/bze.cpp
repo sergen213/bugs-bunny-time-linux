@@ -38,7 +38,15 @@ BzeFile parseBze(std::vector<uint8_t> bytes) {
     size_t entries;
     uint32_t count;
     switch (u32(bytes, 0)) {
-    case 1: f.variant = BzeVariant::LostInTime; count = u32(bytes, 4); entries = 8; break;
+    case 1:
+        // PS1 TB (.BZZ): TB header with first word 1 = LZSS sections; LiT counts never reach a TB budget (≥ 1000).
+        if (u32(bytes, 4) >= 1000) {
+            f.variant = BzeVariant::TimeBusters, f.compressed = true, f.tbBudget = u32(bytes, 4);
+            count = u32(bytes, 8), entries = 12;
+        } else {
+            f.variant = BzeVariant::LostInTime, f.compressed = true, count = u32(bytes, 4), entries = 8;
+        }
+        break;
     case 0: f.variant = BzeVariant::TimeBusters; f.tbBudget = u32(bytes, 4); count = u32(bytes, 8); entries = 12; break;
     default: throw FormatError(std::format("bze: unknown first header word 0x{:x} at offset 0", u32(bytes, 0)));
     }
@@ -74,7 +82,7 @@ std::span<const uint8_t> BzeFile::raw(size_t i) const {
 
 std::vector<uint8_t> BzeFile::payload(size_t i, LzssInfo* info) const {
     const auto r = raw(i);
-    if (variant == BzeVariant::TimeBusters) return {r.begin(), r.end()};
+    if (!compressed) return {r.begin(), r.end()};
     return lzssDecompress(r, info);
 }
 

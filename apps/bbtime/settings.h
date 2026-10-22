@@ -28,6 +28,16 @@ struct Settings {
     float fov = 60.0f;  // vertical degrees at 4:3, Hor+ wider (bb::render::Settings::vfovDeg)
     int msaa = 4;       // 0, 2, 4, 8
     bool vsync = true;
+    // Vulkan renderer, Enhanced fidelity only: dynamic sun shadows (bb::render::Shadows). off | map (shadow map) | rt
+    // (ray-query shadows) | rt_ao (+ ray-traced ambient occlusion). rt/rt_ao fall back to map without ray queries.
+    std::string shadows = "rt_ao";
+    // Vulkan, Enhanced only: ray-traced reflections on water / ice / polished floors (needs ray queries, else off).
+    bool reflections = true;
+    // Vulkan, Enhanced only: FSR 3.1.4. upscaling: off | fsr_quality | fsr_balanced | fsr_performance | native_aa;
+    // frame_generation (FSR frame interpolation, one generated frame per rendered frame; with upscaling off it runs
+    // FSR as native AA).
+    std::string upscaling = "off";
+    bool frameGeneration = false;
     int musicVolume = 100, sfxVolume = 100; // 0..100
     // TB front end Video page (bblit2.exe config.pc, docs/re/TIME_BUSTERS.md §8.1): +0xe0 brightness (HSI intensity
     // factor 0.25..2 on TB textures), +0x04 renderer (2 3-D card, 1 software) and +0x18 detail level (0 low .. 2
@@ -36,6 +46,8 @@ struct Settings {
     int tbRenderer = 2, tbDetails = 2;
     std::map<std::string, std::string> bindings; // action -> comma-separated SDL key names
     std::string updateUrl;                       // launcher only: signed release manifest URL (https)
+    // Enabled mods in load order (later wins), ids of $XDG_DATA_HOME/bbtime/mods/<id>/ (bb/mods.h, docs/MODDING.md).
+    std::vector<std::string> mods;
     std::map<std::string, std::string> unknown;  // keys this build does not know, preserved verbatim
 
     Settings();

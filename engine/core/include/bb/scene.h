@@ -104,6 +104,13 @@ struct ActorInstance {
     bool player = false;         // tag 0x13 == 1 (behaviour type 1: Bugs)
     uint32_t scriptOffset = 0;   // ScriptItem::offset of the entity chunk in section 1
 };
+// One frame of a LiT sprite-sequence asset (chunk 0x22 tag 0x40, one 0x64 record each) as the type-4 sprite path
+// draws it (0x44c170 -> GL 0x40a6c0): the record's whole texture, white, blended by its semi-transparency bit / ABR.
+struct SpriteFrame {
+    int32_t texture = -1;        // Scene::textures index, -1 = not loaded
+    Blend blend = Blend::Opaque;
+    uint8_t alpha = 255;         // vertex alpha (ABR 0: 128, ABR 3: 64)
+};
 
 struct SceneStats {
     uint32_t textureRefs = 0;      // texture list entries in the level
@@ -150,6 +157,7 @@ struct Scene {
     // TB HUD sprite sheet (0x462430): template 0x1f's class-0x17 sprite asset (ARCA01: 21 frames, digits 0-9 32x22,
     // health panels 116x46 / 140x46, bars 80x8, icons). hudSheet[frame] = Scene::textures index, -1 if not loaded.
     std::vector<int32_t> hudSheet;
+    std::map<uint16_t, std::vector<SpriteFrame>> sprites;  // LiT: every sprite-sequence asset id -> its frames
     SceneStats stats;
     std::vector<std::string> notes; // short human-readable status lines for overlays (gaps, research state)
 };

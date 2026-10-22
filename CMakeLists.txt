@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(bbtime VERSION 0.8.0 LANGUAGES C CXX)
+project(bbtime VERSION 0.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,9 @@ add_subdirectory(engine/core)    # bb::core  — formats, BZE, LZSS, importer li
 add_subdirectory(engine/audio)   # bb::audio — .xa IMA-ADPCM decode + OpenAL playback
 add_subdirectory(engine/render)  # bb::render — SDL3 + OpenGL renderer
 add_subdirectory(engine/game)    # bb::game — 30 Hz simulation: input, player, collision, camera, entities
+find_program(GLSLC glslc REQUIRED)
+find_package(Vulkan REQUIRED)
+add_subdirectory(third_party)       # FidelityFX FSR 3.1.4 (Vulkan backend)
 add_subdirectory(engine/render_vk) # bb::render_vk — Vulkan backend (same interface as bb_render)
 add_subdirectory(apps/launcher)  # Qt 6 launcher + signed updater
 add_subdirectory(apps/bbtime)    # collection executable (game-select menu)

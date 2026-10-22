@@ -6,6 +6,7 @@ RUN printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble n
         > /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libsodium-dev libepoxy-dev libopenal-dev libcurl4-openssl-dev libglm-dev libfreetype-dev file patchelf qt6-wayland \
+        glslang-tools \
     && rm -rf /var/lib/apt/lists/*
 # CMake 3.28 has no CXX26 dialect for GCC 14 (CMAKE_CXX_STANDARD 26); use a current release.
 ADD https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-linux-x86_64.tar.gz /tmp/cmake.tgz

@@ -232,8 +232,8 @@ player ground probe; BBLIT-Remaster `YG*` sites `0x410070`, `0x4100ba`, `0x411c7
 
 16-byte grouped records: header (count, flags, 0x64), u16 @4 vertex index (centre, Inferred), u16 @6 tpage
 (ABR byte, [WALK]), u16 @8 unknown, u16 @10 **texture id** [WALK], s16 @12 width, s16 @14 height (L_* loading
-screens: 512 × 512 sprite showing the 512 × 512 TIM; Inferred). Not drawn by [WR]; the sprite renderer was not
-located.
+screens: 512 × 512 sprite showing the 512 × 512 TIM; Inferred). Not drawn by [WR]; type-4 actors draw them via
+0x44c170 / 0x438280 / GL 0x40a6c0 (whole texture, record 0's size ×2 as a billboard; RUNTIME_REFERENCE.md §20).
 
 ## 9. Validation performed
 

@@ -31,17 +31,24 @@ int main() {
         "bind.jump = Space,D\n"
         "bind.fly = X\n"                 // 18: unknown action
         "future_key = kept as is = really\n"
+        "shadows = map\n"
+        "reflections = off\n"
+        "upscaling = fsr_balanced\n"
+        "frame_generation = on\n"
+        "mods = hd-textures, big-head ,,taz-swap\n"
         "update_url = https://example.invalid/manifest.json",  // no trailing newline
         &w);
     assert(w.size() == 8);
     assert(w[0].starts_with("line 5:") && w[1].starts_with("line 6:") && w[7].starts_with("line 18:"));
     for (const auto& x : w) std::println("warning {}", x);
     assert(s.width == 1920 && s.height == 1080 && !s.fullscreen && s.renderer == "vk" && s.fidelity == "enhanced");
-    assert(s.fov == 72.5f && s.msaa == 4 && !s.vsync && s.musicVolume == 100 && s.sfxVolume == 40);
+    assert(s.fov == 72.5f && s.msaa == 4 && !s.vsync && s.musicVolume == 100 && s.sfxVolume == 40 && s.shadows == "map");
+    assert(!s.reflections && s.upscaling == "fsr_balanced" && s.frameGeneration);
     assert(s.litRoot == "/games/Bugs Bunny/lit" && s.tbRoot.empty());
     assert(s.bindings.at("jump") == "Space,D" && s.bindings.at("kick") == "F" && !s.bindings.contains("fly"));
     assert(s.unknown.at("future_key") == "kept as is = really");
     assert(s.updateUrl == "https://example.invalid/manifest.json");
+    assert((s.mods == std::vector<std::string>{"hd-textures", "big-head", "taz-swap"}));
 
     // Round trip: everything formatSettings writes parses back identically and warning-free.
     std::vector<std::string> w2;
@@ -49,7 +56,7 @@ int main() {
     const bbtime::Settings r = bbtime::parseSettings(text, &w2);
     assert(w2.empty() && bbtime::formatSettings(r) == text);
     assert(r.width == s.width && r.fov == s.fov && r.litRoot == s.litRoot && r.bindings == s.bindings &&
-           r.unknown == s.unknown && r.vsync == s.vsync && r.renderer == s.renderer);
+           r.unknown == s.unknown && r.vsync == s.vsync && r.renderer == s.renderer && r.mods == s.mods);
 
     // Defaults round-trip too, and a missing file yields defaults.
     assert(bbtime::formatSettings(bbtime::parseSettings(bbtime::formatSettings({}))) == bbtime::formatSettings({}));

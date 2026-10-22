@@ -77,40 +77,6 @@ struct Xform {
 // 4.12 angle (0x1000 = 360 degrees) -> radians.
 float angle(int16_t a) { return float(a) * 2.0f * std::numbers::pi_v<float> / 4096.0f; }
 
-// Sprite-sequence asset (chunk 0x22 tag 0x40, TEXTURE_GAP.md): the tex id u16 @+10 of every 16-byte type-0x64
-// record, in object/group order (the 0x64 records FUN_00438830 indexes by frame).
-std::vector<uint16_t> spriteTexIds(std::span<const uint8_t> sec4, uint32_t off, uint32_t size) {
-    if (off > sec4.size() || sec4.size() - off < size) throw FormatError(std::format("sprite model 0x{:x} outside section 4", off));
-    const In in{sec4.subspan(off, size), "sprite model"};
-    std::vector<uint16_t> ids;
-    const uint32_t nobj = in.u32(8);
-    for (uint32_t o = 0; o < nobj; ++o) {
-        const size_t e = 12 + size_t(o) * 28;
-        size_t p = 12 + size_t(in.u32(e + 16));
-        for (int64_t nprim = in.u32(e + 20); nprim > 0;) {
-            const uint8_t t = in.u8(p + 3);
-            const uint16_t cnt = in.u16(p);
-            if (t == 0x00 || t == 0x04 || t == 0x08 || t == 0x0c || t == 0x10) {
-                p += t == 0x08 || t == 0x0c ? 56 : t == 0x10 ? 20 : 16;
-                nprim -= 1;
-            } else if (t == 0x44) {
-                p += 4 + size_t(cnt) * 12;
-                nprim -= 1;
-            } else {
-                size_t stride = otherGroupStride(t);
-                for (const Poly& k : kPolys)
-                    if (k.type == t) stride = k.stride;
-                if (!stride || !cnt) throw FormatError(std::format("sprite model 0x{:x}: bad group 0x{:02x}", off, t));
-                if (t == 0x64)
-                    for (size_t r = 0; r < cnt; ++r) ids.push_back(in.u16(p + r * 16 + 10));
-                p += cnt * stride;
-                nprim -= cnt;
-            }
-        }
-    }
-    return ids;
-}
-
 struct Builder {
     Scene& s;
     std::map<uint32_t, int32_t> tex{};    // texture id -> Scene::textures index
@@ -318,6 +284,42 @@ struct Builder {
 
 } // namespace
 
+std::vector<SpriteRecord> spriteRecords(std::span<const uint8_t> sec4, uint32_t off, uint32_t size) {
+    if (off > sec4.size() || sec4.size() - off < size) throw FormatError(std::format("sprite model 0x{:x} outside section 4", off));
+    const In in{sec4.subspan(off, size), "sprite model"};
+    std::vector<SpriteRecord> recs;
+    const uint32_t nobj = in.u32(8);
+    for (uint32_t o = 0; o < nobj; ++o) {
+        const size_t e = 12 + size_t(o) * 28;
+        size_t p = 12 + size_t(in.u32(e + 16));
+        for (int64_t nprim = in.u32(e + 20); nprim > 0;) {
+            const uint8_t t = in.u8(p + 3);
+            const uint16_t cnt = in.u16(p);
+            if (t == 0x00 || t == 0x04 || t == 0x08 || t == 0x0c || t == 0x10) {
+                p += t == 0x08 || t == 0x0c ? 56 : t == 0x10 ? 20 : 16;
+                nprim -= 1;
+            } else if (t == 0x44) {
+                p += 4 + size_t(cnt) * 12;
+                nprim -= 1;
+            } else {
+                size_t stride = otherGroupStride(t);
+                for (const Poly& k : kPolys)
+                    if (k.type == t) stride = k.stride;
+                if (!stride || !cnt) throw FormatError(std::format("sprite model 0x{:x}: bad group 0x{:02x}", off, t));
+                if (t == 0x64)
+                    for (size_t r = 0; r < cnt; ++r) {
+                        const size_t q = p + r * 16;
+                        recs.push_back({in.u8(q + 2), in.u16(q + 6), in.u8(q + 8), in.u8(q + 9), in.u16(q + 10),
+                                        int16_t(in.u16(q + 12)), int16_t(in.u16(q + 14))});
+                    }
+                p += cnt * stride;
+                nprim -= cnt;
+            }
+        }
+    }
+    return recs;
+}
+
 Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     if (bze.variant != BzeVariant::LostInTime) throw FormatError("buildLitScene: not a Lost in Time BZE");
     const int i1 = bze.find(1), i3 = bze.find(3), i4 = bze.find(4);
@@ -380,8 +382,25 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     // Runtime-verified on L02A1 links 16/63 (alias table traces, GAMEPLAY_STATUS.md). Without such a list the
     // records are cycled in order, 2 ticks per frame (Inferred).
     std::map<uint16_t, std::pair<uint16_t, std::vector<uint16_t>>> sprites;  // asset id -> (class, frame tex ids)
-    for (const auto& [aid, a] : all)
-        if (a.tag == 0x40) sprites[aid] = {a.role, spriteTexIds(s4, a.off, a.size)};
+    for (const auto& [aid, a] : all) {
+        if (a.tag != 0x40) continue;
+        auto& [cls, ids] = sprites[aid];
+        cls = a.role;
+        // Scene::sprites: the type-4 path (0x44c170 -> GL 0x40a6c0) draws record k's whole TIM; ABR as world faces.
+        std::vector<SpriteFrame>& frames = s.sprites[aid];
+        for (const SpriteRecord& r : spriteRecords(s4, a.off, a.size)) {
+            ids.push_back(r.tex);
+            SpriteFrame& f = frames.emplace_back();
+            if (const auto x = b.tex.find(r.tex); x != b.tex.end()) f.texture = x->second;
+            if (r.flags & 8) {
+                const uint8_t abr = r.tpage >> 5 & 3;
+                f.blend = abr == 0 ? Blend::Alpha : abr == 2 ? Blend::Subtract : Blend::Additive;
+                f.alpha = abr == 0 ? 128 : abr == 3 ? 64 : 255;
+            } else if (f.texture >= 0 && s.textures[size_t(f.texture)].hasAlpha) {
+                f.blend = Blend::AlphaTest;
+            }
+        }
+    }
     // Overlay font: the first class-8 sprite asset listed (tag 0x0f) by template entity 68 (0x44ccd0 / 0x44e310 take
     // the actor's first asset with +0x4e == 8). Every record is a whole TIM at u, v = 0 (63/63 levels, Inferred
     // from the data: w, h = TIM size).

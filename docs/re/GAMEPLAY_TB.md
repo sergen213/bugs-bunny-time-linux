@@ -259,7 +259,7 @@ Probe: `tools/re/tb_moves.py`.
 | smoothing | §1.5 step 2 (k = 0 keeps the axis) | `0x4450c0` | O | H |
 | **gravity** | `vy += 5·dt` = **+10 u/tick²** unless `+0x24 & 0x200` (flagsA 0x2000000 hold), `+0x20 & 0x200`, flagsA & 0xa2008601, flagsC & 1 | `0x4450c0` | O; R **Verified** (vy +160 ×16 every tick; runtime: RUNTIME_REFERENCE.md §4) | H |
 | terminal velocity | **none** (k_y = 0 while falling); s16 wrap caught at the tail of `0x453de0`: `y < −30000 && prevY > 30000 && vy > 0xc80` → respawn at checkpoint `0x4d26e0..ec`, camera reset | | O | M |
-| ground grip | floor contact: tangential `v += ((target − v)·g + 0xfff) >> 12`, `g = clamp(grip·friction >> 12 + actor+0x40, 0, 0x1000)` (actor support: `actor+0x3a` instead of friction); grip = record `+0x10`: 3000 idle/jump, **1500 Bugs walk/run, 3500 Taz walk**, 750 skid, 1000 Taz spin, 4096 swim/climb; floor contact also takes `5·dt·g >> 12` off the upward speed | `0x443f40` | O | H (code) / M (values) |
+| ground grip | floor contact: tangential `p = (target − v)·g; v += (p > 0 ? p + 0xfff : p) >> 12` (a residual −1 still reaches 0; ARCA01 spin knock-back stops dead as the oracle F2), `g = clamp(grip·friction >> 12 + actor+0x40, 0, 0x1000)` (actor support: `actor+0x3a` instead of friction); grip = record `+0x10`: 3000 idle/jump, **1500 Bugs walk/run, 3500 Taz walk**, 750 skid, 1000 Taz spin, 4096 swim/climb; floor contact also takes `5·dt·g >> 12` off the upward speed | `0x443f40` | O | H (code) / M (values) |
 | air control | jump (`+0x20` bit 1): kx = kz = 10 → ¼ of the error per tick; **walking off a ledge**: k = 0 → momentum kept, no steering until landing | `0x4450c0` | O (feel I) | M |
 | speed cap | flagsC 0x20: horizontal \|v\| ≤ `cap·16`, excess −10 u/tick | `0x4450c0` | O | H |
 | invulnerability | 30 ticks (`DAT_004d271c = 0x1e`, damage action `0x431a40`) | | O | H |
@@ -487,7 +487,10 @@ the camera (flagsB 0x10, not ported: partner x/z differ by ≤ 5 from H's (+4, �
 ### 4.3 Camera — dispatcher `0x439700(target)`, follow `0x437800` (O/H unless noted)
 
 Camera block `B = 0x4d5120 + view·0x2c0`: `+4` eye, `+0x10` look-at, `+0x2c` spring body P, `+0x3c` script flags,
-`+0x44` override actor, `+0xbc` rail camera (`0x43a2c0`), `+0xc0..c8` body velocity (Q12), `+0xe0` follow flags
+`+0x44` override actor (`0x4d5164`: a class-16 director `0x450bc0` with flags1 0x10, or 0x4 within 2000 xz of the
+focus, stores itself each tick; `0x439700` then passes it as the follow's actor — aim in 1P, line of sight, reset —
+while its state has flagsB 0x200, setting its +0x20 0x80000000; cleared at level load and by script holds 0x300),
+`+0xbc` rail camera (`0x43a2c0`), `+0xc0..c8` body velocity (Q12), `+0xe0` follow flags
 (`0x4d5200`), `+0xe4` L2/R2 accumulator, `+0xe8` settle counter, `+0x118..` constants set once by `0x437800`
 (R **Verified**: peek `0x4d5238` s32×13 = the values below; spring rest `0x4d9ae0` = 1200, blend `0x4d9acc` = 0x1000;
 look-at = T.y − 300; 2P framing `e > 15 → D += e`, e clamped 40 — runtime: RUNTIME_REFERENCE.md §4):
@@ -777,10 +780,17 @@ Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
 * **View list** `0x45eee0` (per view, after the camera): `0x45ee90` sets +0x24 |= 4 for all; contact list
   `0x4d2734` = flags0 & 0x2000100 == 0x100 (not +0x6e 0x20, not an absent partner); activation block +0x118 must
   return 0x40000000; sleep +0x50 -= (|Δcamera|/4·0x4038 + 0x302a) >> 12; +0x6e (tag 0x39 @0): 0x20 never, 2 range
-  +0x76 (@2) from the camera eye (cull → +0x50 = excess), 4/8 frustum (z + r(+0x4a) < H=400; |x|·0xd7a − z·0x8a0;
-  up |y|·0xf77 − z·0x419; down y·0xf6d − z·0x43e; > r = out; 4 adds an 8-corner box test), 0x10/0x40 keep
+  +0x76 (@2) from the camera eye (cull → +0x50 = excess), 4/8 frustum on view coordinates whose y `0x406280` scales
+  by `0x639a94`/4096 = 2560 (z + r(+0x4a) < H=400; |x|·0xd7a − z·0x8a0; up |y|·0xf77 − z·0x419; down y·0xf6d −
+  z·0x43e; > r = out; a sphere cutting a plane (d + r > 0) with a model or +0x24 0x8000: the box's centre sphere,
+  radius² = half-extent², out when a plane distance d ≥ 1 has d² − r² ≥ 1; then flag 4 tests the 8 corners: out
+  unless they reach all of x≤0, x>0, y<0, y≥0 halves or lie inside a plane), 0x10/0x40 keep
   out-of-view entities listed, 1 world-slot test, 0x400 LOD, 0x80 shadow list. Loop `0x460630` ticks listed entities
   by class table `0x4cea60` (14 `0x453de0`, 16 `0x450bc0`, 35 `0x450cd0`, 20 `0x453d00`, 2 `0x4599e0`, 9 `0x44d6f0` …).
+  List order (array `[0x4d2744]`, −1 slots skipped): the focus `0x4d236c`, the partner `0x4d2368`, then the others in
+  entity-list order; the build loop takes flags0 0x4000000 players out of its in-order append (`0x45ff56`) and sets
+  the focus / partner from A4 & 4 before this tick's switch; the class-6 HUD entity goes last (runtime: view list read
+  live, rand() callers per tick; RUNTIME_REFERENCE §3 rand() row).
 * **Hits** (`0x453de0`): intake at the head (vulnerable state flagsA 0x10000 vs +0x20 0x8000000 player hits,
   flagsB 8 vs 0x4000000 enemy hits, flagsB 0x8000 stomps, +0x24 0x40000000 forced): health +0x3c −= +0x66, players
   flash 60 ticks (+0x28 0x200), < 1 → +0x20 0x2000000, event 0x10000000 (overrides `0x4d2720`/`0x4d5948`, then
@@ -803,5 +813,10 @@ Independent verdicts for the same captures: RUNTIME_REFERENCE.md §4.
 - Trigger zones: chunk 0x09 aux items (0x30 B, list 0x4d2760: +0x10 origin, +0x18 rot, +0x20 x extent, +0x22 height,
   +0x24 z extent, +8/+0xc flags, +0x28 blocks keyed by entity id; 10 any player, 8 Bugs, 9 Taz). 0x44f550 runs them for
   class-14 entities with flags0 0x1000000 whose position lies in the (inverse-yaw) box (0x448780); id 0x15 with
-  flags1 & 2 removes the entity; flags +0xc 0x1000 = water (+0x1a2 depth, +0x24 0x40). Not ported (starts the intro).
+  flags1 & 2 removes the entity; flags +0xc 0x1000 = water (+0x1a2 depth, +0x24 0x40). Box test 0x448780: entity top
+  (y + box +0x6a) ≤ origin y, y − origin ≥ height (+0x22, negative), x/z of (pos − origin) rotated by 0x1000 − angles in
+  [0, extent]; blocks pushed at the head of +0x28 (first id match wins); run at the end of 0x453de0 (flags0 0x1000000 or
+  state flagsB 0x800000), event dispatched. Ported (`TbWorld::zoneTick`; water not). ARCA01 zone block 10 → director 264
+  block 394 → template 425 whose anim carries a camera node (0x464820: eye = node origin, look = eye + R·(0,0,1200),
+  body = eye; render pass after the first tick) = the intro fly-over (oracle `local/wine/tbintro/`).
 - VM register: S[0x1fe..0x1ff] is the running entity's +0x126 (0x45d7a0 entry/exit).

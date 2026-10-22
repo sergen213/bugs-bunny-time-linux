@@ -4,6 +4,7 @@
 #include "bb/game/lit_world.h"
 
 #include <algorithm>
+#include <initializer_list>
 
 namespace bb::game {
 namespace {
@@ -13,14 +14,15 @@ constexpr uint16_t kDigit[10] = {472, 473, 474, 475, 476, 477, 478, 479, 480, 48
 // timer p..p+2 = stopwatch hands and face; boss p..p+2; slots 26-28 inventory items).
 constexpr uint16_t kIcon[32] = {486, 0,   0,   485, 0,   0,   0,   487, 0,   0,   0,   488, 493, 492, 489, 490,
                                 491, 495, 496, 494, 924, 0,   0,   0,   925, 923, 961, 483, 962, 0,   0,   0};
-// 0x4ae288: element origin per slot, 512x240 screen space centred.
-constexpr int16_t kPos[47][2] = {
+// 0x4ae288: element origin per slot, 512x240 screen space centred; 48-55 = pause-screen golden / clock totals (0x449d80).
+constexpr int16_t kPos[56][2] = {
     {-228, -80}, {-200, -80}, {-176, -80}, {180, -80}, {204, -80}, {228, -80}, {228, -80}, {160, 90}, {204, 90},
     {228, 90},   {228, 90},   {-220, 90},  {-64, 89},  {-16, 90},  {-32, -80}, {0, -80},   {32, -80}, {-220, 90},
     {-220, 90},  {-220, 90},  {-224, 82},  {-200, 82}, {-176, 82}, {-152, 82}, {0, 0},     {0, 0},    {0, 95},
     {0, 90},     {0, 90},     {-96, 58},   {-28, 58},  {-4, 58},   {20, 58},   {44, 58},   {68, 58},  {-96, 30},
     {-28, 30},   {-4, 30},    {20, 30},    {44, 30},   {68, 30},   {-96, 86},  {-28, 86},  {-4, 86},  {20, 86},
-    {44, 86},    {68, 86}};
+    {44, 86},    {68, 86},    {0, 0},      {156, -80}, {180, -80}, {204, -80}, {228, -80}, {136, 80}, {180, 80},
+    {204, 80},   {228, 80}};
 // Exe level table 0x4ad380 +4: loading-screen level id per level id (0 = none).
 constexpr uint8_t kLoading[111] = {
     1,   0,  1,  107, 106, 106, 103, 105, 105, 94, 94, 94, 94, 94, 94, 97, 97, 96, 96, 96, 96, 99,  99,  99,
@@ -180,6 +182,38 @@ void LitWorld::hudBoss(size_t p) {
         hud[p + 1].rot = {};
     }
     hud[p + 1].scaleX = 0x1000 - 0x20 * shown;
+}
+
+// 0x449d80 (pause entry, HUD hidden): carrots and health as the HUD shows them, then golden carrots G[7] | G[0xfc] << 8
+// and clocks G[5] as 3-digit counters with their icons (slots 3-6 / 7-10 at origins 48-55), the completion
+// (golden + clocks) * 100 / 457 with a percent sign (slots 20-23, leading zeros dropped) and the level's "n / max"
+// lines for golden carrots G[G[0xb6]] / G[0xb7], clocks G[G[0xb8]] / G[0xb9] (moved up a line without the golden one)
+// and G[4] / G[0xba], each at depth 1500. All shown instantly (hold 60, z 1200); hudTick is frozen while paused.
+void LitWorld::hudTotals() {
+    hudCounter(0, G[3], true);
+    hudHealth(0xe, true);
+    const auto row = [&](size_t slot, size_t pos, std::initializer_list<uint16_t> tmpls, int32_t z = 0) {
+        for (const uint16_t t : tmpls) {
+            hudShow(slot, t, pos++, true);
+            if (z) hud[slot].z = z;
+            ++slot;
+        }
+    };
+    const auto d = [](int v) { return kDigit[v % 10]; };
+    const int golden = goldenCarrots();
+    row(3, 48, {kIcon[3], kDigit[golden / 100 & 0xf], d(golden / 10), d(golden)});
+    row(7, 52, {kIcon[7], kDigit[G[5] / 100], d(G[5] / 10), d(G[5])});
+    const int pc = (golden + G[5]) * 100 / 0x1c9;
+    const uint16_t h = kDigit[pc / 100 & 0xf], t = d(pc / 10);
+    if (h != kDigit[0]) hudShow(20, h, 20, true);
+    if (h != kDigit[0] || t != kDigit[0]) hudShow(21, t, 21, true);
+    row(22, 22, {d(pc), kIcon[20]});
+    const auto line = [&](size_t slot, size_t pos, uint16_t icon, int v, int max) {
+        row(slot, pos, {icon, d(v / 10), d(v), kIcon[25], d(max / 10), d(max)}, 0x5dc);
+    };
+    if (G[0xb7]) line(29, 29, kIcon[3], G[G[0xb6]], G[0xb7]);
+    if (G[0xb9]) line(35, G[0xb7] ? 35 : 29, kIcon[7], G[G[0xb8]], G[0xb9]);
+    if (G[0xba]) line(41, 41, kIcon[24], G[4], G[0xba]);
 }
 
 void LitWorld::hudTick() {  // 0x44acc0

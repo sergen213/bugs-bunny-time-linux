@@ -202,6 +202,14 @@ std::expected<Manifest, std::string> check(const std::string& manifestUrl, const
 std::optional<std::string> currentVersion(const fs::path& root) { return linkVersion(root / "current"); }
 std::optional<std::string> previousVersion(const fs::path& root) { return linkVersion(root / "previous"); }
 
+fs::path handoffTarget(const fs::path& root, std::string_view running) {
+    const auto cur = currentVersion(root);
+    const auto have = parseVersion(cur.value_or("")), run = parseVersion(running);
+    const fs::path exe = root / "current" / kLauncherArtifact;
+    if (!have || (run && *have <= *run) || access(exe.c_str(), X_OK) != 0) return {};
+    return exe;
+}
+
 std::expected<fs::path, std::string> install(const Manifest& m, const Options& o, std::string_view running) {
     const auto target = parseVersion(m.version);
     if (!target) return std::unexpected("bad manifest version");

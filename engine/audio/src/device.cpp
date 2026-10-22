@@ -59,7 +59,7 @@ void AudioDevice::queue(unsigned buffer) {
     }
     if (scratch_.empty()) return;
     alBufferData(buffer, music_->layout() == XaLayout::Stereo ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16,
-                 scratch_.data(), ALsizei(scratch_.size() * sizeof(int16_t)), ALsizei(kXaRate));
+                 scratch_.data(), ALsizei(scratch_.size() * sizeof(int16_t)), ALsizei(music_->rate()));
     alSourceQueueBuffers(musicSrc_, 1, &buffer);
 }
 

@@ -87,12 +87,25 @@ Settings parseSettings(std::string_view text, std::vector<std::string>* warnings
         else if (key == "fov") ok = number(v, s.fov, 30.0f, 120.0f);
         else if (key == "msaa") ok = number(v, s.msaa, 0, 8) && (s.msaa & (s.msaa - 1)) == 0 && s.msaa != 1;
         else if (key == "vsync") ok = boolean(v, s.vsync);
+        else if (key == "shadows") ok = oneOf(v, s.shadows, {"off", "map", "rt", "rt_ao"});
+        else if (key == "reflections") ok = boolean(v, s.reflections);
+        else if (key == "upscaling") ok = oneOf(v, s.upscaling, {"off", "fsr_quality", "fsr_balanced", "fsr_performance", "native_aa"});
+        else if (key == "frame_generation") ok = boolean(v, s.frameGeneration);
         else if (key == "music_volume") ok = number(v, s.musicVolume, 0, 100);
         else if (key == "sfx_volume") ok = number(v, s.sfxVolume, 0, 100);
         else if (key == "tb_brightness") ok = number(v, s.tbBrightness, 0.25f, 2.0f);
         else if (key == "tb_renderer") ok = number(v, s.tbRenderer, 1, 2);
         else if (key == "tb_details") ok = number(v, s.tbDetails, 0, 2);
         else if (key == "update_url") s.updateUrl = v;
+        else if (key == "mods") {
+            s.mods.clear();
+            for (size_t a = 0; a <= v.size();) {
+                size_t b = v.find(',', a);
+                if (b == v.npos) b = v.size();
+                if (const std::string_view id = trim(v.substr(a, b - a)); !id.empty()) s.mods.emplace_back(id);
+                a = b + 1;
+            }
+        }
         else if (key.starts_with("bind.")) {
             const std::string action = key.substr(5);
             ok = std::ranges::find(kActions, action) != std::end(kActions) && !v.empty();
@@ -119,12 +132,19 @@ std::string formatSettings(const Settings& s) {
     kv("fov", s.fov);
     kv("msaa", s.msaa);
     kv("vsync", s.vsync ? "true" : "false");
+    kv("shadows", s.shadows);
+    kv("reflections", s.reflections ? "true" : "false");
+    kv("upscaling", s.upscaling);
+    kv("frame_generation", s.frameGeneration ? "true" : "false");
     kv("music_volume", s.musicVolume);
     kv("sfx_volume", s.sfxVolume);
     kv("tb_brightness", s.tbBrightness);
     kv("tb_renderer", s.tbRenderer);
     kv("tb_details", s.tbDetails);
     kv("update_url", s.updateUrl);
+    std::string mods;
+    for (const std::string& m : s.mods) mods += (mods.empty() ? "" : ",") + m;
+    kv("mods", mods);
     for (const auto& [a, k] : s.bindings) kv("bind." + a, k);
     for (const auto& [k, v] : s.unknown) kv(k, v);
     return o;

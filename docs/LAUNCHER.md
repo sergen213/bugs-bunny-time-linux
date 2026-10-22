@@ -11,6 +11,8 @@ smoke on KDE Wayland). The game does not depend on Qt: both share `apps/bbtime/s
 | `$XDG_DATA_HOME/bbtime/{lit,tb}/Datas/` | import wizard, only if "Copy" is chosen | copy of the original `Datas/` |
 | `$XDG_DATA_HOME/bbtime/saves/{lit,tb}/` | the game | native saves (`bbtime::saveDir()`); LiT: `Savegame<N>.dat`, `Savedata.dat` in the original format (+ `.bak` of the previous file; `docs/formats/SAVE_LIT.md`, `bbtime --slot N`, `--import-saves DIR`) |
 | `$XDG_DATA_HOME/bbtime/backups/<UTC stamp>/` | Saves tab | full copies of `saves/` |
+| `$XDG_DATA_HOME/bbtime/mods/<id>/` | Mods page (New mod, Install from .zip, Remove) | mods (`docs/MODDING.md`) |
+| `$XDG_DATA_HOME/bbtime/modkit-export/` (default, any folder can be picked) | Mods page "Export assets…" (`bbtime-modkit export`) | the user's own exported originals |
 | `$XDG_DATA_HOME/bbtime/app/` | updater | see `docs/UPDATES.md` |
 | `$XDG_STATE_HOME/bbtime/logs/bbtime-*.log` | launcher | stdout+stderr of games started from the launcher |
 
@@ -35,11 +37,16 @@ out-of-range values are skipped with a `line N:` warning and the default stays. 
 | `fullscreen`, `vsync` | `true/false`, `1/0`, `yes/no`, `on/off` (false, true) | window |
 | `fov` | 30–120 degrees vertical at 4:3, Hor+ wider (60) | `Settings::vfovDeg` |
 | `msaa` | 0, 2, 4, 8 (4) | `WindowConfig::msaaSamples` |
+| `shadows` | `off` \| `map` \| `rt` \| `rt_ao` (`rt_ao`) | Vulkan + Enhanced dynamic shadows (`rt`/`rt_ao` fall back to `map` without ray queries) |
+| `reflections` | boolean (`true`) | Vulkan + Enhanced ray-traced reflections on water / ice / polished floors (off without ray queries) |
+| `upscaling` | `off` \| `fsr_quality` \| `fsr_balanced` \| `fsr_performance` \| `native_aa` (`off`) | Vulkan + Enhanced AMD FSR 3.1.4 (render scale 1/1.5, 1/1.7, 1/2, 1); replaces MSAA while on |
+| `frame_generation` | boolean (`false`) | Vulkan + Enhanced FSR frame generation (one interpolated frame per rendered frame; with `upscaling = off` it runs FSR native AA) |
 | `music_volume`, `sfx_volume` | 0–100 (100) | audio |
 | `tb_brightness` | 0.25–2 (1) | TB texture brightness = `config.pc` +0xe0 of the TB Video page (`bb::tbAdjustColor`) |
 | `tb_renderer`, `tb_details` | 1–2 (2), 0–2 (2) | TB Video page renderer / detail choice, kept and shown only |
 | `bind.<action>` | comma-separated SDL key names | keyboard map |
-| `update_url` | https URL of `manifest.json` (empty) | launcher updater only |
+| `mods` | comma-separated mod ids in load order, later wins (empty) | game: mods applied to every level (`docs/MODDING.md`); `--mods ID,…` / `--no-mods` override |
+| `update_url` | https URL of `manifest.json` (empty = the GitHub release channel, `docs/UPDATES.md`) | launcher updater only; tests/dev override, not in the UI |
 
 Actions (`bbtime::kActions`) and defaults = LiT `config.pc` map (`docs/re/GAMEPLAY.md` §2.1): `up` Up, `down` Down,
 `left` Left, `right` Right, `camera_left` Q, `camera_right` W, `roll` E, `action` R, `look` A, `crouch` S, `jump` D,
@@ -50,7 +57,20 @@ override. Verified 2026-10-18: with a launcher-written `settings.ini` (`width/he
 = wizard copies) `bbtime --game lit --hidden --screenshot` loaded 167 LiT / 58 TB levels from the copies and rendered
 at 800×600 logical (1120×840 at 1.4× scale); `--width 640 --height 480` overrode it (896×672).
 
-## Tabs
+## Look
+
+The launcher wears the imported games' own front-end art, only read from `tb_root` / `lit_root` (case-insensitive
+paths): the TB `menu.men` spiral page `Datas/data/pc03.bmp` as window background (LiT only: `Datas/ScrnBgEn.bmp`
+darkened), the TB menu picture buttons (`Play2`, `Video`, `Controls`, `LoadGame`, `Load`, `Config`, `Language`,
+`Quit`, `Play1D`; hover/selected = the `…D.bmp` variant) as the page column, TB's Brady Bunch font
+(`bradybun.ttf`) with the TB text colours (red labels, yellow hover/selection, orange keys), and pages inside the LiT
+title slot-menu panel (navy, two gold rules) — the same palette as the collection menu. Both title screens
+(`ScrnBgEn.bmp`, `english.bmp`) are the game cards on the Games page; clicking one selects what Play starts (again:
+collection menu). Without an import it paints the spiral as rings, uses the system font and text-only buttons;
+the wizard re-dresses it on Finish. Not used: the LiT overlay glyph font (it lives in `TITLE.bze` and needs the
+game's level loader). Screenshots: `local/shots/w9launcher/`.
+
+## Pages
 
 * **Games** — background `checkInstall` of the configured roots on start; "Import original games…" wizard:
   1. pick a folder per game (disc mount, install dir or extracted ISO; the one with `Datas/`);
@@ -59,12 +79,22 @@ at 800×600 logical (1120×840 at 1.4× scale); `--width 640 --height 480` overr
      detected game matches the slot, an executable matched, `Datas/` exists and nothing failed to decode;
   3. use in place (read-only) or copy `Datas/` to `$XDG_DATA_HOME/bbtime/<game>/` with a progress bar
      (`<dst>.partial` then rename; cancel removes the partial copy). Finish writes `lit_root`/`tb_root`.
-* **Graphics & audio** — renderer, fidelity, resolution (+ presets), fullscreen, vsync, FOV, MSAA,
-  music/effects volume.
+* **Graphics & audio** — renderer, fidelity, resolution (+ presets), fullscreen, vsync, FOV, MSAA, shadows, reflections, upscaling, frame generation
+  (Vulkan), music/effects volume.
 * **Controls** — editable key table, restore defaults; connected gamepads via SDL3 (Qt 6 has no gamepad module).
 * **Saves** — back up now, restore selected (the current saves are backed up first as `…-before-restore`).
+* **Mods** — installed mods of `$XDG_DATA_HOME/bbtime/mods/` (name, version, author, game); the tick enables a
+  mod, ▲ / ▼ set the load order (top to bottom, later wins; saved as `mods = …`). "New mod…" creates the folder
+  with its `mod.json` and the empty `textures/ models/ animations/ sounds/ music/` folders, "Open folder",
+  "Install from .zip…" (archive with `mod.json` at its root or in one top folder; extracted with `unzip` or
+  `bsdtar`, which refuse `../` paths; the folder is named after the `mod.json` id), "Remove" (deletes the folder
+  after a confirmation), "Export assets…" (game / level / kind → `bbtime-modkit export`, next to the launcher or in
+  the build tree), "Refresh". Below: the selected mod's details and validation (`bb::mods::validate`, run in the
+  background; it decodes the named levels to check texture ids) and the conflicts of the enabled set (keys that
+  several enabled mods provide, and which one wins). Screenshot: `local/shots/w9mod/launcher_mods_page.png`.
 * **Logs** — game logs, newest first; live while a game started from the launcher runs.
-* **Updates** — signed update check/install/rollback (`docs/UPDATES.md`).
+* **Updates** — signed update check/install/rollback against the GitHub release channel; after an install that
+  brings a newer launcher it restarts into it (`docs/UPDATES.md`).
 * **About** — version and `CHANGELOG.md` (compiled in as a Qt resource).
 * **Play** — saves settings, starts `bbtime` (`--game lit|tb` unless "Collection menu"): first
   `$XDG_DATA_HOME/bbtime/app/current/bbtime`, then next to the launcher, then the build tree

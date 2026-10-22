@@ -38,7 +38,7 @@ std::optional<std::vector<bb::game::PadInput>> parseAutoplay(std::string_view sc
 glm::vec3 toEngine(const bb::game::V3& v);  // PS1 (x, y down, z) -> engine (x, -y, -z), scene.h convention
 
 struct Play {
-    struct Snap { bb::game::V3 eye, target, player; int16_t yaw = 0, lean = 0; };
+    struct Snap { bb::game::V3 eye, target, player; int16_t yaw = 0, lean = 0; std::array<int16_t, 3> parent{}; };
     bb::game::LitWorld world;
     Snap prev, cur;
     bool freeFly = false;  // F1: debug free-fly camera (simulation keeps running)
@@ -50,7 +50,7 @@ struct Play {
     Snap view(float a, bool interpolate) const;
 
 private:
-    Snap snap() const { return {world.cam.eye, world.cam.target, world.p.pos, world.p.yaw, world.p.lean}; }
+    Snap snap() const { return {world.cam.eye, world.cam.target, world.p.pos, world.p.yaw, world.p.lean, world.playerParentRot()}; }
 };
 
 // TB play mode: view of the bb_game TbWorld (both characters, camera), interpolated like Play.

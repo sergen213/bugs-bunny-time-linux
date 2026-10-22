@@ -1,6 +1,7 @@
 #!/bin/sh
 # Validation-clean smoke of the Vulkan backend through the real app: menus + 3 LiT + 3 TB levels with
-# --vk-validation (Khronos layer + sync validation). Fails on any "VK-VALIDATION" line or missing summary.
+# --vk-validation (Khronos layer + sync validation), incl. Enhanced sun shadows as a shadow map and with ray tracing
+# forced off (fallback), ray-traced reflections (water L02A1, ice VICASG01) and FSR upscaling / frame generation. Fails on any "VK-VALIDATION" line or missing summary.
 # usage: validation_levels.sh BBTIME_BINARY OUTDIR   (needs BBTIME_DATA; exit 77 = skipped)
 bin=$1
 out=$2
@@ -37,4 +38,10 @@ run tb_ARCA01 --game tb --level ARCA01
 run tb_TRCA01 --game tb --level TRCA01
 run tb_VICA01 --game tb --level VICA01
 run lit_L01A_original --game lit --level L01A --fidelity original
+run tb_ARCA01_shadowmap --game tb --level ARCA01 --shadows map
+run lit_L02A1_fsr_fg --game lit --level L02A1 --upscaling fsr_quality --frame-generation on --autoplay 'U*20'
+run tb_ARCA01_fsr_perf --game tb --level ARCA01 --upscaling fsr_performance --shadows map
+run tb_VICASG01_native_aa --game tb --level VICASG01 --upscaling native_aa --frame-generation on
+export BBTIME_VK_NO_RT=1 BBTIME_VK_NO_FSR=1
+run lit_L01A_no_rt --game lit --level L01A --shadows rt_ao --upscaling fsr_quality --frame-generation on
 exit $fail

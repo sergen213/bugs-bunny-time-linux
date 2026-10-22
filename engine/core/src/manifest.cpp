@@ -82,7 +82,7 @@ void inspectBze(ManifestFile& mf, std::vector<uint8_t> bytes) {
     mf.tbBudget = bze.tbBudget;
     for (size_t i = 0; i < bze.sections.size(); ++i) {
         ManifestSection& ms = mf.sections.emplace_back(ManifestSection{.section = bze.sections[i]});
-        ms.compressed = bze.variant == BzeVariant::LostInTime;
+        ms.compressed = bze.compressed;
         std::vector<uint8_t> payload;
         try {
             payload = bze.payload(i);

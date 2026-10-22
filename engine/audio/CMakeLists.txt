@@ -2,7 +2,7 @@ find_package(OpenAL REQUIRED)
 
 add_library(bb_audio STATIC src/codec.cpp src/device.cpp)
 target_include_directories(bb_audio PUBLIC include)
-target_link_libraries(bb_audio PUBLIC bb_core PRIVATE OpenAL::OpenAL)
+target_link_libraries(bb_audio PUBLIC bb_core PRIVATE OpenAL::OpenAL bb_stb)  # bb_stb: Ogg Vorbis mod music
 
 # Dev tool: xa2wav IN.xa OUT.wav (C++ twin of tools/re/xa2wav.py).
 add_executable(xa2wav tools/xa2wav.cpp)

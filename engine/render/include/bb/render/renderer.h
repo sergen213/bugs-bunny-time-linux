@@ -20,6 +20,19 @@ enum class Fidelity : uint8_t {
     Enhanced, // trilinear + anisotropic, MSAA, Hor+ at any aspect
 };
 
+// Enhanced dynamic sun shadows (Vulkan backend only; the originals have no dynamic lights, docs/ROADMAP.md "Ray
+// tracing"). Rt / RtAo fall back to Map on devices without ray queries.
+enum class Shadows : uint8_t {
+    Off,
+    Map,  // cascaded shadow map
+    Rt,   // ray-query shadows
+    RtAo, // ray-query shadows + ray-traced ambient occlusion
+};
+
+// Enhanced FSR 3.1.4 upscaling (Vulkan backend only). Render scale per axis: Quality 1/1.5, Balanced 1/1.7,
+// Performance 1/2, NativeAa 1 (FSR as anti-aliasing).
+enum class Upscaling : uint8_t { Off, Quality, Balanced, Performance, NativeAa };
+
 struct WindowConfig {
     int width = 1280, height = 720;
     bool fullscreen = false;
@@ -34,6 +47,10 @@ struct Settings {
     bool pillarbox = true;   // Original mode only: draw 3D in a centered 4:3 viewport
     bool frame43 = false;    // both modes: the original 4:3 framing (51.28°, pillarbox), e.g. 3-D menus under 4:3 text
     bool msaa = true;        // Enhanced mode only
+    Shadows shadows = Shadows::RtAo; // Enhanced mode only, not with frame43 (3-D menus keep the original look)
+    bool reflections = true;         // ray-traced reflections on water / ice / polished floors (Enhanced, ray queries)
+    Upscaling upscaling = Upscaling::Off; // Enhanced, Vulkan; replaces MSAA while on
+    bool frameGeneration = false;    // FSR frame generation (Enhanced, Vulkan; upscaling off = FSR native AA)
     bool fog = true;
     float fogStart = 30.0f, fogEnd = 120.0f; // linear fog, view-space distance; fogEnd <= fogStart disables
     // Clear and fog colour: black in both exes (LiT SetBackColor 0x40cc10 is only ever called with 0,0,0 and its fog

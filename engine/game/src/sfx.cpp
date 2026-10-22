@@ -11,11 +11,6 @@ namespace {
 
 uint16_t u16(std::span<const uint8_t> d, size_t o) { return uint16_t(d[o] | d[o + 1] << 8); }
 
-int32_t approxLen(int32_t x, int32_t y, int32_t z) {  // 0x407970 / TB 0x404060
-    const int32_t a = std::abs(x), b = std::abs(y), c = std::abs(z), hi = std::max(a, b), lo = std::min(a, b);
-    return hi > c ? hi + ((c + lo) >> 2) : c + ((hi + lo) >> 2);
-}
-
 }  // namespace
 
 std::array<uint8_t, 2> sfxLevels(const V3& src, const V3& eye, const V3& target, int32_t maxDist, bool tb) {

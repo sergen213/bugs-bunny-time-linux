@@ -22,7 +22,8 @@ int64_t dist2(const V3& a, const V3& b) {
 // 0x40000000; the sleep counter +0x50 drops by the camera's movement (|Δ|/4 · 0x4038 + 0x302a >> 12) and must be
 // < 1; +0x6e 0x20 never lists; 2 culls beyond +0x76 from the camera (sleep = the excess) unless 0x40; 4/8 test the
 // bounding sphere (+0x4a) against the near plane (z + r < 400) and the side planes (0xd7a/0x8a0 x, 0xf77/0x419 up,
-// 0xf6d/0x43e down) and cull unless 0x10/0x40. Listed entities in view clear +0x24 & 4; directors (16/35) stay 4.
+// 0xf6d/0x43e down), refine a cutting sphere with the box (centre sphere, then flag 4's corners) and cull unless
+// 0x10/0x40. Listed entities in view clear +0x24 & 4; directors (16/35) stay 4.
 void TbWorld::viewList() {
     const TbActor& F = actors[size_t(focus())];
     const V3 eye = cam.eye == V3{} ? F.pos : cam.eye;
@@ -64,15 +65,50 @@ void TbWorld::viewList() {
                 }
             }
             if ((a.view & 0xc) && !out) {
-                const double p[3] = {double(a.pos.x - eye.x), double(a.pos.y - eye.y), double(a.pos.z - eye.z)};
-                const int32_t z = int32_t(p[0] * f[0] + p[1] * f[1] + p[2] * f[2]);
-                const int32_t x = int32_t(p[0] * r[0] + p[1] * r[1] + p[2] * r[2]);
-                const int32_t y = int32_t(p[0] * d[0] + p[1] * d[1] + p[2] * d[2]);
-                const int32_t rad = a.radius;
-                const int32_t ux = (std::abs(x) * 0xd7a - z * 0x8a0) >> 12;
-                const int32_t uy = y < 0 ? (-y * 0xf77 - z * 0x419) >> 12 : (y * 0xf6d - z * 0x43e) >> 12;
-                // ponytail: bounding sphere only; flag 4's eight-corner box refinement is not ported.
+                // 0x406280 scales view y by 0x639a94 / 4096 (2560): the planes below then give the 51.3° vertical FOV.
+                constexpr double ys = 2560.0 / 4096;
+                auto view = [&](double px, double py, double pz) {
+                    px -= eye.x, py -= eye.y, pz -= eye.z;
+                    return std::array<int32_t, 3>{int32_t(px * r[0] + py * r[1] + pz * r[2]),
+                                                  int32_t((px * d[0] + py * d[1] + pz * d[2]) * ys),
+                                                  int32_t(px * f[0] + py * f[1] + pz * f[2])};
+                };
+                // Signed distances to the side and top / bottom planes (unit normals, Q12).
+                auto planeX = [](int32_t x, int32_t z) { return (std::abs(x) * 0xd7a - z * 0x8a0) >> 12; };
+                auto planeY = [](int32_t y, int32_t z) {
+                    return y < 0 ? (-y * 0xf77 - z * 0x419) >> 12 : (y * 0xf6d - z * 0x43e) >> 12;
+                };
+                const auto [x, y, z] = view(a.pos.x, a.pos.y, a.pos.z);
+                const int32_t rad = a.radius, ux = planeX(x, z), uy = planeY(y, z);
                 out = z + rad < 400 || ux > rad || uy > rad;
+                // A sphere cutting a side plane: the box's own sphere (centre, half diagonal) decides, and with flag 4
+                // its eight corners: out when no corner reaches both halves inside the side and the top / bottom planes.
+                if (!out && (ux + rad > 0 || uy + rad > 0) && (a.model || (a.f24 & 0x8000))) {
+                    const auto& b = a.box;
+                    const int32_t hx = (b[3] - b[0]) >> 1, hy = (b[4] - b[1]) >> 1, hz = (b[5] - b[2]) >> 1;
+                    const int32_t r2 = hx * hx + hy * hy + hz * hz;
+                    // ponytail: own rotation only (RotMatrix pitch / yaw / roll); 0x45eee0 also chains the parent's
+                    // matrix list (+0xe8) for attached entities.
+                    Mat M;
+                    rotMatrixXYZ(M, a.pitch, a.yaw, a.roll);
+                    auto world = [&](int32_t lx, int32_t ly, int32_t lz) {
+                        const V3 w = apply(M, {lx, ly, lz});
+                        return view(a.pos.x + w.x, a.pos.y + w.y, a.pos.z + w.z);
+                    };
+                    const auto [cx, cy, cz] = world(hx + b[0], hy + b[1], hz + b[2]);
+                    bool part = false;  // the centre sphere cuts a plane: the corners decide
+                    if (const int32_t e = planeX(cx, cz); e >= 1) (e * e - r2 < 1 ? part : out) = true;
+                    if (const int32_t e = planeY(cy, cz); !out && e > 0) (e * e - r2 < 1 ? part : out) = true;
+                    if (!out && part && (a.view & 4)) {
+                        uint32_t bits = 0;
+                        for (int k = 0; k < 8 && bits != 0xf; ++k) {
+                            const auto [vx, vy, vz] = world(k & 1 ? b[0] : b[3], k & 2 ? b[1] : b[4], k & 4 ? b[2] : b[5]);
+                            bits |= vx < 1 ? (planeX(vx, vz) < 0 ? 3 : 2) : (planeX(vx, vz) < 0 ? 3 : 1);
+                            bits |= vy < 0 ? (planeY(vy, vz) < 0 ? 0xc : 4) : (planeY(vy, vz) < 0 ? 0xc : 8);
+                        }
+                        out = bits != 0xf;
+                    }
+                }
                 if (out && !(a.view & 0x50)) continue;
             }
         }
@@ -95,7 +131,12 @@ void TbWorld::classTick(TbActor& a) {
             }
             a.f24 |= 0x8000;
         }
-        if (a.flags1 & 0x14) unsupported.insert("class16 camera target");  // DAT_004d5164 camera hint
+        // flags1 0x10 always, 0x4 within 2000 (xz) of the focus: the camera follows this director (B+0x44, 0x439700).
+        if (a.flags1 & 0x14) {
+            const TbActor& f = actors[size_t(focus())];
+            const int32_t dx = f.pos.x - a.pos.x, dz = f.pos.z - a.pos.z;
+            if ((a.flags1 & 0x10) || isqrt(dx * dx + dz * dz) < 2000) camTarget = int32_t(a.uid);
+        }
         if (a.firstBlock >= 0) runBlock(a, uint16_t(a.firstBlock));
         return;
     case 35:  // 0x450cd0

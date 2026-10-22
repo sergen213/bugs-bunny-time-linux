@@ -41,6 +41,12 @@ inline int32_t ratan2(int32_t a, int32_t b) {
 inline int32_t wrapSigned(int32_t a) { return a < 0 ? -((-a) & 0xfff) : (a & 0xfff); }
 // wrapSigned, then into [0, 0x1000).
 inline int32_t wrap0(int32_t a) { a = wrapSigned(a); return a < 0 ? a + 0x1000 : a; }
+// 0x4078d0 / 0x407970: length estimate max + (mid + min) / 4 (activation, director camera, A68 shake).
+inline int32_t approxLen(int32_t x, int32_t y, int32_t z) {
+    x = x < 0 ? -x : x, y = y < 0 ? -y : y, z = z < 0 ? -z : z;
+    const int32_t hi = x < y ? y : x, lo = x < y ? x : y;
+    return hi <= z ? ((hi + lo) >> 2) + z : ((z + lo) >> 2) + hi;
+}
 // Difference b - a of two angles as the exe computes it (both wrapped to [0, 0x1000), result in (-0x800, 0x800]).
 inline int32_t angleDiff(int32_t to, int32_t from) {
     int32_t d = wrap0(to) - wrap0(from);

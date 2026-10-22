@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <utility>
 #include <numbers>
 
 namespace bb {
@@ -162,9 +163,13 @@ Tod parseTod(std::span<const uint8_t> d, size_t off) {
     return t;
 }
 
+void rebuildPart(TodPart& p) { p.m = coordMatrix(p.rot, p.scale); }
+
 void applyTodFrame(AnimState& st, const Tod& tod, size_t frame) {
     if (tod.packed) return applyTbFrame(st, tod, frame);
     std::vector<TodPart>& parts = st.parts;
+    st.attachPart = -1;  // 0x44e400 clears +0x68 per applied frame: only a frame with packet 10 has an attach point
+    st.attachNew = true;
     // Packets address the k-th part of the list as it was at frame start; an empty list is searched by id.
     std::vector<uint32_t> snap;
     for (size_t i = 0; i < parts.size(); ++i)
@@ -177,6 +182,7 @@ void applyTodFrame(AnimState& st, const Tod& tod, size_t frame) {
         case 1:
             if (!p) break;
             p->flags &= 0x7fff;
+            if (p->flags & 0x400) break;  // pose owned by code (0x44e400: byte +9 & 4)
             if (pk.flag & 2) p->rot = {pk.v[0], pk.v[1], pk.v[2]};
             if (pk.flag & 4) p->scale = {pk.v[3], pk.v[4], pk.v[5]};
             if (pk.flag & 6) p->m = coordMatrix(p->rot, p->scale);
@@ -266,9 +272,11 @@ uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint3
         st.ticksPerFrame = uint8_t(st.tod->resolution >> 1);
         st.frame = 0;
         st.countdown = 0;
+        st.skip = 0;
     }
     if (!st.tod) return AnimPlaying;
     if (st.countdown == 0) {
+        uint32_t n = 1;  // TOD frames applied by this step
         if (st.frame == st.last) {
             if (st.flags & AnimOnce) {
                 st.flags = (st.flags & ~0x200u) | 0x100;
@@ -279,10 +287,15 @@ uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint3
             st.last = uint16_t(st.tod->frames() - 1);
             st.flags |= 0x1000;
             st.frame = 0;
+        } else if (st.skip) {
+            // Frame skip: `skip` frames at once while that stays before the last frame (skip consumed); otherwise
+            // the frame counter jumps to last - 1 and nothing is applied (the packet stream does not move).
+            if (uint32_t(st.frame) + st.skip < st.last) n = std::exchange(st.skip, 0);
+            else n = 0, st.frame = uint16_t(st.last - 1);
         }
-        if (st.next < st.tod->frames()) applyTodFrame(st, *st.tod, st.next);  // port guard: 1-frame TODs
-        ++st.next;
-        ++st.frame;
+        for (uint32_t k = 0; k < n; ++k, ++st.next)
+            if (st.next < st.tod->frames()) applyTodFrame(st, *st.tod, st.next);  // port guard: 1-frame TODs
+        st.frame = uint16_t(st.frame + n);
         st.countdown = st.ticksPerFrame;
     }
     --st.countdown;
@@ -314,10 +327,12 @@ std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const 
 }
 
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-               std::array<int32_t, 3> scale, std::vector<Mesh>& out) {
+               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot) {
     std::vector<V3> slots;
     std::vector<Work> work;
-    skin(model, st, Work{coordMatrix(rot, scale), {float(pos[0]), float(pos[1]), float(pos[2])}}, slots, work);
+    M3 root = coordMatrix(rot, scale);
+    if (parentRot != std::array<int16_t, 3>{}) root = mul(coordMatrix(parentRot, std::array{4096, 4096, 4096}), root);
+    skin(model, st, Work{root, {float(pos[0]), float(pos[1]), float(pos[2])}}, slots, work);
     for (size_t i = 0; i < st.parts.size(); ++i) {
         if (!drawn(model, st.parts[i], work[i])) continue;
         for (const ActorMesh& am : model.meshes) {

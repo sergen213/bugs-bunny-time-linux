@@ -1,6 +1,10 @@
 // bbtime-launcher: import wizard, settings, controls, save backups, logs, signed updates, launch.
 // Writes only settings.ini, $XDG_DATA_HOME/bbtime/{lit,tb,backups,app}, $XDG_STATE_HOME/bbtime/logs.
 // Original installs are only read (docs/LAUNCHER.md).
+#include "bb/level.h"
+#include "bb/mods.h"
+#include "bb/tb_actor.h"
+#include "bb/tb_level.h"
 #include "files.h"
 #include "settings.h"
 #include "updater.h"
@@ -10,7 +14,10 @@
 #include <SDL3/SDL.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <format>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using bb::GameId;
@@ -204,6 +211,110 @@ bool runImportWizard(QWidget* parent, bbtime::Settings& cfg) {
     return true;
 }
 
+// ---------------------------------------------------------------- original menu art
+// The launcher dresses itself in the imported games' own front-end art (only read, never copied): TB menu.men's
+// spiral page pc03, its button bitmaps (X.bmp / hover XD.bmp) and Brady Bunch font, the title backdrops and the
+// LiT title slot-menu panel colours (navy, two gold rules; see apps/bbtime drawMain/drawOptions). Without an
+// install it paints the spiral as rings and uses the system font.
+
+fs::path appRoot() { return bbtime::dataDir() / "app"; }
+fs::path gRestart; // launcher to exec once the event loop ends (after an update install)
+
+// Case-insensitive <root>/<parts...> (installs mix Datas/data, DATAS/Data ...); empty if missing.
+QString findCi(const fs::path& root, std::initializer_list<const char*> parts) {
+    if (root.empty()) return {};
+    QString cur = q(root);
+    for (const char* p : parts) {
+        const QStringList hit = QDir(cur).entryList({p}, QDir::AllEntries | QDir::NoDotAndDotDot); // filters ignore case
+        if (hit.isEmpty()) return {};
+        cur += "/" + hit.first();
+    }
+    return cur;
+}
+
+QPixmap bmp(const fs::path& root, std::initializer_list<const char*> parts) {
+    const QString f = findCi(root, parts);
+    return f.isEmpty() ? QPixmap() : QPixmap(f);
+}
+
+// TB text colours (TIME_BUSTERS.md §8.1) and the LiT panel gold, as in the collection menu.
+constexpr const char* kStyle = R"(
+* { font-family: %1; font-size: 16px; }
+QToolButton#nav { color: #f21f10; background: transparent; border: none; font-size: 17px; padding: 0px; }
+QToolButton#nav:checked, QToolButton#nav:hover { color: #f8e600; }
+QToolButton#card { color: #f21f10; background: transparent; border: 3px solid transparent; font-size: 22px; }
+QToolButton#card:hover { border-color: #b89036; }
+QToolButton#card:checked { border-color: #f8e600; }
+QLabel#heading { color: #f21f10; font-size: 38px; }
+QLabel#key { color: #f7b048; font-size: 19px; }
+QLabel#status, QPlainTextEdit, QListWidget, QTableWidget { font-family: monospace; font-size: 13px; }
+QTextBrowser { font-family: sans-serif; font-size: 14px; }
+QPushButton { color: #f21f10; background: rgba(0, 0, 14, 220); border: 2px solid #b89036; border-radius: 8px;
+              padding: 3px 14px; font-size: 20px; }
+QPushButton:hover, QPushButton:focus { color: #f8e600; border-color: #f8e600; }
+QPushButton:disabled { color: #808096; border-color: #4a4e66; }
+QPushButton#play { font-size: 30px; padding: 2px 20px; }
+QGroupBox { color: #f7b048; font-size: 20px; border: 1px solid #9e712b; border-radius: 4px; margin-top: 14px; padding-top: 8px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; }
+QProgressBar { border: 1px solid #b89036; background: black; color: white; text-align: center; }
+QProgressBar::chunk { background: #f21f10; }
+QStatusBar { color: #f7b048; }
+)";
+
+void applyPalette() {
+    QApplication::setStyle("Fusion");
+    QPalette p;
+    const QColor navy(0, 8, 42), base(0, 10, 48), grey(128, 128, 150);
+    p.setColor(QPalette::Window, navy);
+    p.setColor(QPalette::Base, base);
+    p.setColor(QPalette::AlternateBase, QColor(0, 16, 72));
+    p.setColor(QPalette::Button, QColor(10, 26, 80));
+    p.setColor(QPalette::ToolTipBase, navy);
+    for (auto r : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText, QPalette::ToolTipText, QPalette::HighlightedText})
+        p.setColor(r, Qt::white);
+    p.setColor(QPalette::Highlight, QColor(9, 128, 237));
+    p.setColor(QPalette::Link, QColor(248, 230, 0));
+    p.setColor(QPalette::PlaceholderText, grey);
+    for (auto r : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText}) p.setColor(QPalette::Disabled, r, grey);
+    QApplication::setPalette(p);
+}
+
+// Window background: an original page scaled to cover (darkened by `dim`), else the TB spiral as reflected rings.
+class Backdrop : public QWidget {
+public:
+    QPixmap art;
+    int dim = 0;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        if (art.isNull()) {
+            QRadialGradient g(QRectF(rect()).center(), 70);
+            g.setSpread(QGradient::ReflectSpread);
+            g.setColorAt(0, QColor(3, 12, 70));
+            g.setColorAt(1, QColor(20, 74, 175));
+            p.fillRect(rect(), g);
+            return;
+        }
+        const QPixmap s = art.scaled(size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        p.drawPixmap((width() - s.width()) / 2, (height() - s.height()) / 2, s);
+        p.fillRect(rect(), QColor(0, 0, 0, dim));
+    }
+};
+
+// LiT title slot-menu panel: near-black navy with two gold rules.
+class Panel : public QFrame {
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(0, 0, 14, 205));
+        for (const auto& [d, c] : {std::pair{1, QColor(184, 144, 54)}, std::pair{6, QColor(158, 113, 43)}}) {
+            p.setPen(QPen(c, 2));
+            p.drawRect(QRectF(rect()).adjusted(d, d, -d, -d));
+        }
+    }
+};
+
 // ---------------------------------------------------------------- main window
 
 class Launcher : public QMainWindow {
@@ -212,53 +323,95 @@ public:
         std::vector<std::string> warn;
         cfg_ = bbtime::loadSettings(bbtime::settingsPath(), &warn);
         setWindowTitle(QString("bbtime launcher %1").arg(BBTIME_VERSION));
-        auto* tabs = new QTabWidget;
-        tabs->addTab(gamesTab(), "Games");
-        tabs->addTab(graphicsTab(), "Graphics && audio");
-        tabs->addTab(controlsTab(), "Controls");
-        tabs->addTab(savesTab(), "Saves");
-        tabs->addTab(logsTab(), "Logs");
-        tabs->addTab(updatesTab(), "Updates");
-        tabs->addTab(aboutTab(), "About");
-
         game_ = new QComboBox;
         game_->addItems({"Collection menu", kTitles[0], kTitles[1]});
+
+        // TB front-end layout: a column of menu.men picture buttons, the page in a LiT panel on the spiral.
+        pages_ = new QStackedWidget;
+        heading_ = new QLabel;
+        heading_->setObjectName("heading");
+        auto* nav = new QVBoxLayout;
+        nav->setSpacing(2);
+        auto* group = new QButtonGroup(this);
+        const std::tuple<const char*, const char*, QWidget*> items[] = {
+            {"Games", "Play2", gamesTab()},       {"Graphics & audio", "Video", graphicsTab()},
+            {"Controls", "Controls", controlsTab()}, {"Saves", "LoadGame", savesTab()},
+            {"Mods", "Play1", modsTab()},          {"Logs", "Load", logsTab()},
+            {"Updates", "Config", updatesTab()},
+            {"About", "Language", aboutTab()}};
+        for (const auto& [name, art, page] : items) {
+            auto* b = navButton(QString(name).replace('&', "&&"), art);
+            b->setCheckable(true);
+            group->addButton(b, pages_->addWidget(page));
+            nav->addWidget(b);
+            connect(b, &QToolButton::clicked, this, [this, b, page, n = QString(name)] {
+                pages_->setCurrentWidget(page);
+                heading_->setText(n);
+            });
+        }
+        nav->addStretch();
+        auto* quit = navButton("Quit", "Quit");
+        nav->addWidget(quit);
+        connect(quit, &QToolButton::clicked, this, &QWidget::close);
+
         auto* save = new QPushButton("Save settings");
         play_ = new QPushButton("Play");
+        play_->setObjectName("play");
         play_->setDefault(true);
+        auto* path = new QLabel(q(bbtime::settingsPath()));
+        path->setStyleSheet("color: #808096; font-family: monospace;");
         auto* bottom = new QHBoxLayout;
-        bottom->addWidget(new QLabel(q(bbtime::settingsPath())));
+        bottom->addWidget(path);
         bottom->addStretch();
         bottom->addWidget(game_);
         bottom->addWidget(save);
         bottom->addWidget(play_);
-        auto* central = new QWidget;
-        auto* l = new QVBoxLayout(central);
-        l->addWidget(tabs);
+
+        auto* panel = new Panel;
+        auto* pl = new QVBoxLayout(panel);
+        pl->setContentsMargins(18, 10, 18, 16);
+        pl->addWidget(heading_);
+        pl->addWidget(pages_, 1);
+        auto* body = new QHBoxLayout;
+        body->addLayout(nav);
+        body->addWidget(panel, 1);
+        back_ = new Backdrop;
+        auto* l = new QVBoxLayout(back_);
+        l->addLayout(body, 1);
         l->addLayout(bottom);
-        setCentralWidget(central);
+        setCentralWidget(back_);
+        group->button(0)->click();
+
         connect(save, &QPushButton::clicked, this, [this] { saveSettings(); });
         connect(play_, &QPushButton::clicked, this, [this] { launch(); });
+        connect(game_, &QComboBox::currentIndexChanged, this, [this](int i) {
+            for (int g = 0; g < 2; ++g) card_[g]->setChecked(i == g + 1);
+        });
         for (const auto& w : warn) statusBar()->showMessage(q("settings.ini " + w), 10000);
+        applyArt();
         refreshGames();
-        resize(900, 640);
+        resize(1000, 700);
     }
 
 private:
     bbtime::Settings cfg_;
     QComboBox* game_;
     QPushButton* play_;
+    QStackedWidget* pages_;
+    QLabel* heading_;
+    Backdrop* back_;
+    std::vector<std::pair<QToolButton*, const char*>> art_; // buttons dressed with TB menu.men bitmaps
+    QToolButton* card_[2]{};
     QProcess* proc_ = nullptr;
     QLabel* gameStatus_[2]{};
-    QComboBox *renderer_{}, *fidelity_{}, *msaa_{};
+    QComboBox *renderer_{}, *fidelity_{}, *msaa_{}, *shadows_{}, *upscaling_{};
     QSpinBox *width_{}, *height_{};
     QDoubleSpinBox* fov_{};
-    QCheckBox *fullscreen_{}, *vsync_{};
+    QCheckBox *fullscreen_{}, *vsync_{}, *reflections_{}, *frameGen_{};
     QSlider *music_{}, *sfx_{};
     QTableWidget* binds_{};
     QListWidget *pads_{}, *backups_{}, *logs_{};
     QPlainTextEdit* logView_{};
-    QLineEdit* updateUrl_{};
     QLabel* updateStatus_{};
     QTextBrowser* notes_{};
     QPushButton *installUpdate_{}, *rollback_{};
@@ -266,26 +419,89 @@ private:
     QProgressBar* updateBar_{};
     std::optional<bbtime::update::Manifest> pending_;
 
-    static fs::path appRoot() { return bbtime::dataDir() / "app"; }
     static fs::path backupRoot() { return bbtime::dataDir() / "backups"; }
     static fs::path logRoot() { return bbtime::stateDir() / "logs"; }
+
+    QToolButton* navButton(const QString& text, const char* art) {
+        auto* b = new QToolButton;
+        b->setObjectName("nav");
+        b->setText(text);
+        b->setIconSize(QSize(64, 46));
+        b->setAutoRaise(true);
+        b->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        b->setMinimumWidth(130);
+        art_.emplace_back(b, art);
+        return b;
+    }
+
+    // (Re)dresses the window from the imported installs; called again after the import wizard.
+    void applyArt() {
+        const fs::path& tb = cfg_.tbRoot;
+        QString family = "sans-serif";
+        if (const QString ttf = findCi(tb, {"Datas", "data", "bradybun.ttf"}); !ttf.isEmpty()) {
+            const int id = QFontDatabase::addApplicationFont(ttf); // same file again: Qt returns the same family
+            if (const QStringList f = QFontDatabase::applicationFontFamilies(id); !f.isEmpty()) family = '"' + f.first() + '"';
+        }
+        qApp->setStyleSheet(QString(kStyle).arg(family));
+        if (back_->art = bmp(tb, {"Datas", "data", "pc03.bmp"}); back_->art.isNull()) {
+            back_->art = bmp(cfg_.litRoot, {"Datas", "ScrnBgEn.bmp"}); // LiT only: its title, darkened
+            back_->dim = 150;
+        } else {
+            back_->dim = 0;
+        }
+        back_->update();
+        for (auto [b, name] : art_) {
+            const QString stem = QString("%1.bmp").arg(name), hot = QString("%1D.bmp").arg(name);
+            const QPixmap n = bmp(tb, {"Datas", "data", qPrintable(stem)}), h = bmp(tb, {"Datas", "data", qPrintable(hot)});
+            QIcon icon;
+            if (!n.isNull()) {
+                icon.addPixmap(n, QIcon::Normal, QIcon::Off);
+                for (auto [mode, state] : {std::pair{QIcon::Active, QIcon::Off}, std::pair{QIcon::Normal, QIcon::On},
+                                           std::pair{QIcon::Active, QIcon::On}})
+                    icon.addPixmap(h.isNull() ? n : h, mode, state);
+            }
+            b->setIcon(icon);
+            b->setToolButtonStyle(icon.isNull() ? Qt::ToolButtonTextOnly : Qt::ToolButtonTextUnderIcon);
+        }
+        const QPixmap titles[2] = {bmp(cfg_.litRoot, {"Datas", "ScrnBgEn.bmp"}), bmp(tb, {"Datas", "data", "english.bmp"})};
+        for (int g = 0; g < 2; ++g) {
+            card_[g]->setIcon(titles[g]);
+            card_[g]->setToolButtonStyle(titles[g].isNull() ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
+        }
+        play_->setIcon(QIcon(bmp(tb, {"Datas", "data", "Play1D.bmp"})));
+        play_->setIconSize(QSize(46, 42));
+    }
 
     QWidget* gamesTab() {
         auto* w = new QWidget;
         auto* l = new QVBoxLayout(w);
         for (int g = 0; g < 2; ++g) {
             auto* box = new QGroupBox(QString(kTitles[g]).replace('&', "&&"));
-            auto* bl = new QVBoxLayout(box);
+            auto* bl = new QHBoxLayout(box);
+            card_[g] = new QToolButton; // the game's title screen; picks what Play starts
+            card_[g]->setObjectName("card");
+            card_[g]->setText(g ? "Time Busters" : "Lost in Time"); // shown until the title art is imported
+            card_[g]->setToolTip(QString("Play starts %1").arg(kTitles[g]));
+            card_[g]->setCheckable(true);
+            card_[g]->setIconSize(QSize(176, 132));
+            card_[g]->setFixedSize(188, 144);
+            connect(card_[g], &QToolButton::clicked, this, [this, g] {
+                game_->setCurrentIndex(game_->currentIndex() == g + 1 ? 0 : g + 1); // again: back to the collection menu
+                card_[g]->setChecked(game_->currentIndex() == g + 1);
+            });
             gameStatus_[g] = new QLabel;
+            gameStatus_[g]->setObjectName("status");
             gameStatus_[g]->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            gameStatus_[g]->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-            bl->addWidget(gameStatus_[g]);
+            gameStatus_[g]->setWordWrap(true);
+            bl->addWidget(card_[g]);
+            bl->addWidget(gameStatus_[g], 1);
             l->addWidget(box);
         }
         auto* wizard = new QPushButton("Import original games…");
         connect(wizard, &QPushButton::clicked, this, [this] {
             if (runImportWizard(this, cfg_)) {
                 saveSettings();
+                applyArt();
                 refreshGames();
             }
         });
@@ -351,6 +567,20 @@ private:
         msaa_ = new QComboBox;
         for (int s : {0, 2, 4, 8}) msaa_->addItem(s ? QString("%1×").arg(s) : QString("Off"), s);
         msaa_->setCurrentIndex(msaa_->findData(cfg_.msaa));
+        shadows_ = new QComboBox;
+        for (auto [label, key] : {std::pair{"Off", "off"}, std::pair{"Shadow map", "map"}, std::pair{"Ray-traced", "rt"},
+                                  std::pair{"Ray-traced + AO", "rt_ao"}})
+            shadows_->addItem(label, key);
+        shadows_->setCurrentIndex(std::max(0, shadows_->findData(q(cfg_.shadows))));
+        reflections_ = new QCheckBox("Ray-traced reflections (water, ice, polished floors)");
+        reflections_->setChecked(cfg_.reflections);
+        upscaling_ = new QComboBox;
+        for (auto [label, key] : {std::pair{"Off", "off"}, std::pair{"FSR Quality", "fsr_quality"}, std::pair{"FSR Balanced", "fsr_balanced"},
+                                  std::pair{"FSR Performance", "fsr_performance"}, std::pair{"FSR Native AA", "native_aa"}})
+            upscaling_->addItem(label, key);
+        upscaling_->setCurrentIndex(std::max(0, upscaling_->findData(q(cfg_.upscaling))));
+        frameGen_ = new QCheckBox("FSR frame generation");
+        frameGen_->setChecked(cfg_.frameGeneration);
         auto slider = [](int v) {
             auto* s = new QSlider(Qt::Horizontal);
             s->setRange(0, 100);
@@ -366,9 +596,20 @@ private:
         f->addRow("", vsync_);
         f->addRow("Field of view", fov_);
         f->addRow("Anti-aliasing (MSAA)", msaa_);
+        f->addRow("Shadows (Vulkan)", shadows_);
+        f->addRow("", reflections_);
+        f->addRow("Upscaling (Vulkan)", upscaling_);
+        f->addRow("", frameGen_);
         f->addRow("Music volume", music_);
         f->addRow("Effects volume", sfx_);
+        keyLabels(f);
         return w;
+    }
+
+    // Form labels in the TB key-label orange.
+    static void keyLabels(QFormLayout* f) {
+        for (int i = 0; i < f->rowCount(); ++i)
+            if (QLayoutItem* it = f->itemAt(i, QFormLayout::LabelRole); it && it->widget()) it->widget()->setObjectName("key");
     }
 
     QWidget* controlsTab() {
@@ -460,6 +701,300 @@ private:
         for (const fs::path& p : bbtime::listBackups(backupRoot())) backups_->addItem(q(p.filename()));
     }
 
+    // ------------------------------------------------------------ mods (docs/MODDING.md)
+    QTableWidget* mods_{};
+    QTextBrowser* modInfo_{};
+
+    static fs::path modsRoot() { return bb::mods::defaultRoot(); }
+
+    // Rows in load order: enabled mods as in settings.ini, then the rest by id.
+    void refreshMods() {
+        std::vector<std::string> enabled;
+        for (int r = 0; mods_->rowCount() && r < mods_->rowCount(); ++r)
+            if (mods_->item(r, 0)->checkState() == Qt::Checked) enabled.push_back(mods_->item(r, 0)->data(Qt::UserRole).toString().toStdString());
+        if (!mods_->rowCount()) enabled = cfg_.mods;
+        std::vector<bb::mods::Info> all = bb::mods::scan(modsRoot()), rows;
+        for (const std::string& id : enabled)
+            if (auto it = std::ranges::find(all, id, &bb::mods::Info::id); it != all.end()) rows.push_back(*it), all.erase(it);
+        rows.insert(rows.end(), all.begin(), all.end());
+        const size_t on = rows.size() - all.size();
+        const QSignalBlocker block(mods_);
+        mods_->setRowCount(int(rows.size()));
+        for (size_t r = 0; r < rows.size(); ++r) {
+            const bb::mods::Info& m = rows[r];
+            auto* name = new QTableWidgetItem(q(m.error.empty() ? m.name : m.id + " (broken)"));
+            name->setData(Qt::UserRole, q(m.id));
+            name->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+            name->setCheckState(r < on ? Qt::Checked : Qt::Unchecked);
+            name->setToolTip(q(m.dir));
+            mods_->setItem(int(r), 0, name);
+            const QString game = m.game == "lit" ? "Lost in Time" : m.game == "tb" ? "Time Busters" : "both";
+            int c = 1;
+            for (const QString& v : {q(m.version), q(m.author), game}) {
+                auto* it = new QTableWidgetItem(v);
+                it->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+                mods_->setItem(int(r), c++, it);
+            }
+        }
+        collectMods();
+        showModInfo();
+    }
+
+    void collectMods() {
+        cfg_.mods.clear();
+        for (int r = 0; r < mods_->rowCount(); ++r)
+            if (mods_->item(r, 0)->checkState() == Qt::Checked) cfg_.mods.push_back(mods_->item(r, 0)->data(Qt::UserRole).toString().toStdString());
+    }
+
+    std::string selectedMod() const {
+        const int r = mods_->currentRow();
+        return r < 0 ? std::string() : mods_->item(r, 0)->data(Qt::UserRole).toString().toStdString();
+    }
+
+    // Details of the selected mod, its validation (levels decoded in the background) and the enabled set's conflicts.
+    void showModInfo() {
+        const bb::mods::ModSet set = bb::mods::ModSet::load(modsRoot(), cfg_.mods);
+        QString conflicts;
+        for (const auto& [key, ids] : set.conflicts()) {
+            QStringList l;
+            for (const std::string& id : ids) l << q(id);
+            conflicts += QString("<li><code>%1</code>: %2 (<b>%3</b> wins)</li>").arg(q(key), l.join(" &lt; "), l.last());
+        }
+        const QString tail = QString("<h3>Conflicts (enabled mods, load order)</h3>%1<p style='color:#808096'>Mods folder: %2</p>")
+                                 .arg(conflicts.isEmpty() ? "<p>none</p>" : "<ul>" + conflicts + "</ul>", q(modsRoot()).toHtmlEscaped());
+        const std::string id = selectedMod();
+        if (id.empty()) {
+            modInfo_->setHtml("<p>Select a mod. Tick a mod to enable it; enabled mods load top to bottom (later wins).</p>" + tail);
+            return;
+        }
+        const bb::mods::Info info = bb::mods::readInfo(modsRoot() / id);
+        const QString head = QString("<h3>%1 %2</h3><p>%3</p><p>by %4 · game %5 · id <code>%6</code></p>")
+                                 .arg(q(info.name).toHtmlEscaped(), q(info.version).toHtmlEscaped(), q(info.description).toHtmlEscaped(),
+                                      q(info.author).toHtmlEscaped(), q(info.game), q(info.id));
+        modInfo_->setHtml(head + "<p>Validating…</p>" + tail);
+        struct Ctx {
+            bbtime::Settings cfg;
+            std::map<std::string, std::unique_ptr<bb::Scene>> cache;
+        };
+        background(this, [info, cfg = cfg_] {
+            Ctx ctx{cfg, {}};
+            auto src = [](void* c, GameId g, const std::string& level) -> const bb::Scene* {
+                Ctx& x = *static_cast<Ctx*>(c);
+                auto [it, fresh] = x.cache.try_emplace(std::format("{}/{}", int(g), level));
+                if (fresh) try {
+                    const QString f = findCi(g == GameId::LostInTime ? x.cfg.litRoot : x.cfg.tbRoot, {"Datas", "bze", (level + ".bze").c_str()});
+                    if (!f.isEmpty()) {
+                        const bb::BzeFile bze = bb::loadBze(path(f));
+                        auto sc = std::make_unique<bb::Scene>(g == GameId::LostInTime ? bb::buildLitScene(bze, level) : bb::buildTbScene(bze, level));
+                        if (g == GameId::TimeBusters) bb::addTbActors(*sc, bze);
+                        it->second = std::move(sc);
+                    }
+                } catch (const std::exception&) {}
+                return it->second.get();
+            };
+            return bb::mods::validate(info, src, &ctx);
+        }, [this, id, head, tail](const std::vector<bb::mods::Issue>& issues) {
+            if (selectedMod() != id) return;
+            QString v;
+            for (const auto& i : issues)
+                v += QString("<li><span style='color:%1'>%2</span> <code>%3</code>: %4</li>")
+                         .arg(i.error ? "#ff6060" : "#f8e600", i.error ? "error" : "warning", q(i.file).toHtmlEscaped(), q(i.message).toHtmlEscaped());
+            modInfo_->setHtml(head + "<h3>Validation</h3>" + (v.isEmpty() ? "<p>no problems found</p>" : "<ul>" + v + "</ul>") + tail);
+        });
+    }
+
+    void moveMod(int d) {
+        const int r = mods_->currentRow(), t = r + d;
+        if (r < 0 || t < 0 || t >= mods_->rowCount()) return;
+        for (int c = 0; c < mods_->columnCount(); ++c) {
+            QTableWidgetItem* a = mods_->takeItem(r, c);
+            mods_->setItem(r, c, mods_->takeItem(t, c));
+            mods_->setItem(t, c, a);
+        }
+        mods_->setCurrentCell(t, 0);
+        collectMods();
+        showModInfo();
+    }
+
+    void newMod() {
+        QDialog d(this);
+        d.setWindowTitle("New mod");
+        auto* f = new QFormLayout(&d);
+        auto* id = new QLineEdit;
+        id->setValidator(new QRegularExpressionValidator(QRegularExpression("[A-Za-z0-9._-]+"), id));
+        auto *name = new QLineEdit, *version = new QLineEdit("1.0"), *author = new QLineEdit;
+        auto* desc = new QPlainTextEdit;
+        desc->setMaximumHeight(80);
+        auto* game = new QComboBox;
+        game->addItem("Both games", "both"), game->addItem(kTitles[0], "lit"), game->addItem(kTitles[1], "tb");
+        f->addRow("Folder id", id), f->addRow("Name", name), f->addRow("Version", version), f->addRow("Author", author);
+        f->addRow("Game", game), f->addRow("Description", desc);
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        f->addRow(bb);
+        connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+        connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+        if (d.exec() != QDialog::Accepted || id->text().isEmpty()) return;
+        bb::mods::Info i;
+        i.id = id->text().toStdString(), i.name = name->text().isEmpty() ? i.id : name->text().toStdString();
+        i.version = version->text().toStdString(), i.author = author->text().toStdString();
+        i.description = desc->toPlainText().toStdString(), i.game = game->currentData().toString().toStdString();
+        i.dir = modsRoot() / i.id;
+        if (fs::exists(i.dir)) { QMessageBox::warning(this, "New mod", "A mod folder with that id exists."); return; }
+        const std::string e = bb::mods::writeInfo(i);
+        for (const char* sub : {"textures", "models", "animations", "sounds", "music"}) fs::create_directories(i.dir / sub);
+        statusBar()->showMessage(e.empty() ? "Created " + q(i.dir) : q(e), 8000);
+        refreshMods();
+    }
+
+    // .zip with mod.json at its root or in one top folder; extracted with unzip (or bsdtar), which refuse ../ paths.
+    void installZip() {
+        const QString zip = QFileDialog::getOpenFileName(this, "Install mod", QDir::homePath(), "Mod archives (*.zip)");
+        if (zip.isEmpty()) return;
+        fs::create_directories(modsRoot());
+        const fs::path tmp = modsRoot() / ".install";
+        fs::remove_all(tmp);
+        fs::create_directories(tmp);
+        QProcess p;
+        if (!QStandardPaths::findExecutable("unzip").isEmpty()) p.start("unzip", {"-q", zip, "-d", q(tmp)});
+        else p.start("bsdtar", {"-xf", zip, "-C", q(tmp)});
+        p.waitForFinished(120000);
+        fs::path dir;
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(tmp, ec), end; !ec && it != end; it.increment(ec))
+            if (it.depth() <= 1 && it->path().filename() == "mod.json") { dir = it->path().parent_path(); break; }
+        QString msg;
+        if (p.exitCode() != 0 || dir.empty()) msg = "Not a mod archive (no mod.json): " + zip;
+        else {
+            // Folder name = id: the mod.json "id" (else the archive's top folder, else the archive name).
+            QFile mj(q(dir / "mod.json"));
+            QString id = mj.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(mj.readAll()).object().value("id").toString() : QString();
+            if (id.isEmpty()) id = dir == tmp ? QFileInfo(zip).completeBaseName() : q(dir.filename());
+            const fs::path dest = modsRoot() / path(id);
+            if (id.contains('/') || id.startsWith('.')) msg = "Bad mod id in mod.json: " + id;
+            else if (fs::exists(dest)) msg = "A mod with the id " + id + " is installed; remove it first.";
+            else {
+                fs::rename(dir, dest, ec);
+                msg = ec ? q("Install failed: " + ec.message()) : "Installed " + q(dest);
+            }
+        }
+        fs::remove_all(tmp, ec);
+        statusBar()->showMessage(msg, 10000);
+        refreshMods();
+    }
+
+    void removeMod() {
+        const std::string id = selectedMod();
+        if (id.empty() || QMessageBox::question(this, "Remove mod", "Delete the mod folder " + q(modsRoot() / id) + "?") != QMessageBox::Yes)
+            return;
+        std::error_code ec;
+        fs::remove_all(modsRoot() / id, ec);
+        statusBar()->showMessage(ec ? q(ec.message()) : "Removed " + q(id), 8000);
+        mods_->removeRow(mods_->currentRow());
+        refreshMods();
+    }
+
+    static QString modkitBinary() {
+        const QString here = QCoreApplication::applicationDirPath();
+        for (const QString& c : {q(appRoot() / "current/bbtime-modkit"), here + "/bbtime-modkit", here + "/../../tools/bbtime-modkit"})
+            if (QFileInfo(c).isExecutable()) return QFileInfo(c).canonicalFilePath();
+        return QStandardPaths::findExecutable("bbtime-modkit");
+    }
+
+    // Game / level / kind picker -> bbtime-modkit export (originals stay in the user's own folder).
+    void exportAssets() {
+        QDialog d(this);
+        d.setWindowTitle("Export assets");
+        auto* f = new QFormLayout(&d);
+        auto* game = new QComboBox;
+        game->addItem(kTitles[0], 0), game->addItem(kTitles[1], 1);
+        auto* level = new QComboBox;
+        level->setEditable(true);
+        auto* kind = new QComboBox;
+        for (const char* k : {"all", "textures", "models", "sounds", "music"}) kind->addItem(k);
+        auto* out = new QLineEdit(q(bbtime::dataDir() / "modkit-export"));
+        auto fill = [this, game, level] {
+            level->clear();
+            const QString dir = findCi(root(cfg_, game->currentData().toInt()), {"Datas", "bze"});
+            QStringList l;
+            for (const QFileInfo& fi : QDir(dir).entryInfoList({"*.bze", "*.BZE"}, QDir::Files)) l << fi.completeBaseName().toUpper();
+            l.removeDuplicates();
+            l.sort();
+            level->addItems(l);
+            level->setCurrentText(game->currentData().toInt() ? "ARCA01" : "L01A");
+        };
+        connect(game, &QComboBox::currentIndexChanged, &d, fill);
+        fill();
+        f->addRow("Game", game), f->addRow("Level", level), f->addRow("What", kind), f->addRow("Output folder", out);
+        f->addRow(new QLabel("Textures → PNG, models + animations → glTF, sounds/music → WAV, in the mod layout.\n"
+                             "Edit them, then copy the files you changed into a mod folder."));
+        auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        f->addRow(bb);
+        connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+        connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+        if (d.exec() != QDialog::Accepted) return;
+        const QString exe = modkitBinary();
+        if (exe.isEmpty()) { QMessageBox::warning(this, "Export", "Cannot find bbtime-modkit."); return; }
+        const int g = game->currentData().toInt();
+        const QStringList args{"export", "--game", kKeys[g], "--level", level->currentText(), "--what", kind->currentText(), "--out",
+                               out->text(), "--root", q(root(cfg_, g))};
+        auto* p = new QProcess(this);
+        p->setProcessChannelMode(QProcess::MergedChannels);
+        modInfo_->setHtml("<p>Exporting…</p>");
+        connect(p, &QProcess::finished, this, [this, p, dir = out->text()](int code) {
+            modInfo_->setHtml(QString("<h3>Export %1</h3><pre>%2</pre><p><a href='%3'>%4</a></p>")
+                                  .arg(code ? "failed" : "done", QString::fromUtf8(p->readAll()).toHtmlEscaped(),
+                                       QUrl::fromLocalFile(dir).toString(), dir.toHtmlEscaped()));
+            p->deleteLater();
+        });
+        p->start(exe, args);
+    }
+
+    QWidget* modsTab() {
+        auto* w = new QWidget;
+        auto* l = new QVBoxLayout(w);
+        mods_ = new QTableWidget(0, 4);
+        mods_->setHorizontalHeaderLabels({"Mod (tick = enabled)", "Version", "Author", "Game"});
+        mods_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+        mods_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        mods_->verticalHeader()->setVisible(false);
+        mods_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        mods_->setSelectionMode(QAbstractItemView::SingleSelection);
+        modInfo_ = new QTextBrowser;
+        modInfo_->setOpenExternalLinks(true);
+        auto* split = new QSplitter(Qt::Vertical);
+        split->addWidget(mods_);
+        split->addWidget(modInfo_);
+        auto* row = new QHBoxLayout;
+        const std::pair<const char*, std::function<void()>> buttons[] = {
+            {"▲", [this] { moveMod(-1); }},
+            {"▼", [this] { moveMod(1); }},
+            {"New mod…", [this] { newMod(); }},
+            {"Open folder", [this] {
+                 const std::string id = selectedMod();
+                 const fs::path dir = id.empty() ? modsRoot() : modsRoot() / id;
+                 fs::create_directories(dir);
+                 QDesktopServices::openUrl(QUrl::fromLocalFile(q(dir)));
+             }},
+            {"Install from .zip…", [this] { installZip(); }},
+            {"Remove", [this] { removeMod(); }},
+            {"Export assets…", [this] { exportAssets(); }},
+            {"Refresh", [this] { refreshMods(); }}};
+        for (const auto& [text, fn] : buttons) {
+            auto* b = new QPushButton(text);
+            connect(b, &QPushButton::clicked, this, fn);
+            row->addWidget(b);
+        }
+        row->addStretch();
+        l->addWidget(split, 1);
+        l->addLayout(row);
+        connect(mods_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* it) {
+            if (it->column() == 0) collectMods(), showModInfo();
+        });
+        connect(mods_, &QTableWidget::itemSelectionChanged, this, [this] { showModInfo(); });
+        refreshMods();
+        return w;
+    }
+
     QWidget* logsTab() {
         auto* w = new QWidget;
         auto* l = new QHBoxLayout(w);
@@ -492,9 +1027,11 @@ private:
         const auto cur = bbtime::update::currentVersion(appRoot());
         f->addRow("Running version", new QLabel(BBTIME_VERSION));
         f->addRow("Installed (updater)", new QLabel(cur ? q(*cur) + "  in " + q(appRoot()) : QString("none")));
-        updateUrl_ = new QLineEdit(q(cfg_.updateUrl));
-        updateUrl_->setPlaceholderText("https://github.com/OWNER/bbtime/releases/latest/download/manifest.json");
-        f->addRow("Manifest URL", updateUrl_);
+        auto* channel = new QLabel(q(bbtime::update::manifestUrl(cfg_.updateUrl)));
+        channel->setObjectName("status");
+        channel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        f->addRow("Release channel", channel);
+        keyLabels(f);
         l->addLayout(f);
         auto* checkB = new QPushButton("Check for updates");
         installUpdate_ = new QPushButton("Install");
@@ -517,9 +1054,8 @@ private:
             pending_.reset();
             installUpdate_->setEnabled(false);
             checkB->setEnabled(false);
-            cfg_.updateUrl = updateUrl_->text().trimmed().toStdString();
             updateStatus_->setText("Checking…");
-            background(this, [url = cfg_.updateUrl, o = updateOptions()] { return bbtime::update::check(url, o); },
+            background(this, [url = bbtime::update::manifestUrl(cfg_.updateUrl), o = updateOptions()] { return bbtime::update::check(url, o); },
                        [this, checkB](const std::expected<bbtime::update::Manifest, std::string>& m) {
                 checkB->setEnabled(true);
                 if (!m) { updateStatus_->setText(q("Check failed: " + m.error())); return; }
@@ -546,10 +1082,19 @@ private:
             };
             background(this, [m = *pending_, o] { return bbtime::update::install(m, o, BBTIME_VERSION); },
                        [this](const std::expected<fs::path, std::string>& r) {
-                updateStatus_->setText(r ? "Installed to " + q(*r) + ". Restart the launcher from there."
-                                         : q("Install refused/failed (nothing changed): " + r.error()));
+                if (!r) {
+                    updateStatus_->setText(q("Install refused/failed (nothing changed): " + r.error()));
+                    installUpdate_->setEnabled(true);
+                    return;
+                }
                 rollback_->setEnabled(bbtime::update::previousVersion(appRoot()).has_value());
-                installUpdate_->setEnabled(!r);
+                gRestart = bbtime::update::handoffTarget(appRoot(), BBTIME_VERSION);
+                if (gRestart.empty()) { // release without a launcher artifact: the next Play uses the new game
+                    updateStatus_->setText("Installed to " + q(*r) + ".");
+                    return;
+                }
+                updateStatus_->setText("Installed to " + q(*r) + ". Restarting into the new launcher…");
+                QTimer::singleShot(800, this, &QWidget::close); // main() execs gRestart after the event loop
             });
         });
         connect(rollback_, &QPushButton::clicked, this, [this] {
@@ -584,15 +1129,19 @@ private:
         cfg_.vsync = vsync_->isChecked();
         cfg_.fov = float(fov_->value());
         cfg_.msaa = msaa_->currentData().toInt();
+        cfg_.shadows = shadows_->currentData().toString().toStdString();
+        cfg_.reflections = reflections_->isChecked();
+        cfg_.upscaling = upscaling_->currentData().toString().toStdString();
+        cfg_.frameGeneration = frameGen_->isChecked();
         cfg_.musicVolume = music_->value();
         cfg_.sfxVolume = sfx_->value();
+        collectMods();
         for (int r = 0; r < binds_->rowCount(); ++r) {
             const std::string a = binds_->verticalHeaderItem(r)->text().toStdString();
             const std::string k = binds_->item(r, 0)->text().trimmed().toStdString();
             if (k.empty()) cfg_.bindings.erase(a);
             else cfg_.bindings[a] = k;
         }
-        cfg_.updateUrl = updateUrl_->text().trimmed().toStdString();
     }
 
     bool saveSettings() {
@@ -654,18 +1203,37 @@ private:
     }
 };
 
+// Replaces this process with the launcher `exe` (the release AppImage under app/current), same arguments.
+// Returns only if exec fails; the env guard stops the new launcher from handing off again.
+void execLauncher(const fs::path& exe, std::vector<char*> args) {
+    setenv(bbtime::update::kHandoffEnv, "1", 1);
+    args[0] = const_cast<char*>(exe.c_str());
+    execv(exe.c_str(), args.data());
+    std::perror(("bbtime-launcher: cannot start " + exe.string()).c_str());
+    unsetenv(bbtime::update::kHandoffEnv);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    const std::vector<char*> args(argv, argv + argc + 1); // before QApplication strips its own options
+    if (std::getenv(bbtime::update::kHandoffEnv)) unsetenv(bbtime::update::kHandoffEnv);
+    else if (const fs::path next = bbtime::update::handoffTarget(appRoot(), BBTIME_VERSION); !next.empty())
+        execLauncher(next, args); // an update installed a newer launcher: run that one
     QApplication app(argc, argv);
+    applyPalette();
     QApplication::setApplicationName("bbtime-launcher");
     QApplication::setApplicationVersion(BBTIME_VERSION);
     QApplication::setDesktopFileName("bbtime-launcher");
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // keep SIGINT/SIGTERM fatal; Qt owns the event loop
     SDL_Init(SDL_INIT_GAMEPAD); // failure only disables the gamepad list
-    Launcher w;
-    w.show();
-    const int rc = app.exec();
+    int rc;
+    {
+        Launcher w;
+        w.show();
+        rc = app.exec();
+    }
     SDL_Quit();
+    if (!gRestart.empty()) execLauncher(gRestart, args);
     return rc;
 }

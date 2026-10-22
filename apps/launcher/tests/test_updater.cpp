@@ -181,6 +181,19 @@ int main() {
     assert(rollback(o.installRoot) == "0.3.0");
     assert(!rollback(tmp / "nothing"));
 
+    // Release channel default, settings override.
+    assert(manifestUrl("") == "https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json");
+    assert(manifestUrl(base + "/x/manifest.json") == base + "/x/manifest.json");
+    // Launcher hand-off: only to an executable current/bbtime-launcher that is newer than the running launcher.
+    assert(handoffTarget(o.installRoot, "0.1.0").empty()); // 0.3.0 shipped no launcher
+    const fs::path launcher = o.installRoot / "current" / kLauncherArtifact;
+    put(launcher, "#!/bin/sh\n");
+    assert(handoffTarget(o.installRoot, "0.1.0").empty()); // not executable
+    fs::permissions(launcher, fs::perms(0755));
+    assert(handoffTarget(o.installRoot, "0.1.0") == launcher && handoffTarget(o.installRoot, "0.2.9") == launcher);
+    assert(handoffTarget(o.installRoot, "0.3.0").empty() && handoffTarget(o.installRoot, "1.0.0").empty());
+    assert(handoffTarget(tmp / "nothing", "0.1.0").empty());
+
     // Version parsing.
     assert(parseVersion("1.2.3") == (Version{1, 2, 3}) && parseVersion("10.0.0") > parseVersion("9.99.99"));
     for (const char* v : {"1.2", "1.2.3.4", "01.2.3", "1.2.x", "-1.2.3", " 1.2.3", "1.2.3 ", ""}) assert(!parseVersion(v));

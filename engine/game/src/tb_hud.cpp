@@ -73,14 +73,19 @@ uint16_t be16(const std::vector<uint8_t>& d, size_t p) { return p + 2 <= d.size(
 
 // ------------------------------------------------------------------------------------------------ fade
 void TbWorld::fadeTick() {  // 0x464ef0
-    // 0x464c30 (same frame, before 0x464ef0): cinematic letterbox GD+0x9f (s8) drawn as two black bars of
-    // |v|·h·2/240 px, then stepped by 2 per frame: positive (logic sets 2) grows to 16, negative (logic sets -16)
-    // shrinks back to 0, which ends the cut-scene state (pause, R1 / L1 and player control test GD+0x9f).
+    // 0x464c30 (same frame, before 0x464ef0; not on the load-mode first tick, oracle tbintro/full/cam.csv: GD+0x9f 2 at
+    // counter 1, 4 at 3): cinematic letterbox GD+0x9f (s8) drawn as two black bars of |v|·h·2/240 px, then stepped by 2
+    // per frame: positive (logic sets 2) grows to 16, negative (logic sets -16) shrinks back to 0, which ends the
+    // cut-scene state (pause, R1 / L1 and player control test GD+0x9f).
     bars = int8_t(GD[0x9f]);
-    if (bars < 0 || (bars > 0 && bars < 0x10)) GD[0x9f] = uint8_t(GD[0x9f] + 2);
+    if (dt && (bars < 0 || (bars > 0 && bars < 0x10))) GD[0x9f] = uint8_t(GD[0x9f] + 2);
     Fade& f = fade;
     if (!f.mode) {
-        f.dark = S[9] ? 0xe00 : 0;  // paused: dimmed (the 0x4d2764 menu case is not ported)
+        // Paused: dark 0xe00 (shadow colour / world-draw parameter only: this branch returns before the vertex
+        // brightness 0x488250, so the frame is not dimmed — oracle local/wine/tbintro/pause_menu.png, dark peeked
+        // 0xe00); S[0x2c4] (= 0x4d2764) keeps the value as it is.
+        if (S[0x2c4]) return;
+        f.dark = S[9] ? 0xe00 : 0;
         return;
     }
     if (f.mode & 4) {
@@ -112,6 +117,8 @@ void TbWorld::fadeTick() {  // 0x464ef0
 std::array<uint8_t, 4> TbWorld::fadeOverlay() const {
     // 0x464ef0 scales the level light colours (0x4883e0..) and the vertex brightness 0x488250 = (0x1000 - dark) >> 4;
     // the black veil stands in (as LiT). TB has no flash colour: the 0x40 flash of S52 is a dark-light-dark blink.
+    // Without a fade mode the brightness is not touched (the paused dark 0xe00 does not dim the frame).
+    if (!fade.mode) return {0, 0, 0, 0};
     const int lit = 0x1000 - fade.dark;
     return {0, 0, 0, uint8_t(255 - std::min(255, lit >> 4))};
 }
@@ -299,9 +306,9 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
         case 10: cmpVal = int8_t(d[q]), q += 1; break;
         case 11: pal2 = int8_t(d[q]) == 0x45 ? 9 : int8_t(d[q]), q += 1; break;
         case 12: case 13: cmpMode = op == 12 ? 1 : 2, cmpIdx = be16(d, q), q += 2; break;
-        case 14: orgX = orgY = 0, q += 1; break;  // origins 0x4d59a0[n]: written only by the pause panels (zero here)
-        case 15:  // panel page n of the pause screen: x = n * 800 + scroll (scroll 0: page 0 only on screen)
-            orgY = 0, orgX = d[q] * 800, q += 1;
+        case 14: orgX = panels_[d[q] % panels_.size()].cur[0], orgY = panels_[d[q] % panels_.size()].cur[1], q += 1; break;  // 0x4d59a0[n]
+        case 15:  // pause-screen page n: x = n * 800 + the page scroll 0x4d5960 (x > 2400 wraps by 4000), y = its y
+            orgY = page_.cur[1], orgX = d[q] * 800 + page_.cur[0], q += 1;
             if (orgX > 0x960) orgX -= 4000;
             break;
         case 16:
@@ -332,7 +339,34 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
             number = std::format("{:0{}}", v % 10000, std::clamp(minDigits, 1, 4));  // at most 4 digits
             break;
         }
-        case 0x14: unsupported.insert("text key name 0x14"); q += 1; break;
+        case 0x14: {  // key name of a pad button (0x466d50 case 0x14): "'e'", Enter = glyph byte 1
+            // Button index: < 0x14 through the remap preset GD+0x95 (table 0x4cf118, 16 per preset), 0x22 / 0x23 ->
+            // 14 / 15, < 0x32 the fixed table 0x4cf104 (= 0x4cf118 - 0x14), else player 2 (player 1 without GD+0x29 0x10).
+            static constexpr uint8_t kRemap[0x40] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 3, 1,
+                                                     0, 2, 6, 3, 1, 5, 4, 7, 8, 9, 10, 11, 12, 13, 3, 1,
+                                                     3, 4, 2, 6, 0, 5, 1, 7, 8, 9, 10, 11, 12, 13, 3, 1,
+                                                     2, 0, 3, 7, 6, 4, 1, 5, 8, 9, 10, 11, 12, 13, 3, 1};
+            // GetKeyNameText (0x40fba0) of the keys behind them, lower-cased (0x480020): config.pc defaults of
+            // 0x415fd0 (□ ○ △ ✕ L1 L2 R1 R2 select start ← → ↑ ↓, then 0x3e F4), the same keys as bbtime's P1 / P2 maps.
+            // Levels 0x24 / 9 / 0x14 with GD+0x29 & 0x10 and Taz in focus (lookup 8): buttons 0..9 name player 2's keys
+            // (config.pc +0x88.., 0x639bf4 ..). ponytail: fixed default bindings (bbtime's P1 / P2 maps); P2 select /
+            // start names = GetKeyNameText of Right Ctrl / Right Shift (I).
+            static constexpr std::string_view kP1[15] = {"r", "q", "w", "e", "a", "d", "s", "f", "tab", "esc",
+                                                         "left", "right", "up", "down", "f4"};
+            static constexpr std::string_view kP2[10] = {"[", "i", "o", "p", "l", ";", "k", "'", "ctrl", "right shift"};
+            uint32_t k = d[q];
+            q += 1;
+            if (k < 0x14) k = kRemap[(k + (GD[0x95] & 3u) * 16) & 0x3f];
+            else if (k == 0x22 || k == 0x23) k -= 0x14;
+            else if (k < 0x32) k = kRemap[k - 0x14];
+            else if (!(GD[0x29] & 0x10)) k -= 0x32;
+            const bool p2 = (GD[0] == 0x24 || GD[0] == 9 || GD[0] == 0x14) && (GD[0x29] & 0x10) && actors[size_t(focus())].id == 3 && k < 10;
+            if (p2) number = std::format("'{}'", kP2[k]);
+            else if (k == 15) number = "\x01";
+            else if (k < 15) number = std::format("'{}'", kP1[k]);
+            else if (k >= 0x32 && k < 0x3a) number = std::format("'{}'", kP2[k - 0x32]);
+            break;
+        }
         case 0x15: case 0x16:
             box = {int16_t(be16(d, q)), int16_t(be16(d, q + 2)), int16_t(be16(d, q + 4)), int16_t(be16(d, q + 6))};
             fitBox = op == 0x15;
@@ -431,6 +465,27 @@ void TbWorld::textFlush() {  // 0x4681c0
 }
 
 // ------------------------------------------------------------------------------------------------ HUD
+void TbWorld::panelTick() {  // 0x4667a0: start (0x80) loads record 0x4cf078[n], sliding (0x40) steps until done (0x20)
+    struct Rec { int16_t x, y, in, out; uint16_t flags; int8_t maxv, vel, acc, back, decel; };
+    static constexpr Rec kRec[9] = {{0, -240, 0, -240, 0x56, 20, 0, 10, 10, 15},  {0, 0, 0, -240, 0x2a, 20, 0, 10, 10, 15},
+                                    {0, 240, 0, 240, 0x56, 20, 0, 10, 10, 15},    {0, 0, 0, 240, 0x2a, 20, 0, 10, 10, 15},
+                                    {-520, 0, 0, -520, 0x55, 48, 0, 8, 16, 16},   {0, 0, 0, -520, 0x29, 48, 0, 8, 16, 14},
+                                    {520, 0, 0, 520, 0x55, 48, 0, 8, 16, 16},     {0, 0, 0, 520, 0x29, 48, 0, 8, 16, 14},
+                                    {-520, 0, 0, -520, 0x45, 60, 0, 12, 16, 18}};
+    for (size_t i = 0; i < panels_.size(); ++i) {
+        uint8_t& st = panelState_[i][0];
+        if (st == 0x40) {
+            if (!slideStep(panels_[i])) st = 0x20;
+        } else if (st == 0x80) {
+            st = 0x40;
+            const Rec& r = kRec[panelState_[i][1] % 9];
+            Slide& s = panels_[i];
+            s.cur = {r.x, r.y}, s.in = r.in, s.out = r.out, s.flags = r.flags;
+            s.maxv = r.maxv, s.vel = r.vel, s.acc = r.acc, s.back = r.back, s.decel = r.decel;
+        }
+    }
+}
+
 bool TbWorld::slideStep(Slide& s) {  // 0x461840
     int8_t acc = s.acc, decel = s.decel, v = s.vel;
     int32_t tgt, other;
@@ -635,6 +690,7 @@ void TbWorld::hudSetup() {  // 0x462430 (HUD sheet holder template 0x1f; the sec
         {{0, -120}, 0, -120, 0x62, 36, 0, 5, 9, 13}};
     hud_ = {};
     std::ranges::copy(kSlide, hud_.slide.begin());
+    page_ = {{0, 0}, 0, 0, 0xa9, 0x28, 0, 10, 0x18, 0xc};  // 0x4d5960: x axis, moving to "out", page scroll
     // 0x4ced78.. bars: Bugs, Taz, S[6] (sheet 0x28), Bugs S[0x6d], Taz S[0x6e]; linked pairs share a panel.
     hud_.health = {{{0, 1, -1, 0, 0, 0x39, 0x16, 6, 0x50, 0x0d, 3}, {2, 3, -1, 0, 1, 3, 0x18, 6, 0x50, 0x0e, 4},
                     {0x1b, 0x1c, -1, 0, 1, 5, 0x14, 0x80, 0x58, 1, -1}, {4, 1, -1, 0, 0, 0x39, 0x1f, 0xf0, 0x50, 0x0d, 0},
@@ -649,7 +705,52 @@ void TbWorld::hudSetup() {  // 0x462430 (HUD sheet holder template 0x1f; the sec
         hudSprites[i].shown = false;  // +6 = 0x8010
     }
     S[0x6d] = S[0x6e] = 0;
+    GD[0xab] = 0xff;  // pause-screen era pages: every era selectable
     hud_.init = true;
+}
+
+// 0x461db0: S[4] mode changes against the shown mode 0x4d5cea. 2 = pause-screen page (entered from the menu: the
+// page slides in from 300 right of page S[5]), 1 + leaving 2 = slide back out; 4 / 8 = next / previous era page S[5]
+// among the eras of GD+0xab (wrapping through 5); the page scroll 0x4d5960 then moves from (5 - old) * 800 to
+// (5 - new) * 800 and S[4] carries 0x80 until it arrives (0x463170 tail).
+void TbWorld::hudPage() {
+    const uint8_t cea = hud_.cea, s4 = S[4];
+    if (s4 == cea) return;
+    int16_t from = S[5], to = S[5], off = 0;
+    uint8_t mode;
+    if (!(s4 & 0xc)) {
+        if (s4 & 2) {
+            if (cea & 2) { hud_.cea = s4; return; }
+            page_.flags &= ~0x20;  // in from the right
+            mode = s4 | 0x20, --from;
+            if (!(cea & 1)) off = -300;
+        } else {
+            if (!(cea & 2) || !(s4 & 1)) { hud_.cea = s4; return; }
+            page_.flags |= 0x20;   // back out
+            mode = s4 | 0x20, --to;
+        }
+    } else {
+        const int step = s4 & 8 ? -1 : 1;
+        mode = uint8_t(s4 & (s4 & 8 ? ~8 : ~4));
+        for (int n = 0; n < 5; ++n) {  // (the exe loops until an era bit is set)
+            to = int16_t(to + step);
+            if (to > 4) to = 0;
+            if (to < 0) to = 4;
+            if (GD[0xab] & (1 << to)) break;
+        }
+        if (step > 0 && to <= from) to = int16_t(to + 5);
+        if (step < 0 && from <= to) from = int16_t(from + 5);
+        mode |= 0x40;
+        page_.flags |= 0x20;
+        S[5] = uint8_t(to % 5);
+    }
+    hud_.cea = mode;
+    if (from != to) {
+        page_.vel = 0, page_.cur = {int16_t((5 - from) * 800 + off), 0};
+        page_.in = page_.cur[0], page_.out = int16_t((5 - to) * 800);
+        hud_.cea = mode | 0x80;
+    }
+    S[4] = hud_.cea;
 }
 
 void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
@@ -665,11 +766,7 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     if (restart) return;
     if (!hud_.init) hudSetup();
     if (hudFrames_.empty()) return;  // no HUD sheet in this level (0x4d5d74 == 0)
-    // 0x461db0: S[4] mode changes; the pause-screen panels (S[4] 2/4/8, 0x461db0 slides) are not ported.
-    if (S[4] != hud_.cea) {
-        if ((S[4] & 0xe) || (hud_.cea & 2)) unsupported.insert("hud panel S[4]");
-        hud_.cea = S[4];
-    }
+    hudPage();
     hudSprites[29].shown = false;  // snipe-mode cross-hair: look mode (0x4d4fd4 & 2) is not simulated
     if (!(GD[0xac] & 1)) {
         hudSprites[31].shown = false;
@@ -690,6 +787,36 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     hudCounter(hud_.slide[2], 0, 0, uint8_t(lives), hud_.lives != lives && hud_.lives != -1);
     hud_.cea = keep;
     hud_.lives = lives;
+    // Pause-screen counters (S[4] & 2), each once the in-game element at its place has slid out: carrots GD+0x58
+    // with model 3 (slide 5, after Bugs' bar), coins GD+0x5a with model 4 (slide 6, after Taz's), GD+0x84 as a
+    // percentage of 6010 with sprite 22 (slide 7, after the coin counter).
+    const uint16_t pct = uint16_t((uint16_t(GD[0x84] | GD[0x85] << 8) * 100) / 0x177a);
+    const struct { size_t slide, after, desc; int slot; uint16_t value; } pc[3] = {
+        {5, 0, 3, 3, uint16_t(GD[0x58] | GD[0x59] << 8)}, {6, 1, 4, 4, uint16_t(GD[0x5a] | GD[0x5b] << 8)}, {7, 4, 5, -1, pct}};
+    for (const auto& c : pc) {
+        Slide& sl = hud_.slide[c.slide];
+        if (hud_.slide[c.after].flags & 0x200) continue;
+        if (!(S[4] & 2)) {
+            sl.flags = uint16_t((sl.flags & ~4) | 8);
+        } else {
+            if (!(sl.flags & 0x200)) hudDigits(c.value, c.desc, sl);
+            sl.flags = uint16_t((sl.flags & ~8) | 4);
+        }
+        const Desc& dd = kDesc[c.desc];
+        if (slideStep(sl)) {
+            for (int k = 0; k < std::abs(dd.n); ++k) {
+                const size_t i = size_t(dd.first + k);
+                if (!(sl.flags & 0x200)) hudSprites[i].shown = false;
+                else if (hudSprites[i].shown) hudMove(i, int16_t(hud_.pos[i][0] + sl.cur[0]), int16_t(hud_.pos[i][1] + sl.cur[1]));
+            }
+            if (sl.flags & 0x200) {
+                if (c.slot >= 0) hud[size_t(c.slot)].x = int16_t(sl.cur[0] + kHudModelPos[c.slot][0]);
+                else hudMove(22, int16_t(hud_.pos[22][0] + sl.cur[0]), int16_t(hud_.pos[22][1] + sl.cur[1]));
+            }
+        }
+        if (c.slot >= 0) hud[size_t(c.slot)].shown = sl.flags & 0x200;
+        else hudSprites[22].shown = sl.flags & 0x200;
+    }
     if (GD[0x9e] && !(S[4] & 0x10)) hud_.cea |= 1;
     for (size_t p = 0; p < 2; ++p) {  // Bugs (bars 0, 3) and Taz (1, 4): health and the S[0x6d] / S[0x6e] bar
         const TbActor& pl = actors[p];
@@ -718,8 +845,29 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     hudCounter(hud_.slide[4], 2, 2, v2, hud_.slot2 != v2 && hud_.slot2 != 0xffff);
     hud_.slot2 = v2;
     if (hud_.spd[1][1] > 100) hud_.spd[1][1] = int16_t(hud_.spd[1][1] - 10);
-    if (hud_.cea & 0x62) unsupported.insert("hud era selector");
-    else for (size_t k : {5u, 6u, 7u, 8u, 9u, 11u, 12u, 13u}) hud[k].shown = false;
+    if (!(hud_.cea & 0x62)) {
+        for (size_t k : {5u, 6u, 7u, 8u, 9u, 11u, 12u, 13u}) hud[k].shown = false;
+    } else {  // era page models: 5 always, 6 + page on its page, 11 / 12 on the era pages (1..4), 13 never
+        const int32_t scroll = page_.cur[0];
+        auto place = [&](size_t k, int16_t px) {  // 0x462fd0
+            HudItem& m = hud[k];
+            if (hud_.cea & 0x20) m.x = int16_t(px - (hud_.cea & 2 ? page_.out : page_.in) + scroll);
+            else if (hud_.cea & 0x40) m.x = int16_t(px + scroll % 800 > 400 ? px + scroll % 800 - 800 : px + scroll % 800);
+            else if (hud_.cea & 2) m.x = px;
+            m.shown = true;
+        };
+        place(5, kHudModelPos[5][0]);
+        const int32_t page = (5 - (scroll + 400) / 800) % 5;
+        for (size_t k = 1; k < 5; ++k)
+            if (page == int32_t(k)) place(5 + k, kHudModelPos[6][0]);
+            else hud[5 + k].shown = false;
+        if (page == 0) hud[11].shown = false;
+        else place(11, kHudModelPos[11][0]);
+        hud[13].shown = false;
+        if (page == 0) hud[12].shown = false;
+        else place(12, kHudModelPos[12][0]);
+    }
+    if ((S[4] & 0x80) && !slideStep(page_)) S[4] &= 0x1f;
     for (size_t k = 0; k < 10; ++k)
         for (size_t c = 0; c < 3; ++c) hud_.ang[k][c] = int16_t(hud_.ang[k][c] + hud_.spd[k][c]);
     for (size_t k = 0; k < hud.size(); ++k)
@@ -728,9 +876,14 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
 }
 
 // ------------------------------------------------------------------------------------------------ camera node
-void TbWorld::cameraNodes() {  // 0x405b50 (load-mode frames): a part with flag 0x40 is the camera
+// Render pass 0x465130 clears B+0x3c 0x300, then 0x469aa0 poses each drawn entity: a part with flag 0x40 (camera node,
+// not hidden) is the view (0x464820): eye = its world origin, look = eye + its rotation · (0, 0, 1200), body = eye
+// (flags10 0x20: eye + R · (0, 0, 400)), flags |= 0x100; flags10 0x40 eases eye and look by 1/8 instead. The follow
+// camera 0x439700 stands still while 0x300 is up and resumes from this pose (ARCA01 intro template 425, RETRY).
+void TbWorld::cameraNodes() {
+    camScript.flags &= ~0x300u;
     for (TbActor* a : order()) {
-        if (!a->active) continue;
+        if (!a->active || !a->drawn()) continue;
         const std::vector<TodPart>& parts = a->anim.parts;
         for (size_t i = 0; i < parts.size(); ++i) {
             if ((parts[i].flags & 0x8000) || !(parts[i].flags & 0x40)) continue;
@@ -746,8 +899,19 @@ void TbWorld::cameraNodes() {  // 0x405b50 (load-mode frames): a part with flag 
                 return V3{a->pos.x + r.x, a->pos.y + r.y, a->pos.z + r.z};
             };
             camScript.flags |= 0x100;
-            cam.eye = world(0);
-            cam.look = world(1000);
+            const V3 e = world(0), l = world(1200);
+            if (a->flags10 & 0x40) {
+                cam.eye = {cam.eye.x - ((cam.eye.x - e.x) >> 3), cam.eye.y - ((cam.eye.y - e.y) >> 3), cam.eye.z - ((cam.eye.z - e.z) >> 3)};
+                cam.look = {cam.look.x - ((cam.look.x - cam.eye.x - (l.x - e.x)) >> 3), cam.look.y - ((cam.look.y - cam.eye.y - (l.y - e.y)) >> 3),
+                            cam.look.z - ((cam.look.z - cam.eye.z - (l.z - e.z)) >> 3)};
+            } else {
+                cam.eye = e, cam.look = l;
+            }
+            cam.body = cam.eye;
+            if (a->flags10 & 0x20) {
+                const V3 b = world(400);
+                cam.body = {cam.eye.x + b.x - e.x, cam.eye.y + b.y - e.y, cam.eye.z + b.z - e.z};
+            }
         }
     }
 }

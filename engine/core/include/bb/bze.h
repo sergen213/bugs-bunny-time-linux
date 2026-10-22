@@ -19,7 +19,7 @@ std::vector<uint8_t> readFile(const std::filesystem::path& path);
 
 enum class BzeVariant : uint8_t {
     LostInTime,   // u32 version=1, u32 count, entries @0x08; sections LZSS-compressed
-    TimeBusters,  // u32 0, u32 budget, u32 count, entries @0x0c; sections stored raw
+    TimeBusters,  // u32 0, u32 budget, u32 count, entries @0x0c; sections stored raw (PS1 .BZZ: u32 1 = LZSS)
 };
 
 struct BzeSection {
@@ -35,6 +35,7 @@ struct BzeFile {
 
     BzeVariant variant = BzeVariant::LostInTime;
     uint32_t tbBudget = 0;  // TB only: 2nd header u32, always a multiple of 1000; meaning unverified
+    bool compressed = false;  // sections LZSS-compressed: every LiT file and PS1 TB .BZZ files
     uint32_t checksum = 0;
     std::vector<BzeSection> sections;
     std::vector<uint8_t> bytes;  // whole file

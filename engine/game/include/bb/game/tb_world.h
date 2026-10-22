@@ -117,16 +117,26 @@ struct TbActor {
     bool drawn() const { return !(f20 & 0x2000) && !(rec() && (rec()->flagsC & 0x20000)); }  // 0x464480 skip
 };
 
-struct TbCamera {
+struct TbCamera {  // view 0 block B = 0x4d5120 (0x437800)
     V3 body, look, eye;                      // B+0x2c spring body P, B+0x10 look-at L, B+4 eye
+    V3 prevBody, prevLook, prevEye;          // B+0x8c / +0x7c / +0x6c: restored at the start of every follow tick
     std::array<int32_t, 3> vel{};            // B+0xc0 body velocity (Q12)
-    int32_t dist = 1200;                     // DAT_004d9ae0 spring rest length D (B+0x118)
-    uint32_t flags = 0;                      // B+0xe0 follow flags (0x80 single focus, 0x100 two-player)
+    V3 orbit;                                // B+0xd0 / +0xd8: the L2/R2 orbit step for the next tick (x, z)
+    int32_t dist = 1200;                     // DAT_004d9ae0 spring rest length D (B+0x118 = 1200)
+    // B+0x118..0x148 ('_' sub-ops; 0x437440 defaults): rest length, wall radius / push, aim and look heights, vertical
+    // band, sphere radius, push / reset / guide speeds, velocity damping (Q12).
+    int32_t rest = 1200, wallR = 500, wallPush = 20, aimH = 400, band = 50, lookH = 300, radius = 300;
+    int32_t pushSpeed = 30, resetSpeed = 10, guideSpeed = 15, damp = 400;
+    uint32_t flags = 0;                      // B+0xe0 follow flags (4 reset, 0x10 pushed, 0x20 guide, 0x80 single
+                                             // focus, 0x100 two-player, 0x1000 at rest, 0x2000 check line of sight)
     int32_t blend = 0x1000;                  // 0x4d9acc
-    V3 saved;
+    V3 saved;                                // 0x4d9ae8: target when the players split
     int32_t acc = 0;                         // B+0xe4 L2/R2 accumulator
-    int32_t splitTicks = 0;
-    int lastFocus = -1;
+    int32_t ticks = 0;                       // B+0xe8: follow ticks since the last body contact / airborne focus
+    V3 guideN, guidePt, n2;                  // B+0xec guide normal (Q12), B+0xf4 its polygon centre; scratch normal
+    int32_t guidePoly = -1;                  // B+0x114
+    int32_t splitTicks = 0;                  // 0x4d9ac8
+    int lastFocus = -1;                      // 0x4d9ac4
     bool init = false;
 };
 
@@ -137,6 +147,9 @@ public:
     // Entities without a scene model get their own (mesh, rig, anims) from their tag-0x0f links. gd: GAME_DATA
     // carried from the previous level (the reload 0x4014c0 keeps the global block); none = new game (3 lives, 6 health).
     static TbWorld load(const BzeFile& bze, const Scene& scene, const std::array<uint8_t, 0x300>* gd = nullptr);
+    // Models the world built itself from level data (entities without a scene actor, spawn templates), each once:
+    // the mod kit exports them (bb::mods::exportModels extra). Mods already applied (bb::mods::applyToModel).
+    std::vector<const ActorModel*> builtModels() const;
     // Level table 0x4cd998 (96 entries) index -> file stem ("ARCA01"); "" when out of range.
     static std::string_view levelName(int index);
 
@@ -165,6 +178,8 @@ public:
     uint8_t airTicks = 0;                    // 0x4d5eb6
     int camFocus = 0;                        // DAT_004d5028: focus latched before the switch (camera one tick late)
     TbCamera cam;
+    int32_t camTarget = -1;                  // B+0x44 (0x4d5164): director uid a class-16 tick hands the camera (0x450bc0)
+    int32_t loadLookH = 0;                   // B+0x134 at the level-load placement: 0 on the session's first level, then 300
     std::array<uint8_t, 0x400> S{};          // logic byte variables 0x4d24a0
     std::array<uint8_t, 0x300> GD{};         // GAME_DATA image: +0xa0 lives, +0xa2 down flags, +0xa5/+0xa6 health,
                                              // +0xac/+0xad ability bits
@@ -209,6 +224,7 @@ public:
     // the 512x240 space: x, y top-left, w x h texels from u, v).
     struct HudSprite { uint8_t frame = 0; bool shown = false; int16_t x = 0, y = 0, w = 0, h = 0, u = 0, v = 0; };
     std::array<HudItem, 15> hud{};
+    std::array<int16_t, 2> panelPos(size_t i) const { return panels_[i].cur; }  // text panel i origin (0x4d59a0)
     std::array<HudSprite, 32> hudSprites{};
     uint32_t textStatus = 0;                 // 0x4d9b40: status of the last S30 / R 0x22 text (0x4680b0)
 
@@ -223,6 +239,19 @@ private:
     // rand() draws: count +0x52, flags +6, owner entity +0x60 (uid, -1 none).
     struct FxSlot { uint8_t count = 10; uint16_t flags = 0x40; int32_t owner = -1; };
     std::array<FxSlot, 20> fx_{};
+    // Trigger zones (chunk 0x09 aux items, list 0x4d2760, GAMEPLAY_TB.md §10): corner origin (+0x10), rotation (+0x18;
+    // the test uses 0x1000 - each angle), x / z extents (+0x20 / +0x24) and the height below the origin (+0x22, < 0),
+    // flags +0x8 (1: unrotated) / +0xc (0x1000 water); blocks keyed by entity id (10 any player, 8 Bugs, 9 Taz), in the
+    // list order of +0x28 (pushed at the head: reverse file order).
+    struct Zone {
+        V3 origin;
+        std::array<int16_t, 3> rot{};
+        int16_t extX = 0, height = 0, extZ = 0;
+        uint32_t flags8 = 0, flagsC = 0;
+        std::vector<std::pair<uint16_t, TbBlock>> blocks;
+    };
+    std::vector<Zone> zones_;
+    uint32_t zoneTick(TbActor& a);           // 0x44f550 (box test 0x448780): the zones' blocks for this entity
     std::vector<TbActor*> list_;             // entity list 0x4d4fd0 order: players at their file position
     V3 prevEye_;                             // DAT_004d2750: camera position of the previous list build
     const TbWorld* listOwner_ = nullptr;     // list_ is rebuilt when stale (spawn/erase) or the world was moved
@@ -262,7 +291,9 @@ private:
     void switchTick();
     void pauseTick();                        // 0x4014c0 head: Start -> S[9] = 1 + pause menu template 0x1d
     void cameraTick();
-    void cameraSnap(const TbActor& t);
+    void cameraPlace(const TbActor& t);      // 0x437180
+    void cameraInit(const TbActor& t);       // 0x439570
+    void cameraReset(const TbActor& t);      // 0x437260
     int16_t camYaw() const;
     const TbPad& padOf(const TbActor& a, int override = -1) const { return pads[size_t(override >= 0 ? override : a.padIndex())]; }
 
@@ -296,13 +327,19 @@ private:
         int16_t iconX = -160, iconY = -104;  // 0x4cec28 / 0x4cec2a
         uint16_t watchTicks = 0, watchPrev = 0;  // 0x4d203e / 0x4d203c stopwatch
     } hud_;
+    // Text panels 0x4d59a0 (20 slide records = op 0xe text origins) with states 0x4d5bc0 (0x20 idle, 0x80 start record
+    // 0x4d5bc1 of table 0x4cf078, 0x40 sliding), set by S75 / tested by R 0x3b, stepped by 0x4667a0 (in 0x45eee0).
+    std::array<Slide, 20> panels_{};
+    Slide page_{};                           // 0x4d5960: pause-screen page scroll (text op 0xf, era models)
+    void hudPage();                          // 0x461db0
+    std::array<std::array<uint8_t, 2>, 20> panelState_{};
+    void panelTick();                        // 0x4667a0
     std::vector<std::array<int16_t, 2>> hudFrames_;  // HUD sheet frame sizes (w, h)
     std::vector<uint8_t> textBlock_;         // language block 0x4d5b88 (GD+0x93 = 0: English): u16 offsets + scripts
     struct TextJob { uint32_t uid; uint16_t script; };
     std::vector<TextJob> textQueue_;         // 0x4d5b20: deferred scripts of the lowest priority (0x4681c0)
     int16_t textQueuePrio_ = 32000;          // 0x4d5b28
     uint8_t blink_ = 0;                      // 0x4cf188: palette 9 = white for 16 runs, yellow for 14
-    bool camNodeDone_ = false;
     bool pauseLatch_ = false;                // 0x4d02d0: Start must be released after a resume
     void hudSetup();                         // 0x462430
     void hudTick();                          // 0x463170
