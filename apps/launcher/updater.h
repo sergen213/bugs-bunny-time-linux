@@ -71,6 +71,12 @@ inline constexpr const char* kHandoffEnv = "BBTIME_LAUNCHER_HANDOFF"; // set by 
 // than `running`. Empty otherwise (no install, no launcher artifact, same or older version).
 std::filesystem::path handoffTarget(const std::filesystem::path& installRoot, std::string_view running);
 
+// An updater-installed artifact (current/<name>, e.g. "bbtime") to run instead of the copy bundled with the running
+// launcher: only when it is executable and `current` is at least as new as `running`. Empty otherwise, so a newer
+// AppImage never runs an older installed game.
+std::filesystem::path installedArtifact(const std::filesystem::path& installRoot, std::string_view running,
+                                        std::string_view name);
+
 // Refuses unless m.version > max(current, runningVersion) or o.force. Downloads every artifact into a staging
 // directory, verifies size + SHA-256, renames it to versions/<v>, then swaps `current` (old one becomes
 // `previous`). Returns the installed version directory.

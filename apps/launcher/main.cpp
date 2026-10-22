@@ -893,11 +893,16 @@ private:
         refreshMods();
     }
 
-    static QString modkitBinary() {
+    static QString modkitBinary() { return toolBinary("bbtime-modkit", "/../../tools/bbtime-modkit"); }
+
+    // An updater-installed copy when it is at least as new as this launcher, then the one bundled next to the launcher
+    // (AppImage / install / build tree), then PATH. A newer AppImage never runs an older installed game.
+    static QString toolBinary(const char* name, const char* buildTree) {
         const QString here = QCoreApplication::applicationDirPath();
-        for (const QString& c : {q(appRoot() / "current/bbtime-modkit"), here + "/bbtime-modkit", here + "/../../tools/bbtime-modkit"})
-            if (QFileInfo(c).isExecutable()) return QFileInfo(c).canonicalFilePath();
-        return QStandardPaths::findExecutable("bbtime-modkit");
+        const QString installed = q(bbtime::update::installedArtifact(appRoot(), BBTIME_VERSION, name));
+        for (const QString& c : {installed, here + "/" + name, here + buildTree})
+            if (!c.isEmpty() && QFileInfo(c).isExecutable()) return QFileInfo(c).canonicalFilePath();
+        return QStandardPaths::findExecutable(name);
     }
 
     // Game / level / kind picker -> bbtime-modkit export (originals stay in the user's own folder).
@@ -1151,13 +1156,7 @@ private:
         return e.empty();
     }
 
-    // Prefers an updater-installed game, then the one next to the launcher (install or build tree), then PATH.
-    static QString gameBinary() {
-        const QString here = QCoreApplication::applicationDirPath();
-        for (const QString& c : {q(appRoot() / "current/bbtime"), here + "/bbtime", here + "/../bbtime/bbtime"})
-            if (QFileInfo(c).isExecutable()) return QFileInfo(c).canonicalFilePath();
-        return QStandardPaths::findExecutable("bbtime");
-    }
+    static QString gameBinary() { return toolBinary("bbtime", "/../bbtime/bbtime"); }
 
     void launch() {
         if (proc_ || !saveSettings()) return;

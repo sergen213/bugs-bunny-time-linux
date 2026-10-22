@@ -193,6 +193,11 @@ int main() {
     assert(handoffTarget(o.installRoot, "0.1.0") == launcher && handoffTarget(o.installRoot, "0.2.9") == launcher);
     assert(handoffTarget(o.installRoot, "0.3.0").empty() && handoffTarget(o.installRoot, "1.0.0").empty());
     assert(handoffTarget(tmp / "nothing", "0.1.0").empty());
+    // Game binary: the installed copy (0.3.0) only for a launcher that is not newer (no stale game from a new AppImage).
+    const fs::path game = o.installRoot / "current/bbtime";
+    assert(installedArtifact(o.installRoot, "0.2.0", "bbtime") == game && installedArtifact(o.installRoot, "0.3.0", "bbtime") == game);
+    assert(installedArtifact(o.installRoot, "0.9.0", "bbtime").empty());
+    assert(installedArtifact(o.installRoot, "0.2.0", "bbtime-modkit").empty()); // not installed
 
     // Version parsing.
     assert(parseVersion("1.2.3") == (Version{1, 2, 3}) && parseVersion("10.0.0") > parseVersion("9.99.99"));

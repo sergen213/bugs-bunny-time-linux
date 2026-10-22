@@ -210,6 +210,13 @@ fs::path handoffTarget(const fs::path& root, std::string_view running) {
     return exe;
 }
 
+fs::path installedArtifact(const fs::path& root, std::string_view running, std::string_view name) {
+    const auto have = parseVersion(currentVersion(root).value_or("")), run = parseVersion(running);
+    const fs::path exe = root / "current" / name;
+    if (!have || (run && *have < *run) || access(exe.c_str(), X_OK) != 0) return {};
+    return exe;
+}
+
 std::expected<fs::path, std::string> install(const Manifest& m, const Options& o, std::string_view running) {
     const auto target = parseVersion(m.version);
     if (!target) return std::unexpected("bad manifest version");

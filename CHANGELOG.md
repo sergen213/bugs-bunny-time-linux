@@ -3,6 +3,14 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.9.1 — 2026-10-22 (fix: launcher ran an older installed game)
+
+- The launcher started the game from an earlier updater install (`~/.local/share/bbtime/app/current/bbtime`) even
+  when it was older than the launcher itself, so a freshly downloaded 0.9.0 AppImage ran the 0.8.0 game without ray
+  tracing, FSR or the mod kit. It now uses an installed game / modkit only when it is at least as new as the launcher,
+  otherwise the copy bundled with it.
+- `bbtime --version`; the game prints its version at start and on the F3 overlay.
+
 ## 0.9.0 — 2026-10-22 (Wave 9: Vulkan RT shadows/AO/reflections + FSR 3.1 upscaling and frame generation, modkit, restyled launcher with auto-updates, TB intro/camera/pause, many LiT behaviours)
 - Mod kit for both games (`docs/MODDING.md`): mods in `~/.local/share/bbtime/mods/<id>/` replace textures (PNG,
   any size — upscaled packs work), character / NPC / prop / pickup models (incl. TB entities the game builds from

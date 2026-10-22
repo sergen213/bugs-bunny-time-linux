@@ -58,7 +58,9 @@ $XDG_DATA_HOME/bbtime/app/
 4. **Rollback** swaps `current` and `previous` (both must exist).
 
 The updater writes only below `app/`; game data, copied `Datas/`, saves and original installs are never touched.
-The launcher prefers `app/current/bbtime` when starting the game.
+The launcher starts `app/current/bbtime` (and `bbtime-modkit`) only when `current` is at least as new as the running
+launcher (`installedArtifact`); otherwise it runs the copy bundled with it, so a newer AppImage never starts an older
+installed game.
 
 ## Launcher restart and hand-off
 

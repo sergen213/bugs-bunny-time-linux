@@ -220,6 +220,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             if (ok) a.camera = c;
         }
         else if (f == "--help" || f == "-h") { std::println("{}", kUsage); std::exit(0); }
+        else if (f == "--version") { std::println("bbtime {}", BBTIME_VERSION); std::exit(0); }
         else ok = false;
         if (!ok) {
             std::println(stderr, "bbtime: bad or incomplete argument '{}'\n{}", f, kUsage);
@@ -1469,7 +1470,7 @@ struct App {
         bool fsrOn = false;
         if constexpr (requires { r.fsrActive(); }) fsrOn = r.fsrActive();
         std::string text = std::format(
-            "{} | {}\n{}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
+            "bbtime " BBTIME_VERSION "  {} | {}\n{}\n{:.1f} FPS  {:.2f} ms  {} draws  {}x{}\n"
             "mode {}  {}  MSAA {}  FOV {:.0f} {}  vsync {}\ntick {:.0f} Hz (GAMEPLAY 1.1)  alpha {:.2f}",
             r.glVendor(), r.glRenderer(), r.glVersion(), 1.0 / frameTime, frameTime * 1000.0, r.drawCalls(), r.width(),
             r.height(), enh ? "Enhanced" : "Original", enh ? std::format("trilinear aniso x{:.0f}", r.maxAnisotropy())
@@ -1561,7 +1562,7 @@ int run(const std::optional<Args>& args) {
             return 1;
         }
         app.r.setVsync(app.vsync);
-        std::println("bbtime: {} | {} | {} | data {}", app.r.glVendor(), app.r.glRenderer(), app.r.glVersion(),
+        std::println("bbtime {}: {} | {} | {} | data {}", BBTIME_VERSION, app.r.glVendor(), app.r.glRenderer(), app.r.glVersion(),
                      args->data.string());
         for (int gi = 0; gi < 2; ++gi) {
             Game& g = app.games[gi];
