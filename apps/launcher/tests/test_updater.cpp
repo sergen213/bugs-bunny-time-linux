@@ -200,6 +200,24 @@ int main() {
     assert(installedArtifact(o.installRoot, "0.2.0", "bbtime") == game && installedArtifact(o.installRoot, "0.3.0", "bbtime") == game);
     assert(installedArtifact(o.installRoot, "0.9.0", "bbtime").empty());
     assert(installedArtifact(o.installRoot, "0.2.0", "bbtime-modkit").empty()); // not installed
+    // AppImage manager file (Gear Lever ~/AppImages/bbtime.appimage, Shelly ~/.local/bin/...): replaced in place by the
+    // newer launcher, through a symlink, mode kept; identical content is left alone.
+    const fs::path apps = tmp / "AppImages", userImg = apps / "bbtime.appimage", link = apps / "link.appimage";
+    put(userImg, "old launcher");
+    fs::permissions(userImg, fs::perms(0750));
+    fs::create_symlink(userImg, link);
+    assert(refreshAppImage(link, launcher) == true && slurp(userImg) == "#!/bin/sh\n" && fs::is_symlink(link));
+    assert(fs::status(userImg).permissions() == fs::perms(0750));
+    assert(refreshAppImage(userImg, launcher) == false && !refreshAppImage(apps / "missing", launcher));
+    assert(std::ranges::distance(fs::directory_iterator(apps)) == 2); // no temp file left
+    // Origin: the hand-off variable wins; APPIMAGE inside the install root (the installed launcher) does not count.
+    setenv("APPIMAGE", launcher.c_str(), 1);
+    assert(originAppImage(o.installRoot).empty());
+    setenv("APPIMAGE", userImg.c_str(), 1);
+    assert(originAppImage(o.installRoot) == userImg);
+    setenv(kOriginEnv, link.c_str(), 1);
+    assert(originAppImage(o.installRoot) == link);
+    unsetenv(kOriginEnv), unsetenv("APPIMAGE");
 
     // Version parsing.
     assert(parseVersion("1.2.3") == (Version{1, 2, 3}) && parseVersion("10.0.0") > parseVersion("9.99.99"));

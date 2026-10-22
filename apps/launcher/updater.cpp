@@ -8,8 +8,11 @@
 #include <cctype>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <format>
 #include <mutex>
+#include <sys/stat.h>
 #include <set>
 #include <unistd.h>
 
@@ -215,6 +218,68 @@ fs::path installedArtifact(const fs::path& root, std::string_view running, std::
     const fs::path exe = root / "current" / name;
     if (!have || (run && *have < *run) || access(exe.c_str(), X_OK) != 0) return {};
     return exe;
+}
+
+namespace {
+bool inside(const fs::path& p, const fs::path& root) {
+    std::error_code ec;
+    const fs::path r = fs::weakly_canonical(root, ec), c = fs::weakly_canonical(p, ec);
+    const auto [a, b] = std::ranges::mismatch(r, c);
+    return !r.empty() && a == r.end();
+}
+
+// Legacy hand-off (0.9.x / 0.10.0 launchers export no kOriginEnv; the inner runtime overwrote APPIMAGE): the user's
+// AppImage is still mounted by its runtime's FUSE process, whose argv[0] is that file. Our uid, a regular file outside
+// the install root, "bbtime" in the name (Gear Lever bbtime.appimage, Shelly / AppImageLauncher bbtime-<v>-x86_64*).
+// ponytail: name heuristic; a renamed AppImage is not found (it keeps handing off), add a content check if needed.
+fs::path mountedAppImage(const fs::path& root) {
+    std::error_code ec;
+    for (const auto& d : fs::directory_iterator("/proc", ec)) {
+        if (!std::isdigit(uint8_t(d.path().filename().string()[0]))) continue;
+        struct stat st{};
+        if (stat(d.path().c_str(), &st) != 0 || st.st_uid != getuid()) continue;
+        std::ifstream f(d.path() / "cmdline", std::ios::binary);
+        std::string a0;
+        std::getline(f, a0, '\0');
+        std::string name = fs::path(a0).filename().string();
+        std::ranges::transform(name, name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        if (a0.starts_with('/') && name.contains("bbtime") && name.ends_with(".appimage") && fs::is_regular_file(a0, ec) &&
+            !inside(a0, root))
+            return a0;
+    }
+    return {};
+}
+} // namespace
+
+fs::path originAppImage(const fs::path& root) {
+    if (const char* o = std::getenv(kOriginEnv); o && *o) return o;
+    if (const char* a = std::getenv("APPIMAGE"); a && *a && !inside(a, root)) return a;
+    return std::getenv(kHandoffEnv) ? mountedAppImage(root) : fs::path{};
+}
+
+std::expected<bool, std::string> refreshAppImage(const fs::path& origin, const fs::path& self) {
+    std::error_code ec;
+    const fs::path dst = fs::canonical(origin, ec), src = fs::canonical(self, ec);
+    if (dst.empty() || src.empty() || !fs::is_regular_file(dst) || !fs::is_regular_file(src))
+        return std::unexpected(std::format("{} or {} is not a file", origin.string(), self.string()));
+    if (dst == src) return false;
+    auto bytes = [](const fs::path& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), {});
+    };
+    if (fs::file_size(dst, ec) == fs::file_size(src, ec) && bytes(dst) == bytes(src)) return false;
+    const fs::path tmp = dst.parent_path() / std::format(".{}.bbtime-{}", dst.filename().string(), getpid());
+    const auto mode = fs::status(dst, ec).permissions();
+    if (!fs::copy_file(src, tmp, fs::copy_options::overwrite_existing, ec))
+        return std::unexpected(std::format("cannot write {}: {}", tmp.string(), ec.message()));
+    fs::permissions(tmp, mode, ec);
+    std::error_code rec;
+    fs::rename(tmp, dst, rec);  // atomic: a running copy keeps its open inode
+    if (rec) {
+        fs::remove(tmp, ec);
+        return std::unexpected(std::format("cannot replace {}: {}", dst.string(), rec.message()));
+    }
+    return true;
 }
 
 std::expected<fs::path, std::string> install(const Manifest& m, const Options& o, std::string_view running) {

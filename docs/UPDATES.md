@@ -74,6 +74,15 @@ installed launcher. Loop guard: the handing-off launcher sets `BBTIME_LAUNCHER_H
 it never hands off again (and clears it). A rollback or forced downgrade makes `current` older than the running
 launcher, so no hand-off happens. Releases without the artifact (0.8.0) only update the game binary.
 
+From 0.10.1 the launcher that was handed off to also **replaces the user's AppImage in place** with itself
+(`bbtime::update::refreshAppImage`: copy beside it, keep its mode, atomic rename; symlinks followed), so menu entries
+made by AppImage managers (Gear Lever `~/AppImages/*.appimage`, Shelly `~/.local/bin/*.AppImage`, AppImageLauncher
+`~/Applications`) or by hand start the new version directly instead of keeping the old file. The file is
+`BBTIME_ORIGIN_APPIMAGE` (the handing-off launcher exports its `APPIMAGE`; the inner AppImage runtime overwrites
+`APPIMAGE`), else for hand-offs from 0.9.x / 0.10.0 launchers the file a running AppImage runtime of ours still mounts
+(its FUSE process's argv[0], outside the install root, `bbtime` in the name) (`originAppImage`). An unwritable
+location is reported on stderr and otherwise left alone.
+
 ## Releasing
 
 ```sh

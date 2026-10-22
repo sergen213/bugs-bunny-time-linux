@@ -82,6 +82,20 @@ std::filesystem::path handoffTarget(const std::filesystem::path& installRoot, st
 std::filesystem::path installedArtifact(const std::filesystem::path& installRoot, std::string_view running,
                                         std::string_view name);
 
+// AppImage managers (Gear Lever, Shelly, AppImageLauncher, a hand-made .desktop) launch the AppImage file the user
+// installed, e.g. ~/AppImages/bbtime.appimage. After an update that file is older than current/bbtime-launcher, so the
+// launcher hands off on every start and the menu entry keeps naming the old file. kOriginEnv carries that file's path
+// across the hand-off (the inner AppImage runtime overwrites APPIMAGE).
+inline constexpr const char* kOriginEnv = "BBTIME_ORIGIN_APPIMAGE";
+// The user's AppImage this launcher was started from: kOriginEnv, else APPIMAGE unless it lies inside installRoot,
+// else (hand-off from a pre-0.10.1 launcher without kOriginEnv) the first ancestor process whose APPIMAGE is outside
+// installRoot. Empty when not started from an AppImage.
+std::filesystem::path originAppImage(const std::filesystem::path& installRoot);
+// Replaces `origin` in place by the AppImage `self` (copy beside it + rename, mode kept, symlinks resolved), so every
+// menu entry / desktop file / manager record pointing at it now starts `self`. Only for a hand-off (origin older than
+// current). Returns false when already identical, an error when the directory is not writable.
+std::expected<bool, std::string> refreshAppImage(const std::filesystem::path& origin, const std::filesystem::path& self);
+
 // Refuses unless m.version > max(current, runningVersion) or o.force. Downloads every artifact into a staging
 // directory, verifies size + SHA-256, renames it to versions/<v>, then swaps `current` (old one becomes
 // `previous`). Returns the installed version directory.

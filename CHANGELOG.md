@@ -3,6 +3,17 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.10.1 — 2026-10-22 (fix: app menu entry kept starting the old AppImage)
+
+- An AppImage installed through an AppImage manager (Gear Lever `~/AppImages`, Shelly `~/.local/bin`,
+  AppImageLauncher) or a hand-made menu entry stayed at its old version after a launcher update: the menu entry
+  started it, and it only handed off to the updated launcher (and older launchers did not even do that). The updated
+  launcher now replaces that AppImage file in place with itself (atomic copy + rename, mode kept, symlinks followed),
+  so the menu entry, desktop icons and the manager start the new version directly. The file is found through
+  `BBTIME_ORIGIN_APPIMAGE` (set at the hand-off), `APPIMAGE`, or for a hand-off from a 0.9.x / 0.10.0 launcher the
+  AppImage runtime process still mounting it (`bbtime` in the file name). A rollback never touches it (no hand-off
+  to an older launcher).
+
 ## 0.10.0 — 2026-10-22 (Wave 10: LiT zone/portal visibility, PC blend modes, wide-FOV culls, draw distance, LS01 fixes, model viewer)
 
 - LiT Original Fidelity semi-transparency as bugs.exe's GL path draws it (GL + VK): ABR 0 / 1 / 3 textures are

@@ -1627,6 +1627,8 @@ private:
 // Returns only if exec fails; the env guard stops the new launcher from handing off again.
 void execLauncher(const fs::path& exe, std::vector<char*> args) {
     setenv(bbtime::update::kHandoffEnv, "1", 1);
+    if (const fs::path o = bbtime::update::originAppImage(appRoot()); !o.empty())
+        setenv(bbtime::update::kOriginEnv, o.c_str(), 0);  // the user's AppImage, refreshed by the new launcher
     args[0] = const_cast<char*>(exe.c_str());
     execv(exe.c_str(), args.data());
     std::perror(("bbtime-launcher: cannot start " + exe.string()).c_str());
@@ -1637,7 +1639,19 @@ void execLauncher(const fs::path& exe, std::vector<char*> args) {
 
 int main(int argc, char** argv) {
     const std::vector<char*> args(argv, argv + argc + 1); // before QApplication strips its own options
-    if (std::getenv(bbtime::update::kHandoffEnv)) unsetenv(bbtime::update::kHandoffEnv);
+    if (std::getenv(bbtime::update::kHandoffEnv)) {
+        // Handed off from the user's older AppImage (menu entry of Gear Lever / Shelly / AppImageLauncher ...):
+        // replace that file by this launcher's AppImage so the entry starts the new version directly next time.
+        const fs::path origin = bbtime::update::originAppImage(appRoot());
+        const char* self = std::getenv("APPIMAGE");
+        if (!origin.empty() && self && fs::path(self).string().starts_with(appRoot().string())) {
+            const auto r = bbtime::update::refreshAppImage(origin, self);
+            if (!r) std::fprintf(stderr, "bbtime-launcher: %s\n", r.error().c_str());
+            else if (*r) std::fprintf(stderr, "bbtime-launcher: updated %s to %s\n", origin.c_str(), BBTIME_VERSION);
+        }
+        unsetenv(bbtime::update::kHandoffEnv);
+        unsetenv(bbtime::update::kOriginEnv);
+    }
     else if (const fs::path next = bbtime::update::handoffTarget(appRoot(), BBTIME_VERSION); !next.empty())
         execLauncher(next, args); // an update installed a newer launcher: run that one
     QApplication app(argc, argv);
