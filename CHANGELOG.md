@@ -3,8 +3,19 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
-## Unreleased
+## 0.10.0 — 2026-10-22 (Wave 10: LiT zone/portal visibility, PC blend modes, wide-FOV culls, draw distance, LS01 fixes, model viewer)
 
+- LiT Original Fidelity semi-transparency as bugs.exe's GL path draws it (GL + VK): ABR 0 / 1 / 3 textures are
+  alpha-blended with the PC texel conversion (rgb raised to a 255 max channel, alpha = max/2, max − max/4, max/4)
+  instead of PS1 additive / 50 % blending, ABR-2 texels are black with luma alpha, and type-4 sprites take their
+  texture's PC mode from the level's face / sprite usage scan (0x423eb0), not the record's ABR. LS01 "Nowhere" is no
+  longer ~1.4× too bright with a white vortex and trails (vs Wine: MAD 6.5 → 3.8, mean 21.3 → 17.9, orig 17.6); the
+  TITLE light beams now match. Enhanced keeps the PS1 look.
+- LiT actors attached at a parent's animated part are drawn under that part's full matrix (rotation and scale
+  through the chain, as GsGetLws), not just its heading: the LS01 clock-gate digits / clock no longer show a stray
+  yellow "foot" bottom right at "Nowhere" (their parts are zero-scaled there, like the original), and cycling eras
+  shows "1x" / "30x" with the clock assembled as in the original; L03ACOM's cannon has its original size. The
+  crossed antenna on the time machine is drawn by the original too (unchanged).
 - LiT carried actors / Bugs stay on the hand part their parent had when they were attached (the exe's +0xc4 =
   +0x68 at attach time), not on whatever part a later animation's attach packet names: Bugs no longer jitters out
   of the LS01 time machine seat while eras are cycled (seat = oracle every counter). Bugs carried at a hand part

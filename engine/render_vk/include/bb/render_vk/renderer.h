@@ -294,7 +294,7 @@ private:
     bool sceneDrawn_ = false;      // drawScene ran this frame
     std::vector<uint64_t> presentTimes_; // SDL_GetTicksNS after each vkQueuePresentKHR (BBTIME_VK_PRESENT_LOG)
     float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
-    bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps
+    bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps; PC ABR texels (0x420d10)
 
     std::vector<V2> batch_;
 };

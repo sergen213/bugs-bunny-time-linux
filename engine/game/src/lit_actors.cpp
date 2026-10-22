@@ -406,6 +406,24 @@ int16_t LitWorld::coordYaw(const LitActor& c) const {
     return int16_t(py + c.localYaw);
 }
 
+std::optional<std::array<float, 9>> LitWorld::parentFrame(const LitActor& a) const {
+    if (a.parent < 0 || a.parentPart < 0) return std::nullopt;
+    const LitActor& c = actors[size_t(a.parent)];
+    const std::array<int16_t, 3> rot{c.rot[0], coordYaw(c), c.rot[2]};
+    const auto o = partOriginQ12(c.animState, size_t(a.parentPart), c.pos, rot, c.scale);
+    if (!o) return std::nullopt;
+    std::array<float, 9> m{};
+    for (int j = 0; j < 3; ++j) {  // column j: the part's image of a 4096-long axis j
+        V3 e{};
+        (j == 0 ? e.x : j == 1 ? e.y : e.z) = 0x1000;
+        const V3 v = *partOriginQ12(c.animState, size_t(a.parentPart), c.pos, rot, c.scale, e);
+        m[size_t(j)] = float(v.x - o->x) / 4096.0f;
+        m[size_t(3 + j)] = float(v.y - o->y) / 4096.0f;
+        m[size_t(6 + j)] = float(v.z - o->z) / 4096.0f;
+    }
+    return m;
+}
+
 int16_t LitWorld::attachPart(int32_t parent, bool hand) const {
     return !hand ? -1 : parent == kParentBugs ? 0 : actors[size_t(parent)].handPart;
 }

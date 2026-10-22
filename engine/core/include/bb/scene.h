@@ -119,10 +119,15 @@ struct ActorInstance {
 };
 // One frame of a LiT sprite-sequence asset (chunk 0x22 tag 0x40, one 0x64 record each) as the type-4 sprite path
 // draws it (0x44c170 -> GL 0x40a6c0): the record's whole texture, white, blended by its semi-transparency bit / ABR.
+// The PC GL path (Original Fidelity: pcBlend / pcAlpha) ignores the record's ABR: it binds the texture's base GL
+// texture, whose texels bugs.exe converted (0x420d10) for the first mode the level's model faces use it with (opaque,
+// ABR 0, 1, 2, 3; a sprite-only texture stays opaque), at vertex alpha 0x467730[abr] = 1.0 (RUNTIME_REFERENCE §27).
 struct SpriteFrame {
     int32_t texture = -1;        // Scene::textures index, -1 = not loaded
     Blend blend = Blend::Opaque;
     uint8_t alpha = 255;         // vertex alpha (ABR 0: 128, ABR 3: 64)
+    Blend pcBlend = Blend::Opaque;
+    uint8_t pcAlpha = 255;       // as Vertex alpha of the faces' mode (Renderer PC semi-transparency)
 };
 
 struct SceneStats {

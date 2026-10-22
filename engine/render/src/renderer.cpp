@@ -35,7 +35,10 @@ uniform float uAlphaRef;   // texels below are discarded (AlphaTest); negative =
 uniform vec2 uFog;         // linear fog start, end; end <= start = off
 uniform vec3 uFogColor;
 uniform int uAdditive;     // 1: additive/subtractive surfaces fade to black, not to the fog colour; 2: PC ABR-2 texel
-                           // alpha = trunc luma of the raw texel (bugs.exe 0x420d10 case 2), alpha-blended, fog to black
+                           // alpha = trunc luma of the raw texel (bugs.exe 0x420d10 case 2), alpha-blended, fog to black;
+                           // 3: LiT PC ABR 0/1/3 (0x420d10 modes 0/1/3): the raw texel's max channel m (0..255) is
+                           // raised to 255 (rgb += 255 - m) and gives the alpha m/2, m - m/4, m/4; the vertex alpha only
+                           // names the mode (128, 255, 64); alpha-blended, fog fades the alpha
 uniform float uColorScale; // vertex rgb multiplier (PS1 modulation: 255/128), result saturates
 uniform float uTexGamma;   // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
 in vec2 vUv;
@@ -45,14 +48,22 @@ out vec4 oCol;
 void main() {
     vec4 t = texture(uTex, vUv);
     float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
+    vec4 vc = vCol;
+    if (uAdditive == 3) {
+        float mx = floor(max(t.r, max(t.g, t.b)) * 255.0 + 0.5), va = floor(vCol.a * 255.0 + 0.5);
+        t.rgb += (255.0 - mx) / 255.0;
+        t.a *= (va == 128.0 ? floor(mx / 2.0) : va == 64.0 ? floor(mx / 4.0) : mx - floor(mx / 4.0)) / 255.0;
+        vc.a = 1.0;
+    }
     if (uTexGamma != 1.0) t.rgb = floor(256.0 * pow(t.rgb * (255.0 / 256.0), vec3(uTexGamma)) + 1e-3) / 255.0;
-    vec4 c = t * vCol;
-    if (uAdditive == 2) c.a = luma * vCol.a;
+    vec4 c = t * vc;
+    if (uAdditive == 2) c = vec4(0.0, 0.0, 0.0, luma * vCol.a);
     c.rgb = min(c.rgb * uColorScale, vec3(1.0));
     if (c.a < uAlphaRef) discard;
     if (uFog.y > uFog.x) {
         float f = clamp((uFog.y - vDist) / (uFog.y - uFog.x), 0.0, 1.0);
-        c.rgb = mix(uAdditive != 0 ? vec3(0.0) : uFogColor, c.rgb, f);
+        if (uAdditive == 3) c.a *= f;
+        else c.rgb = mix(uAdditive != 0 ? vec3(0.0) : uFogColor, c.rgb, f);
     }
     oCol = c;
 })";
@@ -440,6 +451,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glFrontFace(GL_CCW);
     glCullFace(GL_BACK);
 
+    auto pcSemi = [&](const GpuMesh& m) {
+        return original && linearOriginal_ && (m.blend == Blend::Alpha || m.blend == Blend::Additive) &&
+               (m.texture != white_ || m.textureAnim >= 0);
+    };
     auto draw = [&](const GpuMesh& m) {
         if (m.vao != boundVao) glBindVertexArray(boundVao = m.vao);
         if (m.twoSided) glDisable(GL_CULL_FACE);
@@ -451,9 +466,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
             glBindTexture(GL_TEXTURE_2D, m.texture);
         }
         glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : -1.0f);
-        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA).
-        const bool pcSub = original && m.blend == Blend::Subtract;
-        glUniform1i(uAdditive_, pcSub ? 2 : m.blend == Blend::Additive || m.blend == Blend::Subtract);
+        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
+        // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
+        glUniform1i(uAdditive_, pcSemi(m) ? 3 : original && m.blend == Blend::Subtract ? 2 : m.blend == Blend::Additive || m.blend == Blend::Subtract);
         glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(m.indexCount), GL_UNSIGNED_INT,
                                  reinterpret_cast<void*>(size_t(m.firstIndex) * sizeof(uint32_t)), m.baseVertex);
         ++drawCalls_;
@@ -482,7 +497,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     for (const GpuMesh* m : translucent) {
         // Destination alpha is kept at 1 so the window never turns see-through under a compositor.
         const bool pcSub = original && m->blend == Blend::Subtract;
-        if (m->blend == Blend::Alpha || pcSub) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        if (m->blend == Blend::Alpha || pcSub || pcSemi(*m)) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
         else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
         glBlendEquationSeparate(m->blend == Blend::Subtract && !pcSub ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
         draw(*m);

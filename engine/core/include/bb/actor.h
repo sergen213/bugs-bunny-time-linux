@@ -69,9 +69,11 @@ void rebuildPart(TodPart& p);
 // they have an object, are not hidden (0x8000) and their world matrix is non-zero; blend slots are averaged in
 // world space (the original averages after projection: approximation). Triangles touching unwritten slots are
 // dropped. parentRot: rotation of the root's parent coordinate (RotMatrix(parentRot) · RotMatrix(rot)), e.g. Bugs
-// riding a tilted platform (his coordinate is the platform's child).
+// riding a tilted platform (his coordinate is the platform's child); parentM instead: the parent coordinate's full
+// matrix (PS1, row major, 1.0 = 1; e.g. a LiT actor attached at a parent's scaled / rotated part).
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot = {});
+               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot = {},
+               const std::array<float, 9>* parentM = nullptr);
 
 // Slot positions of the current pose in PS1 axes with an identity root; unwritten slots are NaN. For tests.
 std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimState& st);

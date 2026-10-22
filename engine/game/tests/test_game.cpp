@@ -1069,6 +1069,42 @@ void testCarriedLs01(const std::filesystem::path& dir) {
     std::printf("LS01 time machine seat and CCMERLIN walk heading match the original\n");
 }
 
+// LS01 clock-gate displays (local/wine/compare/w10b/parts/gate_peek_{nowhere,era1}.txt, Proton-GE /b03): five type-14
+// parents at (29597, −225, 2925) spawn digits 969–974 and clock 1317 at parts 2–4 (items 0x81c0). While a parent holds
+// anim 270 its part coordinates are all zero, so its 13 children (drawn, +4 bit 1 set) collapse: nothing at Nowhere.
+// After Right (era 1) that parent's part 3 holds digit 970 at work matrix 2·I and part 4 clock 1317 at I ("1x clock").
+void testGateLs01(const std::filesystem::path& dir) {
+    const BzeFile bze = loadBze(dir / "LS01.bze");
+    const Scene scene = buildLitScene(bze, "LS01");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false, w.level = 3;
+    w.loadUpdate();
+    const auto gate = [&](const LitActor& a) {
+        const uint16_t id = w.defs[size_t(a.def)].entityId;
+        return !a.dead && a.parent >= 0 && std::abs(w.actors[size_t(a.parent)].pos.z - 2927) <= 2 &&
+               (id == 1317 || (id >= 969 && id <= 974));
+    };
+    const auto near = [](const std::array<float, 9>& m, float d) {
+        for (size_t k = 0; k < 9; ++k)
+            if (std::abs(m[k] - (k % 4 == 0 ? d : 0.0f)) > 0.01f) return false;
+        return true;
+    };
+    for (int t = 0; t < 480; ++t) w.tick({});
+    int kids = 0;
+    for (const LitActor& a : w.actors)
+        if (gate(a)) ++kids, assert(near(*w.parentFrame(a), 0));
+    assert(kids == 13);
+    for (int t = 0; t < 62; ++t) w.tick({.buttons = uint16_t(t < 2 ? PadRight : 0)});
+    int shown = 0;
+    for (const LitActor& a : w.actors) {
+        if (!gate(a) || near(*w.parentFrame(a), 0)) continue;
+        ++shown;
+        assert(near(*w.parentFrame(a), w.defs[size_t(a.def)].entityId == 970 ? 2 : 1));
+    }
+    assert(shown == 2);
+    std::printf("LS01 clock-gate children collapse under anim 270 and show 1x clock for era 1 as the original\n");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPad();
@@ -1111,6 +1147,7 @@ int main() {
     testRateL03c1(file.parent_path());
     testFocusL03acom(file.parent_path() / "L03ACOM.bze");
     testCarriedLs01(file.parent_path());
+    testGateLs01(file.parent_path());
     {  // L04B3 actor 98 hops onto pillar 57 and rides it (actor contact 0x433500, flagsB/flags8 riders), turns there
        // through its local yaw (local/wine/compare/w9lit6/o_L04B3.csv: every counter 3-341 equal for 98 / 57 / 269);
        // its anim-233 event spawns ball 100 at its hand, whose first move (x, x >> 16, y) is pushed out of 98's box

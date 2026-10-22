@@ -20,7 +20,8 @@ layout(push_constant) uniform P {
     uint flags;     // bit 0: additive/subtractive surface, fades to black instead of the fog colour; bit 1: PC ABR-2
                     // (bugs.exe 0x420d10 case 2: alpha = trunc luma of the raw texel, alpha-blended);
                     // LIT / MV only: bit 2 receives sun shadows, bit 3 receives ambient occlusion, bit 4 alpha-blended,
-                    // bit 5 reactive (sprites, animated textures: their texels change without motion)
+                    // bit 5 reactive (sprites, animated textures: their texels change without motion);
+                    // bit 6: PC ABR 0/1/3 (bugs.exe 0x420d10 modes 0/1/3, see kFs3D), alpha-blended
     uint tex;
     uint samp;
     float texGamma; // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
@@ -207,9 +208,16 @@ vec4 reflection(vec4 c, vec3 n, vec3 ng) {
 void main() {
     vec4 t = texture(sampler2D(uTex[pc.tex], uSamp[pc.samp]), vUv);
     float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
+    vec4 vc = vCol;
+    if ((pc.flags & 64u) != 0u) {
+        float mx = floor(max(t.r, max(t.g, t.b)) * 255.0 + 0.5), va = floor(vCol.a * 255.0 + 0.5);
+        t.rgb += (255.0 - mx) / 255.0;
+        t.a *= (va == 128.0 ? floor(mx / 2.0) : va == 64.0 ? floor(mx / 4.0) : mx - floor(mx / 4.0)) / 255.0;
+        vc.a = 1.0;
+    }
     if (pc.texGamma != 1.0) t.rgb = floor(256.0 * pow(t.rgb * (255.0 / 256.0), vec3(pc.texGamma)) + 1e-3) / 255.0;
-    vec4 c = t * vCol;
-    if ((pc.flags & 2u) != 0u) c.a = luma * vCol.a;
+    vec4 c = t * vc;
+    if ((pc.flags & 2u) != 0u) c = vec4(0.0, 0.0, 0.0, luma * vCol.a);
     c.rgb = min(c.rgb * pc.fogColorScale.a, vec3(1.0));
     if (c.a < pc.alphaRef) discard;
 #ifdef LIT
@@ -228,7 +236,8 @@ void main() {
 #endif
     if (pc.fog.y > pc.fog.x) {
         float f = clamp((pc.fog.y - vDist) / (pc.fog.y - pc.fog.x), 0.0, 1.0);
-        c.rgb = mix((pc.flags & 1u) != 0u ? vec3(0.0) : pc.fogColorScale.rgb, c.rgb, f);
+        if ((pc.flags & 64u) != 0u) c.a *= f;
+        else c.rgb = mix((pc.flags & 1u) != 0u ? vec3(0.0) : pc.fogColorScale.rgb, c.rgb, f);
     }
     oCol = c;
 #ifdef MV

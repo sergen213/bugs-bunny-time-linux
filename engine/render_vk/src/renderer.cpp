@@ -2067,16 +2067,19 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
 
     VkPipeline bound = VK_NULL_HANDLE;
     auto draw = [&](const GpuMesh& m) {
-        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA).
+        // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
+        // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
         const bool pcSub = original && m.blend == Blend::Subtract;
-        const int b = m.blend == Blend::Alpha || pcSub ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
+        const bool pcSemi = original && linearOriginal_ && (m.blend == Blend::Alpha || m.blend == Blend::Additive) &&
+                            (m.texture != kSlotWhite || m.textureAnim >= 0);
+        const int b = m.blend == Blend::Alpha || pcSub || pcSemi ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
         const int kind = !lit ? 0 : rtPath ? 2 : 1;
         const VkPipeline p = fsr ? pipeLit_[kind][1][0][b] : kind == 0 ? pipe3D_[msaaOn_][b] : pipeLit_[kind][0][msaaOn_][b];
         if (p != bound) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
         bindGeom(m);
         vkCmdSetCullMode(cb, m.twoSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
         pc.alphaRef = m.blend == Blend::AlphaTest ? 0.5f : -1.0f;
-        pc.flags = (m.blend == Blend::Additive || m.blend == Blend::Subtract) | (pcSub ? 2u : 0u);
+        pc.flags = pcSemi ? 64u | 16u : uint32_t(m.blend == Blend::Additive || m.blend == Blend::Subtract) | (pcSub ? 2u : 0u);
         if (mode != Shadows::Off && m.receiver) pc.flags |= 4u | (m.blend != Blend::Alpha ? 8u : 0u);
         pc.material = refl ? m.material : 0u;
         if (m.blend == Blend::Alpha) pc.flags |= 16u;

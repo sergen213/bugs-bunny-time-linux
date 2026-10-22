@@ -1273,8 +1273,11 @@ struct App {
             for (const bb::game::LitActor& a : play->world.actors) {
                 const int32_t m = play->world.defs[size_t(a.def)].model;
                 if (a.dead || !(a.visible || (farDraw && a.far)) || m < 0 || a.animState.parts.empty() || (sunShadows && (a.type == 9) != sky)) continue;
+                // Attached at a parent's part: drawn under that part's full matrix (GsGetLws), e.g. hidden by a
+                // zero-scale part (LS01 clock-gate displays); otherwise the yaw-only frame the simulation keeps.
+                const auto pm = play->world.parentFrame(a);
                 bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
-                              {a.rot[0], a.yaw, a.rot[2]}, a.scale, actorMeshes);
+                              {a.rot[0], pm ? a.matYaw : a.yaw, a.rot[2]}, a.scale, actorMeshes, {}, pm ? &*pm : nullptr);
             }
         };
         if (play) poseLit(false);
@@ -1299,12 +1302,13 @@ struct App {
                 const float y0 = (a.flagsC & 0x8000000) ? -h * 0.5f : 0.0f;
                 const glm::vec3 o = glm::vec3(v) * k;
                 bb::Mesh& m = actorMeshes.emplace_back();
-                m.name = "sprite", m.texture = f.texture, m.blend = f.blend, m.twoSided = true;
+                const bool pc = s.fidelity == bb::render::Fidelity::Original;  // PC GL texture mode (scene.h SpriteFrame)
+                m.name = "sprite", m.texture = f.texture, m.blend = pc ? f.pcBlend : f.blend, m.twoSided = true;
                 m.indices = {2, 3, 1, 2, 1, 0};
                 using Corner = std::array<float, 4>;  // view dx, dy, u, v
                 for (const Corner& q : {Corner{-hw, y0 + h, 0, 0}, Corner{hw, y0 + h, 1, 0}, Corner{-hw, y0, 0, 1}, Corner{hw, y0, 1, 1}}) {
                     const glm::vec4 w = toWorld * glm::vec4(o.x + q[0], o.y + q[1], o.z, 1.0f);
-                    m.vertices.push_back({.pos = {w.x, w.y, w.z}, .uv = {q[2], q[3]}, .rgba = {white, white, white, f.alpha}});
+                    m.vertices.push_back({.pos = {w.x, w.y, w.z}, .uv = {q[2], q[3]}, .rgba = {white, white, white, pc ? f.pcAlpha : f.alpha}});
                 }
             }
         }

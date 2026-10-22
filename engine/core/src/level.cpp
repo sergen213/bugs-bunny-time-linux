@@ -334,6 +334,53 @@ std::vector<SpriteRecord> spriteRecords(std::span<const uint8_t> sec4, uint32_t 
     return recs;
 }
 
+// bugs.exe 0x423eb0 at load: the modes each texture id is drawn with, over every chunk 0x20 / 0x22 model (tag 0x24) and
+// chunk 0x22 sprite asset (tag 0x40) in script order: ABR k sets 1 << k, opaque 0x10, the implicit-UV types 0x4a / 0x4e
+// assign 0x10, an unknown type ends that asset. 0x420d10 converts the id's base GL texture for the first of 0x10
+// (opaque), 1, 2, 4, 8 (ABR 0..3); the type-4 sprite path 0x40a6c0 binds that base texture.
+static std::map<uint32_t, uint8_t> pcTextureUse(std::span<const uint8_t> sec4, const LevelScript& script) {
+    std::map<uint32_t, uint8_t> use;
+    auto scan = [&](const In& in) {
+        for (uint32_t o = 0, nobj = in.u32(8); o < nobj; ++o) {
+            const size_t e = 12 + size_t(o) * 28;
+            size_t p = 12 + size_t(in.u32(e + 16));
+            for (int64_t nprim = in.u32(e + 20); nprim > 0;) {
+                const uint8_t t = in.u8(p + 3);
+                const uint16_t cnt = in.u16(p);
+                if (t == 0x00 || t == 0x04 || t == 0x08 || t == 0x0c || t == 0x10 || t == 0x44) {
+                    p += t == 0x44 ? 4 + size_t(cnt) * 12 : t == 0x08 || t == 0x0c ? 56 : t == 0x10 ? 20 : 16;
+                    nprim -= 1;
+                    continue;
+                }
+                const Poly* k = nullptr;
+                for (const Poly& x : kPolys)
+                    if (x.type == t) k = &x;
+                const size_t stride = k ? k->stride : otherGroupStride(t);
+                if (!stride || !cnt) return;  // 0x423eb0 default: stop this asset (an empty group would never end)
+                in.need(p, size_t(cnt) * stride);
+                for (size_t r = 0; r < cnt; ++r) {
+                    const size_t q = p + r * stride;
+                    const bool semi = in.u8(q + 2) & 8;
+                    if (t == 0x4a || t == 0x4e) use[in.u16(q + 4)] = 0x10;
+                    else if (t == 0x64) use[in.u16(q + 10)] |= semi ? uint8_t(1 << (in.u8(q + 6) >> 5 & 3)) : 0x10;
+                    else if (k && k->tex) use[in.u16(q + k->tex)] |= semi ? uint8_t(1 << (in.u8(q + k->tpage) >> 5 & 3)) : 0x10;
+                }
+                p += size_t(cnt) * stride;
+                nprim -= cnt;
+            }
+        }
+    };
+    for (const ScriptItem& it : script.items) {
+        if (it.kind != ScriptItem::Kind::Chunk || (it.code != 0x20 && it.code != 0x22)) continue;
+        for (const ScriptTag& tg : it.tags) {
+            if ((tg.id != 0x24 && (tg.id != 0x40 || it.code != 0x22)) || tg.data.size() < 8) continue;
+            const uint32_t off = le32(tg.data, 0), size = le32(tg.data, 4);
+            if (off <= sec4.size() && sec4.size() - off >= size) scan(In{sec4.subspan(off, size), "model"});
+        }
+    }
+    return use;
+}
+
 Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     if (bze.variant != BzeVariant::LostInTime) throw FormatError("buildLitScene: not a Lost in Time BZE");
     const int i1 = bze.find(1), i3 = bze.find(3), i4 = bze.find(4);
@@ -396,6 +443,7 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
     // Runtime-verified on L02A1 links 16/63 (alias table traces, GAMEPLAY_STATUS.md). Without such a list the
     // records are cycled in order, 2 ticks per frame (Inferred).
     std::map<uint16_t, std::pair<uint16_t, std::vector<uint16_t>>> sprites;  // asset id -> (class, frame tex ids)
+    const std::map<uint32_t, uint8_t> pcUse = pcTextureUse(s4, script);
     for (const auto& [aid, a] : all) {
         if (a.tag != 0x40) continue;
         auto& [cls, ids] = sprites[aid];
@@ -406,13 +454,21 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             ids.push_back(r.tex);
             SpriteFrame& f = frames.emplace_back();
             if (const auto x = b.tex.find(r.tex); x != b.tex.end()) f.texture = x->second;
+            const bool cutout = f.texture >= 0 && s.textures[size_t(f.texture)].hasAlpha;
             if (r.flags & 8) {
                 const uint8_t abr = r.tpage >> 5 & 3;
                 f.blend = abr == 0 ? Blend::Alpha : abr == 2 ? Blend::Subtract : Blend::Additive;
                 f.alpha = abr == 0 ? 128 : abr == 3 ? 64 : 255;
-            } else if (f.texture >= 0 && s.textures[size_t(f.texture)].hasAlpha) {
+            } else if (cutout) {
                 f.blend = Blend::AlphaTest;
             }
+            const auto u = pcUse.find(r.tex);
+            const uint8_t m = u == pcUse.end() ? 0x10 : u->second;
+            if (m & 0x10) f.pcBlend = cutout ? Blend::AlphaTest : Blend::Opaque;
+            else if (m & 1) f.pcBlend = Blend::Alpha, f.pcAlpha = 128;
+            else if (m & 2) f.pcBlend = Blend::Additive;
+            else if (m & 4) f.pcBlend = Blend::Subtract;
+            else f.pcBlend = Blend::Additive, f.pcAlpha = 64;
         }
     }
     // Overlay font: the first class-8 sprite asset listed (tag 0x0f) by template entity 68 (0x44ccd0 / 0x44e310 take

@@ -277,6 +277,12 @@ public:
     // zone's track (Wine: it plays over the rest of the loading screen until the fade in stops it).
     void loadUpdate() { cameraTick(); actorsTick(); cameraNodes(); hudTick(); hudTick(); musicTick(); }
     const ActorModel* playerModel() const { return model_; }
+    // Drawing an actor attached at a parent's part (0x44c170 / GsGetLws: the child coordinate's super is that part's):
+    // the part's world matrix (rotation and scale through the parent's part chain and root, PS1 axes, row major, 1.0 =
+    // 4096) to put in front of the child's own RotMatrix(rot[0], matYaw, rot[2]) · Scale. nullopt when not attached
+    // at a part of an actor (root / Bugs' hand: the yaw-only frame of followParent). A zero-scale part hides the child
+    // (LS01 clock-gate digits under the parents' anim 270, RUNTIME_REFERENCE §28).
+    std::optional<std::array<float, 9>> parentFrame(const LitActor& a) const;
 
     Heightfield hf;
     std::vector<PlayerState> states;

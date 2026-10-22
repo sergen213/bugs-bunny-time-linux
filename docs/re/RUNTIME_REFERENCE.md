@@ -274,9 +274,10 @@ entity id; L01a Bugs and 12 actors use entity 3) into `0x4b21a0` (max 40; Bugs s
 0x1000` (min 0x800, 0x1000 when the ground is above); tilt from three box-corner ground probes kept within ±0x22
 (0x44b4f0 second pass); ridden platforms (flags8 8 / flagsC 0x2000) put it at the feet with the platform's tilt.
 PC GL draw of ABR 2 (0x420d10 case 2, 0x4122xx flush): texel alpha = trunc(0.299R + 0.587G + 0.114B) of the raw
-texel, blended SRC_ALPHA / ONE_MINUS_SRC_ALPHA (`0x4ac028/0x4ac02c` = 0x302/0x303 at runtime defaults) — a
-lightening/greying blob, not a PS1 subtractive one; Original Fidelity uses this in both backends (Enhanced keeps the
-PS1 subtract). Side-by-side `compare/side_lit_L01A_shadow_{gl,vk}.png` (original `orig_lit_L01A_shadow.png`
+texel, and the mode-2 CLUT rgb is then zeroed (0x420d10 after the gamma tables, renderer 2) — black texels blended
+SRC_ALPHA / ONE_MINUS_SRC_ALPHA (`0x4ac028/0x4ac02c` = 0x302/0x303 at runtime defaults): a darkening blob by luma,
+not a PS1 subtractive one; Original Fidelity uses this in both backends (Enhanced keeps the PS1 subtract; until wave
+10b bbtime kept the grey texel rgb, §27). Side-by-side `compare/side_lit_L01A_shadow_{gl,vk}.png` (original `orig_lit_L01A_shadow.png`
 after the walk-in, bbtime `--autoplay '-*90'` tick 90): MAD 1.58 / 1.58, gain 0.99/0.99/0.98; the soft blob under
 Bugs' feet matches in place and size. Not ported: the first 0x44b4f0 pass (projection onto a non-ridden class-2
 actor below), the zone darkening 0x44cb90 tint, ordering-table depth (bbtime pulls the quad 24 u toward the eye).
@@ -584,3 +585,37 @@ traces `b03.csv` (`/b03`), `new.csv` (New Game), `cycle.csv` (Right/Left), `walk
 | carried Bugs' heading +0xde = the hand coordinate's (atan2 of its z axis) | CCMERLIN −660 every counter (carrier 5's yaw 0) | `walk.csv` vs `t_ccm.csv`: yaw 335/335 equal | **Verified** (`testCarriedLs01`) |
 | carried position one tick behind the hand part | holds while 89 plays anim 1 (seat) and for the cart (`testCartL04e`), but during the LS01 fly-in (89 anim 154) and the CCMERLIN walk the oracle's Bugs equals the part of the same counter (`tm_hand.txt`: Bugs, 620 +0xe4 and +0x58 equal per counter; update list head = Bugs) | bbtime is one tick behind there (`cmp_ls01_ccm.txt`: positions equal the oracle's previous counter); a draw-time chain refresh (0x44c170 for parts with flag 1) is a candidate | Research Required |
 | CCMERLIN environment | full set drawn in both (tower, trees, drawbridge, moat); the original letterboxes the cut-scene, bbtime does not | `side_ccmerlin.png` (oracle left, bbtime Original Fidelity right, counters ~170 / ~350 / ~550), released 0.9.2 at FOV 90: `local/shots/w10/ls01/rel_{520,680,760}.png` | Consistent (missing environment not reproduced) |
+
+## 27. LiT PC semi-transparency and sprite texture modes (wave 10b; Proton-GE `/b03`, `local/wine/compare/w10b/light/`)
+
+Static (bugs.exe GL renderer 2): at level load 0x423eb0 walks every chunk 0x20 / 0x22 model (tag 0x24) and chunk 0x22
+sprite asset (tag 0x40) in script order and ORs each texture id's face modes into `0x52fd84 + id·0x30` (ABR k of a
+semi-transparent face / 0x64 sprite record: 1 << k; opaque: 0x10; types 0x4a / 0x4e assign 0x10; an unknown type
+ends that asset). The upload loop gives the id's own GL texture the first of 0x10 (mode 4), 1, 2, 4, 8 (modes 0–3) and
+every further mode a copy at slots 0x7ca, 0x7c9, … (`+0x14 + mode·4` = the variant used by faces of that ABR). 0x420d10
+converts the CLUT per mode: 0 / 1 / 3: alpha = m/2, m − m/4, m/4 of m = max(r, g, b) (5-bit << 3), rgb += 255 − m
+(grey becomes white); 2: alpha = luma, rgb then zeroed; 4: alpha 255 (CLUT 0 → alpha 0 in every mode); then the gamma
+tables. One `glBlendFunc(0x302, 0x303)` call exists (GL init 0x40daf0): every blended list is alpha-blended, never
+additive. Sprites 0x40a6c0 bind the id's own texture (no variant lookup) with vertex alpha `0x467730[abr]`.
+
+| claim | runtime | evidence | verdict |
+|---|---|---|---|
+| blend factors, sprite vertex alpha | `0x4ac028/02c` = 0x302 / 0x303, `0x4ac030` 0, `0x4ac034` 1, `0x4ac094` 2; `0x467730[0..3]` = 1 1 1 1 | `o_texmodes.txt` (`texmodes.py`, LS01 at the seat ~30 s) | **Verified** |
+| texture usage / base mode per id | bbtime's `pcTextureUse` (level.cpp) = `0x52fd84` for 618 of 644 LS01 ids; the 26 others are opaque-first in both (extra 0x02 on 470–525 from an unported source) or id 1 (0x04 vs 0x14, no sprite uses it); all 253 LS01 sprite frames have the oracle's base mode (321 → mode 1, 19 / 22 / 462 → 1, 25–28 / 352 → 0, the rest opaque). In LS01 every sprite record's ABR equals its texture's mode, so the sprite rule changes nothing there; over all 167 files it changes only L02A5 asset 80 (ABR-0 records, texture used opaque first → opaque) | `o_texmodes.txt` vs `t_use.txt` (`/tmp`-built dump of `pcTextureUse`) | **Verified** (LS01; `test_levels`: LS01 321 / 25, L02A5 80 Tested) |
+| LS01 seat (bbtime `--level LS01 --autoplay '-*600'`, oracle `w10/ls01/o_b03_27.png`) | before: VK MAD 6.50, means 21.3 / 21.2 / 20.3 vs 17.6 / 17.2 / 16.1, gain 0.744 / 0.723 / 0.697 (vortex core 66 / 70 / 85 vs 37 / 39 / 48); after: MAD 3.78, means 17.9 / 17.5 / 16.5, gain 0.920 / 0.916 / 0.912 (vortex core 37 / 39 / 47); GL 7.00 → 4.03. Remaining gain < 1 = the vortex spikes' rotation phase and the floor pattern (animated), not brightness (signed mean diff +0.36) | `side_ls01_seat_{before,after}.png`, `side_ls01_seat_after_gl.png` | **Verified** |
+| other captures (old = wave 10 build vs new, Original Fidelity VK) | TITLE light beams (orig 32.5 / 36.9 red): old 35.2 / 41.0, new 32.9 / 37.2 (`side_title_after.png`); L02C4 torches MAD 2.28 → 1.23; L01A play / shadow, ARCA01, pause veil: unchanged (old vs new MAD 0.00 / 0.00 / 0.00 / 0.04). The ABR 0/1/3 and sprite modes are LiT-only; the ABR-2 black texels apply to TB's Original Fidelity too (shared engine path, bblit2.exe not checked; ARCA01 has no visible ABR-2 face) | `regress.sh`, `regress/` | **Verified** (LiT) |
+| dark bars under the LS01 time machine (original only) | glDepthMask is never called and alpha test GREATER 0 is on for the blended pass: translucent polygons write depth; 0x4124b0 flushes opaque textures, then the blended ones in first-use order — the light sprites' quads (aid 321, alpha > 0 in their dark texels) hide the floor drawn after them, showing the starfield | `o_ls01_seat.png`, `w10/ls01/o_b03_*.png` (static: flush 0x412c98–0x412f6b) | Research Required (not ported: bbtime sorts translucent meshes back to front without depth writes) |
+
+## 28. LiT children drawn under the parent part's matrix: LS01 clock gates, time-machine antenna (wave 10b; Proton-GE `/b03`, `local/wine/compare/w10b/parts/`)
+
+Five type-14 actors at (29597, −225, 2925) (model 29) show an era's clock requirement right of "Nowhere": state 2
+spawns digits 969–974 at parts 2 / 3 and clock 1317 at part 4 (items 0x81c0, p1 = part), state 1 holds anim 270,
+Right / Left (cond 38 era == a) plays 199 (in), 1 (shown), 198 (out). `gate_peek.py` walks the live list and each
+child's coordinate super chain (+0xc4 → GsCOORDINATE2 coord +4, work +0x24, super +0x48).
+
+| claim | runtime | evidence | verdict |
+|---|---|---|---|
+| children under anim 270 | all 13 children present and drawn (+4 = 2), positions = the parent root, every coord and work matrix of their super chain (part 2/3/4 → 1 → 0) all zero: the original draws them through GsGetLws, so they collapse to a point. bbtime drew them with the parent's yaw only: the clock 1317 showed as a yellow "foot" bottom right (half sunk in the floor) | `gate_peek_nowhere.txt`, `o_nowhere.png`, `o_entry.png`; before: `w10/ls01/side_ls01_seat.png` | **Verified** |
+| era 1 (Right) | that parent plays anim 1: part 3 coord diag(−2, 2, −2) → work 2·I (digit 970 "1" twice size), part 4 work I (clock); bbtime `LitWorld::parentFrame` (part matrix through the chain with `partOriginQ12`) gives the same; drawing = parent part matrix · RotMatrix(rot x, matYaw, rot z) · Scale | `gate_peek_era1.txt`; `side_r_2s.png` ("1x clock"), `side_rr_2s.png` ("30x clock"), `side_nowhere.png`, `side_back_nowhere.png` | **Verified** (`testGateLs01`) |
+| crossed antenna on the time machine | drawn by the original too (two rods from the top cones to the electric arc); the remaining difference was the vortex sprite's brightness behind them (§27) | `side_antenna_zoom.png` (x4) | **Verified** (not an extra part) |
+| other part-attached children (sweep L01A, TITLE, L02A2, L04A1, Merlin, L02C4: none or yaw-only frames) | L03ACOM cannon 398 on pirate 280's part 6 (chain scale 1.5 · 1.04): now drawn 1.56× like the oracle (crop MAD 5.93 → 5.54); l04e 607 on cart 109's part 15 (x tilt −94) now leans with it (no oracle shot); L04B3 548 has no model | `side_l03acom_cannon{,_before}.png` (oracle `w9lit5/o_L03ACOM.png`, counter 83) | **Verified** (L03ACOM size) / Inferred (l04e) |

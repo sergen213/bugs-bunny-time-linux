@@ -327,11 +327,13 @@ std::optional<std::array<int32_t, 3>> partOrigin(const ActorModel& model, const 
 }
 
 void poseActor(const ActorModel& model, const AnimState& st, std::array<int32_t, 3> pos, std::array<int16_t, 3> rot,
-               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot) {
+               std::array<int32_t, 3> scale, std::vector<Mesh>& out, std::array<int16_t, 3> parentRot,
+               const std::array<float, 9>* parentM) {
     std::vector<V3> slots;
     std::vector<Work> work;
     M3 root = coordMatrix(rot, scale);
     if (parentRot != std::array<int16_t, 3>{}) root = mul(coordMatrix(parentRot, std::array{4096, 4096, 4096}), root);
+    if (parentM) root = mul(*parentM, root);
     skin(model, st, Work{root, {float(pos[0]), float(pos[1]), float(pos[2])}}, slots, work);
     for (size_t i = 0; i < st.parts.size(); ++i) {
         if (!drawn(model, st.parts[i], work[i])) continue;

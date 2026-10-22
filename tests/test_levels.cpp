@@ -64,6 +64,16 @@ int main() {
                 CHECK(link(16) && link(16)->frames.size() == 40 && link(16)->holdTicks == 1 && !link(16)->timingInferred &&
                           link(16)->frames[9] != link(16)->frames[10] && link(16)->frames[10] == link(16)->frames[39],
                       "L02A1 link 16 flipbook");
+            // Sprite frames bind the base GL texture converted for its first used mode (0x423eb0; RUNTIME_REFERENCE §27):
+            // LS01 = oracle 0x52fd60 records (all 253 frames): asset 321 (ids 381-388) mode 1, 25 (158) mode 0. L02A5's
+            // asset 80 has ABR-0 records on a texture its faces use opaque first: drawn opaque on the PC path.
+            auto frame0 = [&](uint16_t aid) { return s.sprites.contains(aid) ? s.sprites.at(aid).front() : bb::SpriteFrame{}; };
+            if (p.stem() == "LS01") {
+                CHECK(frame0(321).pcBlend == bb::Blend::Additive && frame0(321).pcAlpha == 255, "LS01 sprite 321");
+                CHECK(frame0(25).pcBlend == bb::Blend::Alpha && frame0(25).pcAlpha == 128, "LS01 sprite 25");
+            }
+            if (p.stem() == "L02A5")
+                CHECK(frame0(80).blend == bb::Blend::Alpha && frame0(80).pcBlend == bb::Blend::AlphaTest, "L02A5 sprite 80");
             textures += s.textures.size(), texErrors += s.stats.textureErrors, props += s.stats.props;
             spawns += bool(s.spawn);
             meshes += s.meshes.size();
