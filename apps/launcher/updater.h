@@ -61,7 +61,12 @@ std::optional<std::string> previousVersion(const std::filesystem::path& installR
 // Release channel: the latest GitHub release's signed manifest. settings.ini `update_url` overrides it (tests/dev).
 inline constexpr const char* kDefaultManifestUrl =
     "https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json";
-inline std::string manifestUrl(std::string_view override) { return override.empty() ? kDefaultManifestUrl : std::string(override); }
+// An override into this repository's own releases (e.g. a pinned .../releases/download/v0.8.0/manifest.json that the
+// pre-0.9 launcher made users type) means "our releases": it follows the latest release instead of freezing a version.
+inline std::string manifestUrl(std::string_view override) {
+    constexpr std::string_view ownReleases = "https://github.com/sergen213/bugs-bunny-time-linux/releases/";
+    return override.empty() || override.starts_with(ownReleases) ? kDefaultManifestUrl : std::string(override);
+}
 
 // The release AppImage, installed as <installRoot>/current/bbtime-launcher; the launcher restarts into it.
 inline constexpr const char* kLauncherArtifact = "bbtime-launcher";

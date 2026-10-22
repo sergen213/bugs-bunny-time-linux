@@ -184,6 +184,8 @@ int main() {
     // Release channel default, settings override.
     assert(manifestUrl("") == "https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json");
     assert(manifestUrl(base + "/x/manifest.json") == base + "/x/manifest.json");
+    assert(manifestUrl("https://github.com/sergen213/bugs-bunny-time-linux/releases/download/v0.8.0/manifest.json") ==
+           manifestUrl("")); // a pinned old release of ours follows the latest release
     // Launcher hand-off: only to an executable current/bbtime-launcher that is newer than the running launcher.
     assert(handoffTarget(o.installRoot, "0.1.0").empty()); // 0.3.0 shipped no launcher
     const fs::path launcher = o.installRoot / "current" / kLauncherArtifact;

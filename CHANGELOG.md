@@ -3,6 +3,12 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.9.2 — 2026-10-22 (fix: release channel stuck on 0.8.0)
+
+- A manifest URL saved by the pre-0.9 launcher (e.g. `…/releases/download/v0.8.0/manifest.json` in settings.ini
+  `update_url`) pinned the update channel to that release. Any URL into this repository's releases now follows the
+  latest release, and the stale value is dropped from settings.ini on the next save.
+
 ## 0.9.1 — 2026-10-22 (fix: launcher ran an older installed game)
 
 - The launcher started the game from an earlier updater install (`~/.local/share/bbtime/app/current/bbtime`) even

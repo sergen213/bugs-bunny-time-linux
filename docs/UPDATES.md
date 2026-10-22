@@ -3,7 +3,8 @@
 Status: **Implemented**, **Tested** (`launcher.updater` against a local HTTPS server; checked against the real
 v0.8.0 release on 2026-10-21). The launcher always uses the release channel
 `https://github.com/sergen213/bugs-bunny-time-linux/releases/latest/download/manifest.json` (+ `.sig`); there is no
-URL field. `settings.ini` `update_url` overrides it for tests/development only.
+URL field. `settings.ini` `update_url` overrides it for tests/development only; a URL into this repository's own releases
+(such as a pinned `…/download/v0.8.0/manifest.json` from older launchers) is treated as the default channel.
 
 ## Trust model
 

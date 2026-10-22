@@ -322,6 +322,8 @@ public:
     Launcher() {
         std::vector<std::string> warn;
         cfg_ = bbtime::loadSettings(bbtime::settingsPath(), &warn);
+        if (bbtime::update::manifestUrl(cfg_.updateUrl) == bbtime::update::kDefaultManifestUrl)
+            cfg_.updateUrl.clear();  // an old pinned URL into our releases: not written back on Save
         setWindowTitle(QString("bbtime launcher %1").arg(BBTIME_VERSION));
         game_ = new QComboBox;
         game_->addItems({"Collection menu", kTitles[0], kTitles[1]});
