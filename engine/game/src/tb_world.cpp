@@ -175,8 +175,9 @@ void tbPadTick(TbPad& p, const PadInput& in, uint16_t edgeMask) {
         if (p.sy > 0) p.held |= PadUp; else if (p.sy < 0) p.held |= PadDown;
         p.raw = p.held;
     } else {
-        p.sx = int8_t(in.buttons & PadLeft ? -0x7f : in.buttons & PadRight ? 0x7f : 0);
-        p.sy = int8_t(in.buttons & PadUp ? 0x7f : in.buttons & PadDown ? -0x7f : 0);
+        // Digital: Right / Up 0x7f, Left / Down -0x80 (oracle peek of GD+0x14/0x15, local/wine/compare/w12/tb/water.csv).
+        p.sx = int8_t(in.buttons & PadLeft ? -0x80 : in.buttons & PadRight ? 0x7f : 0);
+        p.sy = int8_t(in.buttons & PadUp ? 0x7f : in.buttons & PadDown ? -0x80 : 0);
     }
     p.pressed = p.held & ~(p.prevHeld & edgeMask);
 }
@@ -973,7 +974,7 @@ bool TbWorld::cond(TbActor& a, TbLogicItem& it, bool cur) {
             const bool bit = (500 + (x >> 3) < GD.size()) && (GD[500 + (x >> 3)] >> (x & 7) & 1);
             return y == 0 ? !bit : bit;
         }
-        case 0x49: return int32_t(x) <= 0 && 0 <= int32_t(y);  // water depth +0x1a2 in [X, Y]: no water simulated
+        case 0x49: return int32_t(x) <= a.depth && a.depth <= int32_t(y);  // 0x430bf0: water depth +0x1a2 in [X, Y]
         case 0x4a: return false;                                 // 0x40fc30
         default: break;
         }
@@ -1680,8 +1681,67 @@ void TbWorld::actorStep(TbActor& a) {
         }
     auto spd = [&](int16_t v) -> int32_t { return v > 0 && (v & 0x6000) ? int32_t(int8_t(S[size_t(v & 0x9fff)])) : v; };
     std::array<int32_t, 3> s{};  // local target: x side, y vertical, z forward
-    if (r->flagsC & 1) {
-        unsupported.insert("swim");
+    if (r->flagsC & 1) {  // swim states (0x453de0, state +0x28 & 1): no gravity, vertical speed +0x72 by depth +0x1a2
+        const uint32_t old = a.f20;
+        a.f20 |= 0x200;
+        if (old & 0x421) {  // arrived jumping / falling: plunge (0x1000000) unless diving (flagsC 2)
+            if (!(r->flagsC & 2)) a.f20 = old | 0x1000200;
+            a.f20 &= 0xfffffbdeu;
+        }
+        int32_t vy = int16_t(a.vel[1]);
+        const int32_t sx = pd.sx, sy = pd.sy;
+        const uint32_t dirs = pd.pressed >> 8;  // GD+9: Up 0x10, Right 0x20, Down 0x40, Left 0x80
+        if (a.f20 & 0x1000000) {  // plunge: brake by 3/8 (at least 0xf0) until rising
+            vy -= std::max((vy * 3) >> 3, 0xf0);
+            if (int16_t(vy) < 1) a.f20 = (a.f20 & ~0x1000000u) | 0x800000;
+        } else if (a.f20 & 0x800000) {  // rise back to the surface
+            if (a.depth < 0x51) {
+                vy = std::min(vy + 0x50, -0x50);
+                if (a.depth < 0x14) vy = 0, a.f20 &= ~0x800000u;
+            } else {
+                vy = std::max(vy - 0xa0, -0x1e0);
+            }
+        } else if (r->flagsC & 4) {
+            a.pitch = int16_t(std::max(wrap(a.pitch - 0x28), -800));
+            s[2] = spd(r->fwd) * dt;
+        } else if (r->flagsC & 2) {  // under water: stick x turns, ← → roll, ↑ ↓ pitch
+            a.yaw = int16_t(a.yaw + ((sx * 0x28) >> 7));
+            if (r->flagsA & 2) {
+                a.yaw = int16_t(a.yaw + ((sx * 0xc) >> 7));
+                int32_t ro = wrap(a.roll);
+                if (dirs & 0xa0) ro += (sx << 5) >> 7;
+                else ro = ro > 0 ? std::max(ro - 0xc, 0) : std::min(ro + 0xc, 0);
+                a.roll = int16_t(std::clamp(ro, -0x200, 0x200));
+                int32_t pi = wrap(a.pitch);
+                if (dirs & 0x50) pi -= (sy * 0x24) >> 7;
+                else pi = pi > 0 ? std::max(pi - 10, 0) : std::min(pi + 10, 0);
+                a.pitch = int16_t(std::clamp(pi, -800, 800));
+                s[2] = spd(r->fwd) * dt;
+            }
+        } else {  // at the surface: sink back to depth 30, steer like the stick branch
+            if (a.depth < 0x1f) {
+                if (vy < 0 && (vy += 0x50) > 0) vy = 0;
+            } else {
+                vy = std::max(vy - 0xa0, -0xa0);
+            }
+            if (!(r->flagsB & 0x80000000u) || (!sx && !sy)) {
+                a.yaw = int16_t(a.yaw + ((sx << 5) >> 7));
+                if (r->flagsA & 2) a.yaw = int16_t(a.yaw + ((sx * 0xc) >> 7));
+                s[2] = spd(r->fwd) * dt;
+            } else {
+                const int32_t mag = std::min(isqrt(sx * sx + sy * sy), 0x80);
+                const int32_t v = std::max(int32_t(uint32_t(spd(r->fwd) * dt * mag) >> 7), 1);
+                const int32_t d = std::clamp(wrap(camYaw() - a.yaw + ratan2(sx, sy)), -0x100, 0x100);
+                a.turn = int16_t(d);
+                if (r->flagsA & 2) s[2] += (v * (0x800 - std::abs(d))) >> 11;
+            }
+        }
+        a.vel[1] = int16_t(vy);
+        if (!(r->flagsC & 4) && (!(r->flagsA & 2) || !(r->flagsC & 2))) {  // level out: pitch 0x18, roll 0x10 a tick
+            const int32_t pi = wrap(a.pitch), ro = wrap(a.roll);
+            a.pitch = int16_t(pi > 0 ? std::max(pi - 0x18, 0) : std::min(pi + 0x18, 0));
+            a.roll = int16_t(ro > 0 ? std::max(ro - 0x10, 0) : std::min(ro + 0x10, 0));
+        }
     } else if (r->flagsB & 0x80000000u) {
         if (pd.sx || pd.sy) {  // §2.1 stick branch
             const int32_t mag = std::min(isqrt(pd.sx * pd.sx + pd.sy * pd.sy), 0x80);
@@ -1716,9 +1776,14 @@ void TbWorld::actorStep(TbActor& a) {
     }
     if (r->flagsA & 0x400000) s[2] += spd(r->fwd) * dt;
     if (r->flagsA & 0x800) s[1] -= spd(r->vert) * dt;  // climb / vertical speed (sign I)
-    if (const int32_t step = wrap(a.turn) >> 2) {
+    // 0x453de0 LAB_00455b16: a quarter of the pending turn +0x18c per tick; once that rounds to 0 the remainder is
+    // applied whole and +0x18c becomes -1 (idle). flagsB 0x400 caps the step at +0x192.
+    if (a.turn != -1) {
+        const int32_t t = a.turn, q = (t > 0x800 ? t - 0x1000 : t) >> 2;
+        int32_t step = (((q ? q : t) - 0x800) & 0xfff) - 0x800;
+        a.turn = q ? int16_t(t - q) : int16_t(-1);
+        if (a.rec()->flagsB & 0x400) step = std::clamp(step, -int32_t(a.turnRate), int32_t(a.turnRate));
         a.yaw = int16_t(wrap(a.yaw + step));
-        a.turn = int16_t(a.turn - step);
     }
     // 0x45643b: a state with flagsB 0x20000 follows its attach point. On a tick whose frame hold has expired the yaw
     // turns by the attach part's yaw and the mover carries the entity to +0x7c (runtime: thrown template 401, capture
@@ -1754,6 +1819,7 @@ void TbWorld::actorStep(TbActor& a) {
     }
     contacts(a, touched);
     attackHits(a, touched);
+    if (a.rec()->flagsC & 0x1089) a.f20 &= ~0x200u;  // before the anim (0x453de0): swim states hold gravity off one tick
 
     // Animation (0x469770): continue, or (re)start when the state's anim id differs from the playing one. Packet
     // 0xa00 of each applied TOD frame sets the attach point +0x84 (0x468280).
@@ -1825,8 +1891,32 @@ void TbWorld::actorStep(TbActor& a) {
         }
     }
     // Trigger zones last (0x453de0 tail, after the logic's event): flags0 0x1000000 or a state with flagsB 0x800000.
+    // The water bits are cleared first (the tail's +0x24 &= 0xfb6fba04; ponytail: only 0x60 here, the other bits keep
+    // their own clears) and re-raised by a water zone (0x44f550), so the next tick's logic sees them.
+    const uint32_t wet = a.f24;
+    a.f24 &= ~0x60u;
     if ((a.flags0 & 0x1000000) || (a.rec()->flagsB & 0x800000))
         if (const uint32_t z = zoneTick(a); !(z & 0x90000000)) dispatch(a, z);
+    if ((wet & 0x40) && !(a.f24 & 0x40)) a.roll = a.pitch = 0, a.f20 &= ~0x200u;  // left the water
+    if ((a.f24 & 0x40) && a.depth < 200) a.f24 |= 0x20;                         // shallow: depth <= 199
+    if (!(wet & 0x40) && (a.f24 & 0x40)) {  // entered: gravity off, pitch / roll into [-0x800, 0x800]
+        a.f20 |= 0x200;
+        for (int16_t* v : {&a.pitch, &a.roll})
+            if (*v > 0x800 || *v < -0x800) {
+                int32_t r = *v % 0x1000;
+                if (r > 0x800) r -= 0x1000;
+                if (r < -0x800) r += 0x1000;
+                *v = int16_t(r);
+            }
+        const int32_t self = int32_t(a.uid);  // carried entities with flags0 0x2802 are let go
+        forEachEntity([&](TbActor& c) {
+            if (c.parent != self || !(c.flags0 & 0x2802)) return;
+            c.f20 &= ~0x8000u;
+            c.f24 |= 0x80;
+            if (c.progMask[1] & 0x80) runProgram(c, 0, 0x80, 0);
+            detach(c);
+        });
+    }
 }
 
 uint32_t TbWorld::zoneTick(TbActor& a) {
@@ -1846,14 +1936,16 @@ uint32_t TbWorld::zoneTick(TbActor& a) {
             rz = int16_t((m.m[6] * dx + m.m[7] * dy + m.m[8] * dz) >> 12);
         }
         if (rx < 0 || rx > z.extX || rz < 0 || rz > z.extZ) continue;
-        const bool player = a.flags0 & 0x4000000;
+        const bool player = a.flags0 & 0x4000000;  // 8 / 9: DAT_004d236c / DAT_004d2368 = the focus / its partner
+        const TbActor* foc = &actors[size_t(focus())];
+        const TbActor* par = &actors[size_t(1 - focus())];
         for (auto& [id, b] : z.blocks) {
             if ((a.id == 0x15 || id == 0x15) && (a.flags1 & 2)) {
                 a.f20 |= 0x2000;
                 return 0x80000000;
             }
-            if (a.id != id && !(player && (id == 10 || (&a == &actors[0] && id == 8) || (&a == &actors[1] && id == 9)))) continue;
-            if (z.flagsC & 0x1000) unsupported.insert("zone water");  // +0x24 0x40, depth +0x1a2: no swimming
+            if (a.id != id && !(player && (id == 10 || (&a == foc && id == 8) || (&a == par && id == 9)))) continue;
+            if (z.flagsC & 0x1000) a.f24 |= 0x40, a.depth = int16_t(a.pos.y - z.height - z.origin.y);  // water: +0x1a2
             if (const uint32_t r = runItems(a, b); !(r & 0x90000000)) res = r;
             break;
         }
@@ -1867,6 +1959,7 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vecto
     std::array<int32_t, 3> target = target0;  // + the carried displacement +0x58 (0x403c60), cleared (0x445c40)
     for (size_t i = 0; i < 3; ++i) target[i] += a.carry[i];
     a.carry = {};
+    const V3 p0 = a.pos;
     std::array<int32_t, 3> w{a.vel[0] >> 4, a.vel[1] >> 4, a.vel[2] >> 4};
     if (!(a.f24 & 0x200) && !(a.f20 & 0x200) && !(r.flagsA & 0xa2008601u) && !(r.flagsC & 1)) w[1] += 5 * dt;
     int k[3] = {0, 0, 0};
@@ -1905,7 +1998,6 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vecto
         }
         if (w[1] > 0) w[1] = std::max(0, w[1] - ((5 * dt * g + 0xfff) >> 12));
     };
-    if (wasGrounded) applyGrip();
     // Shape from the actor box +0x60.. (min x, max y, min z, max x, min y, max z), §1.5 step 1: entities with tag-0x61
     // records morph toward the selected one (action 82); the others take TOD packet 0x900 in actorStep's anim step.
     if (a.boxIdx >= 0 && size_t(a.boxIdx) < a.boxes.size()) {  // 0x450460: +-20 per tick toward the record
@@ -1931,6 +2023,13 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vecto
     if (longest < 10) shape = {10, 0};
     V3 centre{a.pos.x + boxC.x, a.pos.y + boxC.y, a.pos.z + boxC.z};
     std::vector<TbCollision::Contact> contacts;
+    // The grip only acts through the collision pass (0x443f40 runs when 0x446ea0 / 0x448ce0 found candidates): a
+    // grounded entity moved into open air (oracle w12/tb/water.csv poke) falls with full gravity on the first tick.
+    if (wasGrounded) {
+        std::vector<int32_t> near;
+        col.gather(centre, len3(w[0], w[1], w[2]) + shape.r + shape.half + 50, a.flags10, -1, near);
+        if (!near.empty()) applyGrip();
+    }
     col.sweep(centre, {w[0], w[1], w[2]}, shape, a.flags10, contacts);
     bool floor = false;
     for (const auto& ct : contacts) {
@@ -1952,6 +2051,12 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vecto
     } else {
         a.groundPoly = wasGrounded && contacts.empty() ? -1 : a.groundPoly;
     }
+    // Grab probes after the sweep (0x4450c0), ponytail: grabs / ledges are not ported, so always their no-grab tails
+    // (+0x20 = (& ~2) | 0x20, falling): edge / pole 0x4426a0 (flagsB 0x2000000 while rising / falling, or flagsA
+    // 0x2000000; +0x24 &= ~0x300), ledge 0x4434c0 (flagsB 0x1000000 likewise, or flagsA 0x400; +0x24 &= ~0xc000000).
+    if (((r.flagsB & 0x2000000) && (a.f20 & 0x420)) || (r.flagsA & 0x2000000)) a.f20 = (a.f20 & ~2u) | 0x20, a.f24 &= ~0x300u;
+    if (((r.flagsB & 0x1000000) && (a.f20 & 0x420)) || (r.flagsA & 0x400)) a.f20 = (a.f20 & ~2u) | 0x20;
+    a.f24 &= ~0xc000000u;
     // Actor contacts (0x448ce0 candidates: the contact list 0x4d2734 plus listed flags0 0x2000100 entities within
     // |v| + 50 + r): ponytail: the moved shape against each candidate's box (its yaw only), pushed out of solid
     // ones (not flags0 0x2000000); landing on top grounds the mover (8 on flags0-8 platforms) and marks the
@@ -2013,6 +2118,9 @@ void TbWorld::move(TbActor& a, const std::array<int32_t, 3>& target0, std::vecto
     }
     a.pos = {centre.x - boxC.x, centre.y - boxC.y, centre.z - boxC.z};
     for (int i = 0; i < 3; ++i) a.vel[size_t(i)] = std::clamp(w[size_t(i)], -2047, 2047) * 16;
+    // 0x4450c0 tail: +0x20 0x100 = at rest (no velocity, no displacement, on something or a flagsA 0x80000001 state).
+    if (a.vel == std::array<int32_t, 3>{} && a.pos == p0 && ((a.f20 & 10) || (r.flagsA & 0x80000001u))) a.f20 |= 0x100;
+    else a.f20 &= ~0x100u;
 }
 
 // ------------------------------------------------------------------------------------------------ camera

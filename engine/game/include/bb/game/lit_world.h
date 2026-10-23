@@ -313,6 +313,9 @@ public:
     int level = -1;                  // GD+0 current level id (LitWorld::levelName), set by the caller (HUD hides in 3)
     std::array<HudItem, 47> hud;     // HUD elements (lit_hud.cpp)
     Fade fade;
+    // Cut-scene bars of the last render pass (0x44c4b0 while the lock G[0x36] != 0; the app draws them): G[0x36] as
+    // drawn (signed), 0 = none. The pass then moves G[0x36] by +2 (below 30 or negative: bars growing / shrinking).
+    int8_t letterbox = 0;
     // 0x44be90 (from black) / 0x44bec0 (to black); fadeTick is the per-tick 0x44bef0 that tick() ends with.
     void fadeIn(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0, fade.dark = 0x1000; }
     void fadeOut(uint8_t mode, int16_t speed) { fade.mode = mode, fade.speed = speed, fade.level = 0x1000, fade.dark = 0; }

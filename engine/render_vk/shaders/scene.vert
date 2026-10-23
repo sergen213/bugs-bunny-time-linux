@@ -50,6 +50,15 @@ void main() {
     vUv = aUv;
     vCol = aCol;
     vDist = -dot(pc.viewZ, p);
+    if ((pc.flags & 256u) != 0u) {
+        // LiT Original Fidelity: bugs.exe draws pre-projected vertices under glOrtho(near 400, far 65536), so its depth
+        // buffer holds eye depth interpolated linearly in screen space (RUNTIME_REFERENCE §29); coplanar layers of
+        // different triangulation then occlude along their edges as in the original. Same near / far as viewProj, whose
+        // z row is a·viewZ + b·(0,0,0,1): clip z = b − a·d, 0 at d = b/a, 1·d at d = b/(1+a).
+        vec4 r = vec4(pc.viewProj[0][2], pc.viewProj[1][2], pc.viewProj[2][2], pc.viewProj[3][2]);
+        float a = dot(r.xyz, pc.viewZ.xyz), b = r.w - a * pc.viewZ.w, n = b / a, f = b / (1.0 + a);
+        gl_Position.z = (vDist - n) / (f - n) * gl_Position.w;
+    }
 #ifdef LIT
     vWorld = aPos;
     vNormal = aNormal.xyz;

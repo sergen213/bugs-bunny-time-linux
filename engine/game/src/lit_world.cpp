@@ -392,6 +392,9 @@ void LitWorld::tick(const PadInput& in) {
     }
     musicTick();
     helpRequest_ = pauseRequest_ = false;
+    // §1.1 step 9, 0x44c4b0: the cut-scene lock G[0x36] draws black bars (0x40c5e0) and grows / shrinks by 2 per pass.
+    letterbox = int8_t(G[0x36]);
+    if ((letterbox > 0 && G[0x36] < 0x1e) || letterbox < 0) G[0x36] = uint8_t(G[0x36] + 2);
     fadeTick();     // §1.1 step 9: the render pass advances the fade (0x44c4b0 / 0x44bef0)
 }
 
@@ -1609,15 +1612,17 @@ void LitWorld::cameraFollow(Mover& target, bool type14) {
 std::vector<LitWorld::Shadow> LitWorld::shadows() const {
     std::vector<Shadow> out;
     if (!scene_) return out;
-    auto one = [&](uint16_t entity, const Mover& m, const ActorModel* model, const AnimState& st,
+    // at / rot: the drawn root (0x4375d0 walks the coordinate chain, so a carried Bugs' shadow follows his carrier's
+    // part of this tick like his model); the y clamp, zone and tilt probes use the stored position +0xe4.
+    auto one = [&](uint16_t entity, const Mover& m, const V3& at, const ActorModel* model, const AnimState& st,
                    std::array<int16_t, 3> rot, std::array<int32_t, 3> scale, const std::array<int16_t, 6>& box,
                    const LitActor* support) {
         if (!entity || !model || st.parts.empty() || out.size() >= 40 || !scene_->templateModels.contains(entity)) return;
         // 0x44ba00: one part -> the actor position, else the origin of the second part of the list; skipped when that
         // part is not drawn (+0xb4).
-        const auto o = partOrigin(*model, st, st.parts.size() > 1 ? 1 : 0, {m.pos.x, m.pos.y, m.pos.z}, rot, scale);
+        const auto o = partOrigin(*model, st, st.parts.size() > 1 ? 1 : 0, {at.x, at.y, at.z}, rot, scale);
         if (!o) return;
-        Shadow s{entity, st.parts.size() > 1 ? V3{(*o)[0], (*o)[1], (*o)[2]} : m.pos, {0, m.yaw, 0}, 0x1000};
+        Shadow s{entity, st.parts.size() > 1 ? V3{(*o)[0], (*o)[1], (*o)[2]} : at, {0, rot[1], 0}, 0x1000};
         if (support && ((support->flags8 & 8) || (support->flagsC & 0x2000))) {  // riding: at the feet, platform tilt
             s.pos.y = m.pos.y;
             s.rot = {support->rot[0], support->yaw, support->rot[2]};
@@ -1657,14 +1662,16 @@ std::vector<LitWorld::Shadow> LitWorld::shadows() const {
         out.push_back(s);
     };
     // Bugs first (the registration list follows the draw list), skipped in first person (camera flags 0x20).
-    if (!(cam.flags & 0x20))
-        one(playerShadow_, p, model_, p.animState, {0, p.yaw, p.lean}, {4096, 4096, 4096}, p.animState.box,
+    if (!(cam.flags & 0x20)) {
+        const auto [at, yaw] = playerDraw();
+        one(playerShadow_, p, at, model_, p.animState, {0, yaw, p.lean}, {4096, 4096, 4096}, p.animState.box,
             p.platform >= 0 ? &actors[size_t(p.platform)] : nullptr);
+    }
     for (const LitActor& a : actors) {
         if (!a.active || !a.visible || a.dead || a.type == 7) continue;
         const ActorDef& d = defs[size_t(a.def)];
         const bool tod = a.animState.box != std::array<int16_t, 6>{};  // TOD packet 9 overrides the tag box
-        one(d.shadow, a, d.model >= 0 ? &scene_->actorModels[size_t(d.model)] : nullptr, a.animState,
+        one(d.shadow, a, a.pos, d.model >= 0 ? &scene_->actorModels[size_t(d.model)] : nullptr, a.animState,
             {a.rot[0], a.yaw, a.rot[2]}, a.scale, tod ? a.animState.box : a.box, nullptr);
     }
     return out;

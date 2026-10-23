@@ -145,7 +145,8 @@ public:
     int drawCalls() const { return drawCalls_; }
 
 private:
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; int16_t zone; };
+    // late: Mesh::late; tris: triCentroids (pc_order.h) of a translucent mesh.
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; int16_t zone; bool late = false; std::vector<glm::vec3> tris; };
     struct GpuTexAnim { std::vector<uint32_t> frames; uint32_t start, hold; };
     struct V2 { float x, y, u, v; uint8_t rgba[4]; };
 
@@ -167,7 +168,7 @@ private:
 
     uint32_t prog3D_ = 0, prog2D_ = 0;
     int uViewProj_ = -1, uView_ = -1, uAlphaRef_ = -1, uFog_ = -1, uFogColor_ = -1, uAdditive_ = -1, uScreen_ = -1,
-        uColorScale_ = -1, uTexGamma_ = -1;
+        uColorScale_ = -1, uTexGamma_ = -1, uLinearZ_ = -1;
     float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
     bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps; PC ABR texels (0x420d10)
     uint32_t sampNearest_ = 0, sampTrilinear_ = 0, sampUiNearest_ = 0, sampUiLinear_ = 0, sampLinear_ = 0;

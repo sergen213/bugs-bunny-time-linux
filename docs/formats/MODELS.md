@@ -340,8 +340,12 @@ sets near = p1, (p1+far)/2 or far for `DETAILS` (`DAT_00639b58`) 0/1/2, and [RB]
 Drawn together with A, C covers textured walls (visual check, TRCA01).
 
 Sky domes are owned by class-9 entities (chunk 0x63, tag `0f` = the dome's asset id, 54/59; tag `10` position,
-e.g. TRCA01 (0, −15500, 5), yaw 180°): `FUN_0044d6f0` builds the entity's octree and forces its scale to 1.
-Whether the dome follows the camera at run time is Research Required.
+e.g. TRCA01 (0, −15500, 5), yaw 180°): `FUN_0044d6f0` builds the entity's octree and forces its scale to 1. The dome
+**follows the eye** (S, bblit2 `0x465710`, run on every draw of a class-9 entity): it copies the view eye
+(`0x4d5124`, s16) into the entity position, rebuilds the matrix with the tag-0x11 rotation and adds `+0x76` (tag 0x39
+s16 @2, PS1 y: VIQ02 −1750, VICA01 −5200, ARCA01 −7500, TRCA01 −10000) to its translation; tag `10` is never used.
+`bb::buildTbScene` builds domes in eye space into `Scene::skyMeshes`; the app draws them at the eye every frame.
+Consistent: ARCA01 oracle sky band (`local/shots/w12/sky/side_arca01_dome.png`, top-rows MAD 5.5 → 3.2).
 
 Invalid prims ([PV] fails → logged `CheckPrimValidity failed` and skipped): 48 in all data, dropped by the exporter.
 

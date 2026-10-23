@@ -1,4 +1,5 @@
 #include "bb/render_vk/renderer.h"
+#include "bb/render/pc_order.h"
 
 #include "fsr.h"
 
@@ -1118,9 +1119,11 @@ void Renderer::createPipelines() {
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
         cb.attachmentCount = shadow ? 0 : mv ? 3 : 1;
         cb.pAttachments = att;
-        const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
+        // Scene pipelines set depth writes per draw (bugs.exe's blended faces write depth, pc_order.h).
+        const VkDynamicState dyn[4] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
+                                       VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE};
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-        dy.dynamicStateCount = 3;
+        dy.dynamicStateCount = ui || shadow ? 3 : 4;
         dy.pDynamicStates = dyn;
         VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
         const VkFormat formats[3] = {swapFormat_, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8_UNORM};
@@ -1290,6 +1293,8 @@ void Renderer::addMeshes(std::span<const Mesh> ms, bool actor, size_t casters, s
                            uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, animOk ? m.textureAnim : -1, 0,
                            // FSR reactive: LiT type-4 sprite effects (apps/bbtime poseActors names them) and animated textures
                            (actor && m.name == "sprite") || animOk, m.zone, false});
+        meshes_.back().late = m.late;
+        meshes_.back().tris = render::triCentroids(m);
         if (actor) actorLayout_.push_back(uint32_t(m.vertices.size()));
         if (!actor && world && solid) {
             casterLo_ = glm::min(casterLo_, lo);
@@ -2689,7 +2694,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
 
     VkPipeline bound = VK_NULL_HANDLE;
     const GpuMesh* fill = seaFill_ < meshes_.size() ? &meshes_[seaFill_] : nullptr; // open-water plane (Enhanced water only)
-    auto draw = [&](const GpuMesh& m, bool stylised = true) {
+    // tri / tris: a run of the mesh's triangles (bugs.exe sorted pass); ref: alpha-test reference of a blended mesh;
+    // zw: depth writes of a blended mesh (pc_order.h).
+    auto draw = [&](const GpuMesh& m, bool stylised = true, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f, bool zw = false) {
         // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
         // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
         const bool pcSub = original && m.blend == Blend::Subtract;
@@ -2703,13 +2710,15 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         if (p != bound) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
         bindGeom(m);
         vkCmdSetCullMode(cb, m.twoSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
-        pc.alphaRef = m.blend == Blend::AlphaTest ? 0.5f : -1.0f;
+        vkCmdSetDepthWriteEnable(cb, b == 0 || zw);
+        pc.alphaRef = m.blend == Blend::AlphaTest ? 0.5f : ref;
         pc.flags = pcSemi ? 64u | 16u : uint32_t(m.blend == Blend::Additive || m.blend == Blend::Subtract) | (pcSub ? 2u : 0u);
         if (mode != Shadows::Off && m.receiver) pc.flags |= 4u | (m.blend != Blend::Alpha ? 8u : 0u);
         pc.material = refl ? m.material : 0u;
         if (m.blend == Blend::Alpha) pc.flags |= 16u;
         if (m.reactive) pc.flags |= 32u;
         if (w) pc.flags = 128u, pc.material = m.tint, pc.alphaRef = -1.0f;  // stylised water: material = the original's colour
+        if (original && linearOriginal_) pc.flags |= 256u;  // scene.vert: bugs.exe's screen-linear eye depth
         if (m.textureAnim >= 0) {
             const TexAnim& a = texAnims_[size_t(m.textureAnim)];
             pc.tex = a.frames[(a.start + texTick_ / a.hold) % a.frames.size()];
@@ -2717,7 +2726,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
             pc.tex = m.texture;
         }
         vkCmdPushConstants(cb, layout_, kPushStages, offsetof(Push3D, alphaRef), sizeof(Push3D) - offsetof(Push3D, alphaRef), &pc.alphaRef);
-        vkCmdDrawIndexed(cb, m.indexCount, 1, m.firstIndex, m.baseVertex, 0);
+        vkCmdDrawIndexed(cb, std::min(m.indexCount - 3 * tri, 3 * tris), 1, m.firstIndex + 3 * tri, m.baseVertex, 0);
         ++drawCalls_;
     };
     // Same passes as the GL renderer: opaque, alpha-tested (depth-writing, unsorted), then translucent
@@ -2740,11 +2749,32 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     for (const GpuMesh& m : meshes_)
         if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m) && !(water && (m.water || m.sheen) && !m.surf) && &m != fill)
             translucent.push_back(&m);
-    std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
-        const glm::vec3 d = m->center - cam.pos;
-        return glm::dot(d, d);
-    });
-    for (const GpuMesh* m : translucent) draw(*m, false);
+    const bool pcOrder = original && linearOriginal_;
+    if (!pcOrder) {
+        std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
+            const glm::vec3 d = m->center - cam.pos;
+            return glm::dot(d, d);
+        });
+        for (const GpuMesh* m : translucent) draw(*m, false);
+    } else {
+        // bugs.exe (LiT Original Fidelity, pc_order.h): untextured blended faces first, then layer 1 sorted per
+        // triangle, then layer 2 (Mesh::late); all depth-writing, alpha test GREATER 0 except the sorted pass.
+        constexpr float kGreater0 = 0.5f / 255.0f;
+        auto plain = [&](const GpuMesh& m) { return m.texture == kSlotWhite && m.textureAnim < 0; };
+        for (const GpuMesh* m : translucent)
+            if (plain(*m) && !m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
+        std::vector<render::PcTri> tris;
+        const glm::mat4 view = cam.view();
+        const glm::vec4 zRow(view[0][2], view[1][2], view[2][2], view[3][2]);  // eye-space z of a world point
+        for (uint32_t i = 0; i < translucent.size(); ++i) {
+            const GpuMesh& m = *translucent[i];
+            if (plain(m) || m.late) continue;
+            for (uint32_t t = 0; t < m.tris.size(); ++t) tris.push_back({glm::dot(zRow, glm::vec4(m.tris[t], 1.0f)), i, t});
+        }
+        render::drawPcSorted(tris, [&](uint32_t i, uint32_t t, uint32_t n) { draw(*translucent[i], false, t, n, -1.0f, true); });
+        for (const GpuMesh* m : translucent)
+            if (m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
+    }
     if (fsr) fsrResolve(s);
 }
 

@@ -41,6 +41,9 @@ struct Mesh {
     bool twoSided = false;       // no back-face culling
     int32_t textureAnim = -1;    // index into Scene::textureAnims; when set it overrides `texture` (the fallback)
     int16_t zone = -1;           // LiT world: zone id of its chunk 0x20 (tag 0x21); -1 = always drawn
+    // LiT PC blended layer 2 (0x7bd970: Bugs 0x44ca11, ground shadows 0x44bde9): drawn after bugs.exe's sorted blended
+    // pass, unsorted with alpha test (flush 0x4124b0, RUNTIME_REFERENCE §29).
+    bool late = false;
 };
 
 // LiT zone/portal visibility (MODELS.md §7, 0x44c270 / 0x40fe90). Engine-space corners.
@@ -154,6 +157,9 @@ struct Scene {
     std::string level;           // e.g. "L01A"
     std::vector<Texture> textures;
     std::vector<Mesh> meshes;
+    // TB sky domes (class-9 entities, 0x465710): in eye space (the dome's yaw and +0x76 lift applied), drawn every
+    // frame translated to the view eye (its PS1 s16 coordinates); not in `meshes`.
+    std::vector<Mesh> skyMeshes;
     std::vector<TextureAnim> textureAnims;
     bool placeholder = false;    // true when content is NOT decoded original data (incl. galleries)
     float colorScale = 1.0f;     // vertex rgb multiplier; LiT uses PS1 modulation texel*colour/128 -> 255/128

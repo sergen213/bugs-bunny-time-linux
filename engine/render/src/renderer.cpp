@@ -1,4 +1,5 @@
 #include "bb/render/renderer.h"
+#include "bb/render/pc_order.h"
 
 #include <SDL3/SDL.h>
 #include <epoxy/gl.h>
@@ -18,6 +19,7 @@ layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec4 aCol;
 uniform mat4 uViewProj;
 uniform mat4 uView;
+uniform vec2 uLinearZ;  // near, far: LiT Original Fidelity depth = eye depth linear in screen space (bugs.exe glOrtho)
 out vec2 vUv;
 out vec4 vCol;
 out float vDist;
@@ -27,6 +29,7 @@ void main() {
     vUv = aUv;
     vCol = aCol;
     vDist = -(uView * p).z;
+    if (uLinearZ.y > uLinearZ.x) gl_Position.z = (2.0 * (vDist - uLinearZ.x) / (uLinearZ.y - uLinearZ.x) - 1.0) * gl_Position.w;
 })";
 
 constexpr const char* kFs3D = R"(#version 330 core
@@ -233,6 +236,7 @@ std::string Renderer::init(const WindowConfig& cfg) {
     prog3D_ = link(kVs3D, kFs3D);
     uViewProj_ = glGetUniformLocation(prog3D_, "uViewProj");
     uView_ = glGetUniformLocation(prog3D_, "uView");
+    uLinearZ_ = glGetUniformLocation(prog3D_, "uLinearZ");
     uAlphaRef_ = glGetUniformLocation(prog3D_, "uAlphaRef");
     uFog_ = glGetUniformLocation(prog3D_, "uFog");
     uFogColor_ = glGetUniformLocation(prog3D_, "uFogColor");
@@ -358,7 +362,8 @@ void Renderer::appendMeshes(std::span<const Mesh> in, uint32_t vao, std::vector<
         const bool texOk = m.texture >= 0 && size_t(m.texture) < sceneTextures_.size() && sceneTextures_[size_t(m.texture)];
         const bool animOk = m.textureAnim >= 0 && size_t(m.textureAnim) < texAnims_.size() && !texAnims_[size_t(m.textureAnim)].frames.empty();
         out.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
-                       uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1, m.zone});
+                       uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1, m.zone,
+                       m.late, triCentroids(m)});
         verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
         idx.insert(idx.end(), m.indices.begin(), m.indices.end());
     }
@@ -437,6 +442,8 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glUseProgram(prog3D_);
     glUniformMatrix4fv(uViewProj_, 1, GL_FALSE, glm::value_ptr(vp3));
     glUniformMatrix4fv(uView_, 1, GL_FALSE, glm::value_ptr(view));
+    const bool pcLit = original && linearOriginal_;  // bugs.exe depth and blended order (pc_order.h)
+    glUniform2f(uLinearZ_, pcLit ? s.zNear : 0.0f, pcLit ? s.zFar : 0.0f);
     glUniform2f(uFog_, s.fog ? s.fogStart : 0.0f, s.fog ? s.fogEnd : 0.0f);
     glUniform3fv(uFogColor_, 1, s.fogColor);
     glUniform1f(uColorScale_, s.colorScale(colorScale_));
@@ -455,7 +462,8 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         return original && linearOriginal_ && (m.blend == Blend::Alpha || m.blend == Blend::Additive) &&
                (m.texture != white_ || m.textureAnim >= 0);
     };
-    auto draw = [&](const GpuMesh& m) {
+    // tri / tris: a run of the mesh's triangles (bugs.exe sorted pass); ref: alpha-test reference of a blended mesh.
+    auto draw = [&](const GpuMesh& m, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f) {
         if (m.vao != boundVao) glBindVertexArray(boundVao = m.vao);
         if (m.twoSided) glDisable(GL_CULL_FACE);
         else glEnable(GL_CULL_FACE);
@@ -465,12 +473,12 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         } else {
             glBindTexture(GL_TEXTURE_2D, m.texture);
         }
-        glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : -1.0f);
+        glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : ref);
         // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
         // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
         glUniform1i(uAdditive_, pcSemi(m) ? 3 : original && m.blend == Blend::Subtract ? 2 : m.blend == Blend::Additive || m.blend == Blend::Subtract);
-        glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(m.indexCount), GL_UNSIGNED_INT,
-                                 reinterpret_cast<void*>(size_t(m.firstIndex) * sizeof(uint32_t)), m.baseVertex);
+        glDrawElementsBaseVertex(GL_TRIANGLES, GLsizei(std::min(m.indexCount - 3 * tri, 3 * tris)), GL_UNSIGNED_INT,
+                                 reinterpret_cast<void*>(size_t(m.firstIndex + 3 * tri) * sizeof(uint32_t)), m.baseVertex);
         ++drawCalls_;
     };
 
@@ -488,19 +496,40 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
         for (const GpuMesh& m : *list)
             if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) translucent.push_back(&m);
-    std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
-        const glm::vec3 d = m->center - cam.pos;
-        return glm::dot(d, d);
-    });
+    const bool pcOrder = original && linearOriginal_;
+    if (!pcOrder)
+        std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
+            const glm::vec3 d = m->center - cam.pos;
+            return glm::dot(d, d);
+        });
     glEnable(GL_BLEND);
-    glDepthMask(GL_FALSE);
-    for (const GpuMesh* m : translucent) {
+    glDepthMask(pcOrder ? GL_TRUE : GL_FALSE);
+    auto blended = [&](const GpuMesh* m, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f) {
         // Destination alpha is kept at 1 so the window never turns see-through under a compositor.
         const bool pcSub = original && m->blend == Blend::Subtract;
         if (m->blend == Blend::Alpha || pcSub || pcSemi(*m)) glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
         else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
         glBlendEquationSeparate(m->blend == Blend::Subtract && !pcSub ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
-        draw(*m);
+        draw(*m, tri, tris, ref);
+    };
+    if (!pcOrder) {
+        for (const GpuMesh* m : translucent) blended(m);
+    } else {
+        // bugs.exe (LiT Original Fidelity, pc_order.h): untextured blended faces first, then layer 1 sorted per
+        // triangle, then layer 2 (Mesh::late); all depth-writing, alpha test GREATER 0 except the sorted pass.
+        constexpr float kGreater0 = 0.5f / 255.0f;
+        for (const GpuMesh* m : translucent)
+            if (m->texture == white_ && m->textureAnim < 0 && !m->late) blended(m, 0, UINT32_MAX, kGreater0);
+        std::vector<PcTri> tris;
+        const glm::vec4 zRow(view[0][2], view[1][2], view[2][2], view[3][2]);  // eye-space z of a world point
+        for (uint32_t i = 0; i < translucent.size(); ++i) {
+            const GpuMesh& m = *translucent[i];
+            if ((m.texture == white_ && m.textureAnim < 0) || m.late) continue;
+            for (uint32_t t = 0; t < m.tris.size(); ++t) tris.push_back({glm::dot(zRow, glm::vec4(m.tris[t], 1.0f)), i, t});
+        }
+        drawPcSorted(tris, [&](uint32_t i, uint32_t t, uint32_t n) { blended(translucent[i], t, n); });
+        for (const GpuMesh* m : translucent)
+            if (m->late) blended(m, 0, UINT32_MAX, kGreater0);
     }
     glBlendEquation(GL_FUNC_ADD);
     glDisable(GL_CULL_FACE);

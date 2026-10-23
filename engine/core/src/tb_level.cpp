@@ -571,8 +571,17 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
         std::ranges::copy(p, xf.t);
         xf.cy = std::cos(yaw), xf.sy = std::sin(yaw);
         if (model->octree) {
+            // The class-9 draw 0x465710 overwrites the entity position with the view eye every frame (tag 0x10 is
+            // never used) and lifts the matrix by +0x76 (tag 0x39 s16 @2, PS1 y): built here in eye space,
+            // drawn at the eye (Scene::skyMeshes).
             model->placed = true;
+            const auto lift = ch.tag(0x39);
+            xf.t[0] = xf.t[2] = 0.0f;
+            xf.t[1] = lift.size() >= 4 ? float(int16_t(le16(lift, 2))) : 0.0f;
+            const size_t first = s.meshes.size();
             b.octree(model->model, xf, std::format("sky{}", ch.offset));
+            std::ranges::move(s.meshes.begin() + ptrdiff_t(first), s.meshes.end(), std::back_inserter(s.skyMeshes));
+            s.meshes.resize(first);
             continue;
         }
         const uint16_t nobj = In{model->model, "actor model"}.u16(2);

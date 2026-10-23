@@ -100,7 +100,8 @@ int main() {
                 CHECK(std::ranges::any_of(s.textureAnims, [](const bb::TextureAnim& a) { return a.linkId == 214 && a.frames.size() > 1; }),
                       "TRR01 link 214");
             uint64_t idx = 0;
-            for (const bb::Mesh& m : s.meshes) {
+            for (const auto* list : {&s.meshes, &s.skyMeshes})
+            for (const bb::Mesh& m : *list) {
                 idx += m.indices.size();
                 CHECK(m.texture >= 0 && m.texture < int32_t(s.textures.size()), "{} {}", p.string(), m.name);
                 CHECK(m.textureAnim < int32_t(s.textureAnims.size()), "{} {}", p.string(), m.name);

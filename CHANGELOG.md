@@ -3,6 +3,35 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## Unreleased
+
+- LiT Original Fidelity draws blended faces the way bugs.exe's GL renderer does (`0x4124b0`): they write depth, are
+  sorted per triangle back to front, Bugs' and shadow faces come last, and depth is the exe's screen-linear eye
+  depth. The dark bars under the LS01 time machine now show as in the original, the LS01 floor's glow layers meet
+  along clean edges instead of stair steps, and the CCMERLIN moat is black like the original's (GL and Vulkan).
+- LiT cut scenes get the original's black letterbox bars (`0x44c4b0` while the cut-scene lock `G[0x36]` is set;
+  CCMERLIN walk to the castle: 57 / 56 rows at 640×480, as in the Wine oracle).
+- TB sky domes follow the camera as in the original (bblit2 `0x465710`: the dome is drawn at the view eye, lifted by
+  its per-level offset) instead of standing at the entity's map position. The sky now matches the original from
+  anywhere in a level, and with Enhanced water VIQ02's distant icebergs sit on the horizon instead of sinking into the
+  sea.
+- LiT: a carried Bugs' ground shadow follows him through his carrier's part this tick, like his model (`0x44ba00`
+  walks the coordinate chain), instead of trailing a tick behind.
+- TB swimming: water trigger zones (chunk 0x09 with +0xc 0x1000: Granny's pond, VIQ01/VIQ02/VICA01, AZQ01, ARCA04,
+  TRQ01/TRQ02 and others) now work as in the original. Bugs and Taz fall in with a plunge, float up to the surface,
+  swim with the stick and jump back out with ✕. The water depth, the "shallow" flag and gravity-off follow the exe
+  (`0x44f550`, `0x453de0` swim branch). Matches the Wine oracle tick for tick: 264 ticks of falling in, swimming,
+  turning and jumping out in Granny's pond (`ctest -R game.tb`). `TbWorld::waterSurface` reports the surface above a
+  swimmer for the renderer.
+- TB steering now matches the original exactly (Wine trace E: every tick equal, was up to 4 units/tick off).
+  - The turn step applies a remainder smaller than 4 at once.
+  - Keyboard Left / Down give a stick of −128, not −127.
+- TB movement details from the original:
+  - A character moved into open air falls with full gravity on the first tick.
+  - The at-rest flag follows the mover.
+  - Jump states mark falling at the apex (the no-grab tails of the edge and ledge probes).
+  - Zone blocks 8 / 9 match the player in control and the partner, not Bugs and Taz.
+
 ## 0.11.0 — 2026-10-23 (Wave 11: stylised interactive water, LiT carry fixes)
 
 - Vulkan Enhanced: stylised interactive water (`water = enhanced`, `--water`, Options, launcher; ported from the Joan

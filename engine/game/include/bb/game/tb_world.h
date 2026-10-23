@@ -18,6 +18,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -43,7 +44,7 @@ using TbBlock = std::vector<TbLogicItem>;
 // Pad record GD+8+pad*0x28 (GAMEPLAY.md §2.3).
 struct TbPad {
     uint16_t pressed = 0, held = 0, raw = 0, prevHeld = 0, prevRaw = 0;
-    int8_t sx = 0, sy = 0;  // +0xc / +0xd (right +, up +)
+    int8_t sx = 0, sy = 0;  // +0xc / +0xd (right +, up +; digital 0x7f / -0x80)
 };
 // One tick of the TB pad layer: held/raw from the report, pressed = held & ~(prev & edgeMask) (chunk 0x3a tag 0x3c
 // @12), stick: digital ±0x7f; analog dead zone 0x4d..0xb1 scaled 128/78 (formula Inferred).
@@ -78,6 +79,7 @@ struct TbActor {
     uint16_t stateTicks = 0;                 // +0x82: +1 after every tick, reset only by logic action 16 (not by
                                              // state changes; runtime trace local/wine/tbplay/G_idle_rng.csv)
     int16_t turn = 0;                        // +0x18c
+    int16_t depth = 0;                       // +0x1a2: feet below the water surface (set by a water zone, f24 0x40)
     int16_t turnRate = 0;                    // +0x192
     int32_t groundPoly = -1;                 // +0x108
     std::vector<std::array<int16_t, 6>> boxes;  // tag 0x61 collision box records (+0x78)
@@ -168,6 +170,11 @@ public:
     const std::vector<TbActor*>& list() { return order(); }  // every entity in list (tick) order
     // 0x407080 for entity a (emitter uid + 1): mode 1 start, 2 release.
     void playSound(const TbActor& a, uint16_t id, uint16_t mode = 1) { sfx.request(int32_t(a.uid) + 1, id, mode, rng); }
+    // Water surface y (PS1 y down) above entity a while it is in a water zone (f24 0x40), else none: the zone top
+    // the depth +0x1a2 was measured from. f24 0x20 = shallow (depth < 200).
+    std::optional<int32_t> waterSurface(const TbActor& a) const {
+        return a.f24 & 0x40 ? std::optional<int32_t>(a.pos.y - a.depth) : std::nullopt;
+    }
 
     TbCollision col;
     std::array<TbActor, 2> actors;           // [0] Bugs (id 2), [1] Taz (id 3)

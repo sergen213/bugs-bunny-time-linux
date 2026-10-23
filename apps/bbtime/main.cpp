@@ -562,6 +562,8 @@ struct App {
                    glm::all(glm::lessThanEqual(glm::vec3(p[0], p[1], p[2]), hi));
         };
         float fogEnd = radius * 2.5f;
+        for (const bb::Mesh& m : scene.skyMeshes)  // TB sky domes (eye space) never fade or clip
+            for (const bb::Vertex& v : m.vertices) fogEnd = std::max(fogEnd, glm::length(glm::vec3(v.pos[0], v.pos[1], v.pos[2])) / 0.7f);
         if (scene.spawn && inside(*scene.spawn)) { // behind and above the player start, facing the player's direction
             cam.yaw = scene.spawnYaw;
             cam.pitch = -0.1f;
@@ -1232,6 +1234,7 @@ struct App {
             }
             if (play || tbPlay) {
                 if (tbPlay) drawTbBoxes();  // letterbox bars + text-box rects, under the glyphs (0x464c30 / 0x4662f0)
+                if (play) drawLitBars();
                 drawOverlayText(play ? play->world.glyphs : tbPlay->world.glyphs);  // game text: drawn with --no-hud too
                 if (tbPlay) drawTbSprites();  // the HUD sheet sprites (game HUD)
                 if (const auto f = play ? play->world.fadeOverlay() : tbPlay->world.fadeOverlay(); f[3])
@@ -1294,13 +1297,24 @@ struct App {
                 // Attached at a parent's part: drawn under that part's full matrix (GsGetLws), e.g. hidden by a
                 // zero-scale part (LS01 clock-gate displays); otherwise the yaw-only frame the simulation keeps.
                 const auto pm = play->world.parentFrame(a);
+                const size_t first = actorMeshes.size();
                 bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
                               {a.rot[0], pm ? a.matYaw : a.yaw, a.rot[2]}, a.scale, actorMeshes, {}, pm ? &*pm : nullptr);
+                if (a.type == 1)  // Bugs: PC blended layer 2 (0x44ca11)
+                    for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].late = true;
             }
         };
         if (play) poseLit(false);
         const size_t casters = actorMeshes.size();
         if (play && sunShadows) poseLit(true);
+        if (!scene.skyMeshes.empty()) {  // TB sky domes at the view eye (0x465710 copies it as PS1 s16)
+            const glm::vec3 at(float(int16_t(int32_t(std::lround(eye.x)))), -float(int16_t(int32_t(std::lround(-eye.y)))),
+                               -float(int16_t(int32_t(std::lround(-eye.z)))));
+            for (const bb::Mesh& m : scene.skyMeshes) {
+                bb::Mesh& d = actorMeshes.emplace_back(m);
+                for (bb::Vertex& v : d.vertices) v.pos[0] += at.x, v.pos[1] += at.y, v.pos[2] += at.z;
+            }
+        }
         if (play) {  // type-4 sprite effects (0x44c170 / 0x438280): screen-aligned quads after the shadow casters
             const glm::mat4 view = c.view(), toWorld = glm::inverse(view);
             const uint8_t white = uint8_t(std::min(255.0f, std::round(255.0f / s.colorScale(scene.colorScale))));
@@ -1342,11 +1356,13 @@ struct App {
                 const size_t first = actorMeshes.size();
                 bb::poseActor(scene.actorModels[scene.templateModels.at(s.entity)], rigid, {s.pos.x, s.pos.y, s.pos.z}, s.rot,
                               {s.scale, 0x1000, s.scale}, actorMeshes);
-                for (size_t k = first; k < actorMeshes.size(); ++k)
+                for (size_t k = first; k < actorMeshes.size(); ++k) {
+                    actorMeshes[k].late = true;  // PC blended layer 2 (0x44bde9)
                     for (bb::Vertex& v : actorMeshes[k].vertices) {
                         const glm::vec3 p{v.pos[0], v.pos[1], v.pos[2]}, q = p + kShadowPull * glm::normalize(eye - p);
                         v.pos[0] = q.x, v.pos[1] = q.y, v.pos[2] = q.z;
                     }
+                }
             }
         }
         if (play) {
@@ -1467,6 +1483,18 @@ struct App {
             r.drawImage(fontImages[g.glyph - 1u], W * 0.5f + std::trunc(float(g.x) * sx), H * 0.5f + std::trunc(float(g.y) * sy),
                         float(tx.width) * ssx, float(tx.height) * ssy, s.fidelity == Fidelity::Enhanced,
                         g.pal < 5 ? kPal[g.pal] : kWhite);
+        }
+    }
+    // LiT cut-scene bars (0x44c4b0 -> 0x40c5e0 while G[0x36] != 0): black quads 480·|s|/240 tall in the exe's 640x480
+    // screen, placed 5 past the edges with extents h - 1: 2|s| - 5 rows at the top, 2|s| - 6 at the bottom (Wine
+    // CCMERLIN, s = 31: 57 / 56).
+    void drawLitBars() {
+        if (const int b = std::abs(int(play->world.letterbox))) {
+            static constexpr uint8_t kBlack[4] = {0, 0, 0, 255};
+            const float W = float(r.width()), H = float(r.height()), k = H / 480.0f;
+            const float top = float(std::max(0, 2 * b - 5)) * k, bottom = float(std::max(0, 2 * b - 6)) * k;
+            r.drawRect(0, 0, W, top, kBlack);
+            r.drawRect(0, H - bottom, W, bottom, kBlack);
         }
     }
     // TB cinematic bars (0x464c30: GD+0x9f as |v|·h·2/240 px, black, top and bottom; R: 59 / 63 rows at v = 16 in
