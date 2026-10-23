@@ -14,6 +14,9 @@ strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
   carrier's attach item now places him on its hand part at once (the fly-in re-runs it every tick, so he follows the
   machine on the same tick as the original), and a carried Bugs is drawn through his carrier's part chain like the
   original's renderer. Positions equal the Wine oracle every counter (`testCarriedLs01`, RUNTIME_REFERENCE §26).
+- LiT: level files missing from the game's level table (debug list variants such as L03a_8, L03acom_8, L_30Bank_0)
+  were treated as the TITLE screen, so they ran 4:3-framed without Enhanced effects (no stylised water, FSR or far
+  drawing) and with the title's Esc rules. They now take the id of the level they are a variant of.
 
 ## 0.10.2 — 2026-10-22 (fix: launcher crashed on Wayland)
 

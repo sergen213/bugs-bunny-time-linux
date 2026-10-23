@@ -91,9 +91,29 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   "Water", launcher; default enhanced; Enhanced + Vulkan only, `water=original` and Original Fidelity draw byte-identical
   to before). Ported from the Joan of Arc port (scene.frag `shadeWater`, `bb/render/water_waves.h`), distances rescaled
   ×3.75 (Bugs ~300 units vs Joan ~80). Water = the reflection classifier's water meshes plus flat dark-blue opaque
-  planes (L03A sea, L02A1 river floor); a translucent layer > 200 units over such a plane makes it the bed (L02A1),
-  20–200 over it the layer is sheen the stylised sea replaces (L03A 880). A fill plane at the main water height covers
-  open water the level draws as sky dome / holes (to the horizon over a sea, over the water bounds over a bed). The
+  planes of any size (L03A sea, L02A1 river floor); a translucent layer > 200 units over such a plane makes it the bed
+  (L02A1), 20–200 over it the layer is sheen the stylised sea replaces (L03A 880). Not water (all-level sweep
+  `local/shots/w11/water/sweep/final.txt`): bright translucent cyan (luma > 0.55: L02C1 / L02C3 ice); static
+  (non-animated) alpha / additive layers without ground 5–1000 units under most of them, each layer and all static
+  layers of its texture together (sampled at triangle centres against ground reaching below the layer: space-era CC5A /
+  L05A2 glass floors over a void or their coplanar navy backing; L01D1 night mist bank, 2 of 40 layers over the
+  mountain's foot) unless level (±20) with animated water (CCMERLIN moat); saturated blue (b > 0.75: L02A1 castle window);
+  static opaque navy planes without a water layer within 200 units over them, unless the lone planes are one height,
+  the level's lowest ground and ≥ 10 % of its ground's bounding area (CC3A open sea) or lie up to 200 under real water
+  (L03A, L03ACOM) — else floor tiles (L05A5 / L05A2 platforms, L01D2_8 moonlit rock, L04C1). Animated opaque blue is a
+  water surface (L04E2 park pond, l04e, TB AZCASG05). A fill plane at the main water height covers open water the
+  level draws as sky dome / holes: 150-unit cells over the opaque planes / beds where there is no ground, the ground
+  is above the surface, a bed (incl. blue / teal vertex-lit seabed under the surface: L03A rocks under the docks), the
+  game's sheen layer, or the level's own water at that height (closes cell-edge gaps) — never dry ground below the
+  surface. When water lines > 25 % of the rim of the level's ground bounding box it is a sea: the fill covers the open
+  cells of the whole level area and a ring runs to the horizon (L03A, L03a_8, CC3A); else it stays local (L02A1,
+  L03ACOM, L04E2). A level with no opaque planes / beds whose layers at the main height have no ground at all under
+  at least 25 % of their triangles draws its water as surf / ripple layers around holes the backdrop shows through (TB
+  TRCA01 moat, VIQ02 / VICA01 sea, LiT CC2A river, L03A2 sea): the fill starts around those layers and covers the
+  open cells of the whole level area (horizon only by the rim rule; VIQ02 / VICA01 end at the level-ground box edge).
+  No fill for layers with ground under them (L02B1 / L02B2 strips, L03C lagoon, TB pools, VIQ01 cliff surf) or with a
+  static layer at that height, the game's own surface whose gaps are deliberate (CCMERLIN / Merlin moat: drawbridge).
+  Where nothing was drawn under the water (copy depth = clear) the bed is taken far along the view ray. The
   opaque + alpha-tested scene is copied (colour, depth; MSAA: depth resolved sample 0) and the water drawn opaque over
   it: absorption teal→deep blue over the refracted bed, shoreline foam, two scrolling layers of a procedural tiling
   normal map (no game data), Fresnel reflection (ray-traced with reflections on, else screen-space over the copy, else

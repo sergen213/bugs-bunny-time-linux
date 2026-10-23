@@ -1373,8 +1373,9 @@ void Renderer::buildAccel(VkCommandBuffer cb, VkAccelerationStructureTypeKHR typ
 // - ice: opaque, strongly blue (b > 1.5 r, b > 1.25 g), luma > 0.55, contrast < 0.1 -> strength 0.35, roughness 0.05 (TB VICASG01);
 // - polished floor: opaque, luma > 0.6, saturation < 0.25, contrast < 0.1 -> strength 0.25, roughness 0.08 (TB ARCA01
 //   marble square, AZBOSS01).
-// All only on surfaces facing up (area-weighted mean face normal y > 0.9) covering > 4 character units² of area.
-void Renderer::reflectiveMaterials(const Scene& scene) {
+// All only on surfaces facing up (area-weighted mean face normal y > 0.9) covering > 4 character units² of area (the
+// navy-plane water candidates at any size; uploadScene's rules then keep or drop every candidate).
+std::vector<glm::vec3> Renderer::reflectiveMaterials(const Scene& scene) {
     struct Stat { glm::vec3 mean{0.0f}; float sat = 0.0f, contrast = 0.0f; bool ok = false; };
     std::vector<Stat> tex(scene.textures.size());
     auto stat = [&](int32_t t) -> const Stat& {
@@ -1403,9 +1404,11 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
     std::vector<glm::vec3> seaTris;                          // opaque water planes (Enhanced water)
     std::vector<GpuMesh*> planes;
     std::vector<std::pair<GpuMesh*, const Mesh*>> layers;    // translucent / animated water layers
+    std::vector<glm::vec3> tint;                             // per scene mesh: its texture's mean colour (opaque texels)
     for (const Mesh& m : scene.meshes) {
         if (m.vertices.empty() || m.indices.empty()) continue;
         GpuMesh& g = meshes_[k++];
+        tint.push_back(m.texture >= 0 && stat(m.texture).ok ? stat(m.texture).mean : glm::vec3(1.0f));
         glm::vec3 nsum(0.0f);
         float area = 0.0f;
         for (size_t i = 0; i + 2 < m.indices.size(); i += 3) {
@@ -1415,7 +1418,8 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
             area += glm::length(c) * 0.5f;
         }
         const float up = area > 0.0f ? (m.twoSided ? std::abs(nsum.y) : nsum.y) / area : 0.0f; // two-sided: either side up
-        if (up < 0.9f || area < 4.0f * kCharUnit * kCharUnit || m.name.starts_with("sky")) continue;
+        if (up < 0.9f || m.name.starts_with("sky")) continue;
+        const bool big = area >= 4.0f * kCharUnit * kCharUnit;  // small navy pieces still join the water planes (L03A strips)
         // Animated surfaces: the mean over their frames (some start on an empty frame).
         Stat st;
         int32_t t = m.texture;
@@ -1437,14 +1441,15 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
         const float luma = 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
         const float sat = std::max({c.r, c.g, c.b}) - std::min({c.r, c.g, c.b});
         float strength = 0.0f, rough = 0.0f;
-        if ((m.blend == Blend::Alpha || m.blend == Blend::Additive || (m.textureAnim >= 0 && m.blend != Blend::Subtract)) && c.b > c.r * 1.15f &&
+        if (big && (m.blend == Blend::Alpha || m.blend == Blend::Additive || (m.textureAnim >= 0 && m.blend != Blend::Subtract)) && c.b > c.r * 1.15f &&
             c.b > c.g * 0.95f)
-            strength = 0.6f, rough = 0.03f, g.water = true;
-        else if (m.blend == Blend::Opaque && st.contrast < 0.1f && luma > 0.55f && c.b > c.r * 1.5f && c.b > c.g * 1.25f) strength = 0.35f, rough = 0.05f;
-        else if (m.blend == Blend::Opaque && luma > 0.6f && sat < 0.25f && st.contrast < 0.1f) strength = 0.25f, rough = 0.08f;
+            strength = 0.6f, rough = 0.03f, g.water = luma < 0.55f; // brighter: ice (renderer.cpp uploadScene)
+        else if (big && m.blend == Blend::Opaque && st.contrast < 0.1f && luma > 0.55f && c.b > c.r * 1.5f && c.b > c.g * 1.25f) strength = 0.35f, rough = 0.05f;
+        else if (big && m.blend == Blend::Opaque && luma > 0.6f && sat < 0.25f && st.contrast < 0.1f) strength = 0.25f, rough = 0.08f;
         // Enhanced water only (no reflection material): the flat dark-blue planes the games draw as open water / river
         // beds under their translucent sheen (LiT L03A sea, L02A1 river).
-        else if (m.blend == Blend::Opaque && m.textureAnim < 0 && st.contrast < 0.02f && luma < 0.25f && c.b > 0.1f && c.b > c.r * 1.8f &&
+        // c.b < 0.75: not saturated blue glass (L02A1 / CC2A castle window tex157, 0.05 0.05 1.0).
+        else if (m.blend == Blend::Opaque && m.textureAnim < 0 && st.contrast < 0.02f && luma < 0.25f && c.b > 0.1f && c.b < 0.75f && c.b > c.r * 1.8f &&
                  c.b > c.g * 1.6f)
             g.water = true;
         if (g.water && m.blend == Blend::Opaque) {
@@ -1453,7 +1458,7 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
         } else if (g.water) {
             layers.emplace_back(&g, &m);
         }
-        if (dump)
+        if (dump && (big || g.water))
             std::println(stderr, "material {} blend {} anim {} area {:.0f} up {:.2f} centre {:.0f} {:.0f} {:.0f} tex {} rgb {:.2f} {:.2f} {:.2f} "
                          "vertex {:.2f} {:.2f} {:.2f} sat {:.2f} contrast {:.3f} -> {}", m.name, int(m.blend), m.textureAnim, area, up,
                          g.center.x, g.center.y, g.center.z, t, c.r, c.g, c.b, vc.r, vc.g, vc.b, sat, st.contrast, strength);
@@ -1472,13 +1477,9 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
         if (above > 200.0f) beds.push_back(bed);
         else if (above > 20.0f) g->sheen = true, g->water = false;
     }
-    waterFill_ = planes.empty() ? 0 : beds.empty() ? 2 : 1;
     for (GpuMesh* g : planes)
-        if (std::ranges::any_of(beds, [&](float b) { return std::abs(g->center.y - b) < 10.0f; })) g->water = false;
-    if (dump)
-        for (const GpuMesh& g : meshes_)
-            if (g.water || g.sheen)
-                std::println(stderr, "{} centre {:.0f} {:.0f} {:.0f} blend {}", g.water ? "water" : "sheen", g.center.x, g.center.y, g.center.z, int(g.blend));
+        if (std::ranges::any_of(beds, [&](float b) { return std::abs(g->center.y - b) < 10.0f; })) g->water = false, g->bed = true;
+    return tint;
 }
 
 void Renderer::uploadScene(const Scene& scene) {
@@ -1502,11 +1503,8 @@ void Renderer::uploadScene(const Scene& scene) {
         srcs.push_back({t.width, t.height, px});
         bytes += t.rgba.size();
     }
-    for (const Mesh& m : scene.meshes)
-        if (!m.vertices.empty() && !m.indices.empty())
-            bytes += m.vertices.size() * (sizeof(Vertex) + sizeof(uint32_t)) + m.indices.size() * sizeof(uint32_t);
+    for (const Mesh& m : scene.meshes) bytes += !m.vertices.empty() && !m.indices.empty();
     if (!bytes) return;
-    bytes += 4 * (sizeof(Vertex) + sizeof(uint32_t)) + 6 * sizeof(uint32_t); // the Enhanced water's fill plane (uploadScene)
 
     Buffer staging = makeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
     VkCommandBuffer cb = beginOneShot();
@@ -1531,9 +1529,127 @@ void Renderer::uploadScene(const Scene& scene) {
     addMeshes(scene.meshes, false, SIZE_MAX, verts, idx);
     sceneMeshCount_ = meshes_.size();
     zones_ = scene.zones;
-    reflectiveMaterials(scene);
+    const std::vector<glm::vec3> tint = reflectiveMaterials(scene);
     {   // Enhanced water: surface heights + shore walls (ground = the opaque / alpha-tested world) and a fresh wave field
         std::vector<glm::vec3> water, ground;
+        // Share of the rim of the level's ground (sampled every fill cell, half a cell inside its bounding box) that is
+        // water in w: a sea around the level (L03A, CC3A) lines a good share of it, a pond / floor tile hardly any.
+        constexpr float kFillCell = 150.0f;
+        const glm::vec2 cLo(casterLo_.x, casterLo_.z), cHi(casterHi_.x, casterHi_.z);
+        auto rimShare = [&](const render::WaterSurfaces& w) {
+            int rim = 0, wet = 0;
+            const float dt = kFillCell / std::max({cHi.x - cLo.x, cHi.y - cLo.y, kFillCell});
+            for (float t = 0.5f * dt; t < 1.0f; t += dt)
+                for (const glm::vec2 p : {glm::mix(cLo, glm::vec2(cHi.x, cLo.y), t), glm::mix(glm::vec2(cHi.x, cLo.y), cHi, t),
+                                          glm::mix(cHi, glm::vec2(cLo.x, cHi.y), t), glm::mix(glm::vec2(cLo.x, cHi.y), cLo, t)})
+                    ++rim, wet += w.height(glm::clamp(p, cLo + 0.5f * kFillCell, cHi - 0.5f * kFillCell)).has_value();
+            return rim ? float(wet) / float(rim) : 0.0f;
+        };
+        for (const GpuMesh& m : meshes_)
+            if (m.caster)
+                for (uint32_t i = 0; i < m.indexCount; ++i) {
+                    const Vertex& v = verts[size_t(int64_t(idx[m.firstIndex + i]) + m.baseVertex)];
+                    ground.push_back({v.pos[0], v.pos[1], v.pos[2]});
+                }
+        {   // Static (non-animated) translucent "water" with no ground under most of it is a glass / energy floor over a
+            // void or over its own coplanar navy backing (LiT space era CC5A / L05A2 grid floors), not water: real
+            // translucent water lies over a bed or is animated (L03A, L02A1, TB VIQ01). Each layer needs a bed under most
+            // of it and so do all static layers of its texture together: a few layers of a night mist bank reaching over
+            // the mountain's foot are not water either (LiT L01D1: 2 of its 40 additive mist layers have ground under them).
+            // Bright translucent cyan (luma > 0.55) is ice (L02C1 / L02C3 frozen valley), not water.
+            std::map<int, render::WaterSurfaces> below;  // ground reaching under a height (beds up their banks; no ceilings)
+            std::map<uint32_t, glm::ivec2> byTex;        // per texture: samples with a bed under them, all samples
+            std::vector<std::pair<GpuMesh*, glm::ivec2>> statics;  // the same per layer
+            for (size_t k = 0; k < sceneMeshCount_; ++k) {
+                GpuMesh& m = meshes_[k];
+                if (!m.water || (m.blend != Blend::Alpha && m.blend != Blend::Additive) || m.textureAnim >= 0) continue;
+                statics.emplace_back(&m, glm::ivec2(0));
+                const int h = int(std::lround(m.center.y));
+                auto [it, fresh] = below.try_emplace(h);
+                if (fresh) {
+                    std::vector<glm::vec3> tris;
+                    for (size_t i = 0; i + 2 < ground.size(); i += 3)
+                        if (std::min({ground[i].y, ground[i + 1].y, ground[i + 2].y}) < float(h) - 5.0f) tris.insert(tris.end(), &ground[i], &ground[i + 3]);
+                    it->second.build(tris, {});
+                }
+                glm::ivec2& s = statics.back().second;  // samples with ground 5..1000 units below (not its coplanar backing, not a far floor)
+                for (uint32_t i = 0; i + 2 < m.indexCount; i += 3) {
+                    glm::vec3 c(0.0f);
+                    for (uint32_t j = 0; j < 3; ++j) {
+                        const Vertex& v = verts[size_t(int64_t(idx[m.firstIndex + i + j]) + m.baseVertex)];
+                        c += glm::vec3(v.pos[0], v.pos[1], v.pos[2]) / 3.0f;
+                    }
+                    const auto g = it->second.height({c.x, c.z});
+                    s += glm::ivec2(g && c.y - *g > 5.0f && c.y - *g < 1000.0f, 1);
+                }
+                byTex[m.texture] += s;
+            }
+            for (auto [m, s] : statics) {
+                // Level with animated water it is that water's surface (CCMERLIN moat: static teal over a void, ringed
+                // by animated shore strips); glass floors have no animated water anywhere near their height.
+                const bool withAnimated = std::ranges::any_of(std::span(meshes_).first(sceneMeshCount_), [&](const GpuMesh& w) {
+                    return w.water && w.textureAnim >= 0 && std::abs(w.center.y - m->center.y) < 20.0f;
+                });
+                const glm::ivec2 t = byTex[m->texture];
+                if ((2 * s.x < s.y || 2 * t.x < t.y) && !withAnimated) m->water = false;
+            }
+            // A static opaque navy plane is water only under a remaining translucent / animated water layer (coplanar or
+            // up to 200 units over it, L03A sea) or when the lone planes form an open sea: one height, the level's lowest
+            // ground (nothing below them) and >= 10% of its ground's bounding area (CC3A). Else it is a floor tile (space
+            // era L05A5 / L05A2 platforms, L01D2_8 moonlit rock, L04C1 factory floor) and stays as drawn. Animated opaque
+            // blue is a water surface itself (L04E2 park pond, l04e, TB AZCASG05).
+            std::vector<GpuMesh*> lone;
+            float loneArea = 0.0f, ylo = std::numeric_limits<float>::max(), yhi = -ylo;
+            for (size_t k = 0; k < sceneMeshCount_; ++k) {
+                GpuMesh& p = meshes_[k];
+                if (!p.water || p.blend != Blend::Opaque || p.textureAnim >= 0) continue;
+                glm::vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+                for (uint32_t i = 0; i < p.indexCount; ++i) {
+                    const Vertex& v = verts[size_t(int64_t(idx[p.firstIndex + i]) + p.baseVertex)];
+                    lo = glm::min(lo, glm::vec3(v.pos[0], v.pos[1], v.pos[2])), hi = glm::max(hi, glm::vec3(v.pos[0], v.pos[1], v.pos[2]));
+                }
+                bool covered = false;
+                for (size_t j = 0; j < sceneMeshCount_ && !covered; ++j) {
+                    const GpuMesh& l = meshes_[j];
+                    if (!l.water || l.blend == Blend::Opaque) continue;
+                    for (uint32_t i = 0; i < l.indexCount && !covered; ++i) {
+                        const Vertex& v = verts[size_t(int64_t(idx[l.firstIndex + i]) + l.baseVertex)];
+                        covered = v.pos[0] >= lo.x - kCharUnit && v.pos[0] <= hi.x + kCharUnit && v.pos[2] >= lo.z - kCharUnit &&
+                                  v.pos[2] <= hi.z + kCharUnit && v.pos[1] >= hi.y - 20.0f && v.pos[1] <= hi.y + 200.0f;
+                    }
+                }
+                if (covered) continue;
+                lone.push_back(&p);
+                ylo = std::min(ylo, p.center.y), yhi = std::max(yhi, p.center.y);
+                for (uint32_t i = 0; i + 2 < p.indexCount; i += 3) {
+                    auto q = [&](uint32_t j) { const Vertex& v = verts[size_t(int64_t(idx[p.firstIndex + i + j]) + p.baseVertex)]; return glm::vec3(v.pos[0], v.pos[1], v.pos[2]); };
+                    loneArea += 0.5f * glm::length(glm::cross(q(1) - q(0), q(2) - q(0)));
+                }
+            }
+            bool sea = !lone.empty() && yhi - ylo < 20.0f && loneArea >= 0.1f * (cHi.x - cLo.x) * (cHi.y - cLo.y);
+            if (sea) {
+                render::WaterSurfaces top;
+                top.build(ground, {});
+                int n = 0, lower = 0;
+                for (float z = cLo.y + 0.5f * kFillCell; z < cHi.y; z += kFillCell)
+                    for (float x = cLo.x + 0.5f * kFillCell; x < cHi.x; x += kFillCell)
+                        if (const auto g = top.height({x, z})) ++n, lower += *g < ylo - 20.0f;
+                sea = lower * 50 < n;  // < 2%: stray low props
+            }
+            if (std::getenv("BBTIME_VK_MATERIALS") && !lone.empty())
+                std::println(stderr, "lone navy planes {} y {:.0f}..{:.0f} area share {:.3f} -> {}", lone.size(), ylo, yhi,
+                             loneArea / std::max((cHi.x - cLo.x) * (cHi.y - cLo.y), 1.0f), sea ? "open sea" : "floor");
+            for (GpuMesh* p : lone)  // at the height of real water or up to 200 under it: its sea / bed (L03A 800, L03ACOM 928)
+                p->water = sea || std::ranges::any_of(std::span(meshes_).first(sceneMeshCount_), [&](const GpuMesh& w) {
+                    return w.water && !std::ranges::contains(lone, &w) && w.center.y - p->center.y > -20.0f && w.center.y - p->center.y < 200.0f;
+                });
+            if (std::getenv("BBTIME_VK_MATERIALS"))  // final classification, after the rules above
+                for (size_t k = 0; k < sceneMeshCount_; ++k)
+                    if (const GpuMesh& g = meshes_[k]; g.water || g.sheen || g.bed)
+                        std::println(stderr, "{} centre {:.0f} {:.0f} {:.0f} blend {}", g.water ? "water" : g.sheen ? "sheen" : "bed", g.center.x,
+                                     g.center.y, g.center.z, int(g.blend));
+        }
+        ground.clear();
         glm::vec2 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
         std::map<int, float> seaArea;  // opaque water planes: area by height (10-unit steps)
         glm::vec3 seaColor(0.0f);
@@ -1558,24 +1674,154 @@ void Renderer::uploadScene(const Scene& scene) {
             }
         }
         // Open water where the level has no surface mesh (LiT L03A: the sea is the sky dome's lower half; L02A1: the
-        // river's middle shows its navy floor, and a hole in it): a plane at the main water height, drawn first so the
-        // level's own water overwrites it, over the water's bounds (a river over a bed) or to the horizon (a sea).
+        // river's middle shows its navy bed, and a hole in it): a plane at the main water height, drawn first so the
+        // level's own water overwrites it. Only over the opaque water planes / beds (+2 character units), and there only
+        // in 150-unit cells that are open or already water (see wetAt), so it never floods dry ground below it; a sea
+        // (water lining the level's rim) fills the whole level area and runs to the horizon.
         seaFill_ = SIZE_MAX;
-        if (waterFill_ && seaTotal > 0.0f) {
+        std::vector<glm::vec3> planeTris, bedTris;
+        glm::vec2 pLo(std::numeric_limits<float>::max()), pHi(-std::numeric_limits<float>::max());
+        for (const GpuMesh& m : meshes_)
+            if ((m.water && m.blend == Blend::Opaque) || m.bed)
+                for (uint32_t i = 0; i < m.indexCount; ++i) {
+                    const Vertex& v = verts[size_t(int64_t(idx[m.firstIndex + i]) + m.baseVertex)];
+                    (m.bed ? bedTris : planeTris).push_back({v.pos[0], v.pos[1], v.pos[2]});
+                    pLo = glm::min(pLo, glm::vec2(v.pos[0], v.pos[2])), pHi = glm::max(pHi, glm::vec2(v.pos[0], v.pos[2]));
+                }
+        bool holeFill = false;  // the fill closes holes around plane-less water layers (below)
+        if (pLo.x > pHi.x && seaTotal > 0.0f) {
+            // No planes / beds: TB draws its water as additive surf / ripple layers around holes the backdrop shows
+            // through (TRCA01 moat, VIQ02 / VICA01 sea; LiT L03A2's sea), so the layers alone would be bands around a
+            // void. Where a quarter of the layers at the main water height has no ground at all under it, the fill
+            // closes the holes (not over a mist / road strip with ground under it: LiT L02B1 / L02B2, nor a lagoon over
+            // its bed: L03C), from those layers' area (CC2A: not its pond 3600 units lower) and in the level's open cells.
+            // Not when a static (non-animated) layer lies at that height: that is the game's own surface and its gaps
+            // are deliberate (LiT CCMERLIN / Merlin moat: the drawbridge actor lies in one); surf lines are animated.
+            const float y = 10.0f * float(std::ranges::max_element(seaArea, {}, &std::pair<const int, float>::second)->first);
+            std::vector<glm::vec3> under;  // ground reaching below the water (not bridges / canopies over it)
+            for (size_t i = 0; i + 2 < ground.size(); i += 3)
+                if (std::min({ground[i].y, ground[i + 1].y, ground[i + 2].y}) < y + 5.0f) under.insert(under.end(), &ground[i], &ground[i + 3]);
+            render::WaterSurfaces dry;
+            dry.build(under, {});
+            int n = 0, holes = 0;
+            glm::vec2 wLo = pLo, wHi = pHi;
+            for (size_t i = 0; i + 2 < water.size(); i += 3) {
+                const glm::vec3 c = (water[i] + water[i + 1] + water[i + 2]) / 3.0f;
+                if (std::abs(c.y - y) > 20.0f) continue;
+                ++n, holes += !dry.height({c.x, c.z});
+                for (size_t j = i; j < i + 3; ++j) wLo = glm::min(wLo, glm::vec2(water[j].x, water[j].z)), wHi = glm::max(wHi, glm::vec2(water[j].x, water[j].z));
+            }
+            const bool surface = std::ranges::any_of(meshes_, [&](const GpuMesh& m) {
+                return m.water && m.blend != Blend::Opaque && m.textureAnim < 0 && std::abs(m.center.y - y) < 20.0f;
+            });
+            if (4 * holes >= n && !surface) pLo = wLo, pHi = wHi, holeFill = true;
+            if (std::getenv("BBTIME_VK_MATERIALS"))
+                std::println(stderr, "plane-less water at y {:.0f}: hole share {:.2f}{}", y, float(holes) / float(std::max(n, 1)),
+                             surface ? ", static surface layer (no hole fill)" : "");
+        }
+        if (seaTotal > 0.0f && pLo.x <= pHi.x) {
             const float y = 10.0f * float(std::ranges::max_element(seaArea, {}, &std::pair<const int, float>::second)->first);
             const glm::u8vec3 c(glm::round(seaColor / seaTotal));
+            render::WaterSurfaces top, own, beds, sheens;
+            top.build(ground, {});
+            own.build(water, {});
+            std::vector<glm::vec3> sheenTris;
+            for (const GpuMesh& m : meshes_)
+                if (m.sheen)
+                    for (uint32_t i = 0; i < m.indexCount; ++i) {
+                        const Vertex& v = verts[size_t(int64_t(idx[m.firstIndex + i]) + m.baseVertex)];
+                        sheenTris.push_back({v.pos[0], v.pos[1], v.pos[2]});
+                    }
+            sheens.build(sheenTris, {});
+            // Seabed: ground under the fill height that the game tints blue / teal (vertex light x texture: L03A rocks
+            // under the docks, L03a_8's blue texture) is a bed too, not dry ground below the water.
+            for (size_t k = 0; k < tint.size(); ++k)
+                if (const GpuMesh& m = meshes_[k]; m.caster && !m.water)
+                    for (uint32_t i = 0; i + 2 < m.indexCount; i += 3) {
+                        const Vertex* t[3];
+                        glm::vec3 col(0.0f);
+                        float low = std::numeric_limits<float>::max();
+                        for (uint32_t j = 0; j < 3; ++j) {
+                            t[j] = &verts[size_t(int64_t(idx[m.firstIndex + i + j]) + m.baseVertex)];
+                            col += glm::vec3(t[j]->rgba[0], t[j]->rgba[1], t[j]->rgba[2]) * tint[k];
+                            low = std::min(low, t[j]->pos[1]);
+                        }
+                        if (low < y - 20.0f && col.b > 1.3f * col.r && std::max(col.g, col.b) > 1.3f * col.r)
+                            for (const Vertex* v : t) bedTris.push_back({v->pos[0], v->pos[1], v->pos[2]});
+                    }
+            beds.build(bedTris, {});
+            // Water already: the level's own water at the fill height (the fill closes the cell-edge gaps along its
+            // edges), the game's sheen layer (L03A shallows), a bed. Never ground below the fill elsewhere.
+            auto wetAt = [&](glm::vec2 p, std::optional<float> g) {
+                const auto o = own.height(p), b = beds.height(p);
+                return (o && std::abs(*o - y) < 20.0f) || sheens.height(p) || (g && b && std::abs(*g - *b) < 10.0f);
+            };
             Mesh fill;
             fill.name = "water fill";
             fill.blend = Blend::Alpha;  // neither a caster nor in the opaque pass
-            const float e = waterFill_ == 2 ? 200000.0f : 2.0f * kCharUnit;
-            for (const glm::vec2& q : {lo - e, glm::vec2(hi.x + e, lo.y - e), hi + e, glm::vec2(lo.x - e, hi.y + e)})
-                fill.vertices.push_back({.pos = {q.x, y, q.y}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
-            fill.indices = {0, 2, 1, 0, 3, 2};  // facing up
-            addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
-            meshes_.back().water = true;
-            seaFill_ = meshes_.size() - 1;
-            sceneMeshCount_ = meshes_.size();
-            for (const glm::vec2& q : {lo, glm::vec2(hi.x, lo.y), hi, lo, hi, glm::vec2(lo.x, hi.y)}) water.push_back({q.x, y, q.y});
+            auto quad = [&](glm::vec2 a, glm::vec2 b) {
+                const uint32_t n = uint32_t(fill.vertices.size());
+                for (const glm::vec2& q : {a, glm::vec2(b.x, a.y), b, glm::vec2(a.x, b.y)})
+                    fill.vertices.push_back({.pos = {q.x, y, q.y}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
+                for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) fill.indices.push_back(n + k);  // facing up
+                for (const glm::vec2& q : {a, glm::vec2(b.x, a.y), b, a, b, glm::vec2(a.x, b.y)}) water.push_back({q.x, y, q.y});
+            };
+            // Row runs of open cells in [r0, r1) -> one quad each; cells inside [s0, s1) are skipped (already done).
+            auto fillCells = [&](glm::vec2 r0, glm::vec2 r1, glm::vec2 s0, glm::vec2 s1) {
+                for (float z = r0.y; z < r1.y; z += kFillCell) {
+                    float run = std::numeric_limits<float>::quiet_NaN();
+                    for (float x = r0.x;; x += kFillCell) {
+                        const glm::vec2 p(x + 0.5f * kFillCell, z + 0.5f * kFillCell);
+                        const auto g = top.height(p), o = own.height(p);
+                        const bool done = p.x >= s0.x && p.x < s1.x && p.y >= s0.y && p.y < s1.y;
+                        const bool open = x < r1.x && !done && (wetAt(p, g) || (!o && (!g || *g > y)));
+                        if (open && std::isnan(run)) run = x;
+                        if (!open && !std::isnan(run)) quad({run, z}, {x, z + kFillCell}), run = std::numeric_limits<float>::quiet_NaN();
+                        if (x >= r1.x) break;
+                    }
+                }
+            };
+            const glm::vec2 r0 = glm::floor((pLo - 2.0f * kCharUnit) / kFillCell) * kFillCell, r1 = pHi + 2.0f * kCharUnit;
+            fillCells(r0, r1, {}, {});
+            // Out to the horizon only when water (the level's own or the fill) lines a good share of the edge of the
+            // level's ground (a sea around the level, L03A, CC3A); a sea also fills the open cells of the whole level
+            // area (CC3A: past its planes the sky dome's lower half showed). So do holes around plane-less layers (TB
+            // TRCA01 moat, VIQ02 / VICA01 sea: the hole runs on past the layers' surf lines), without the horizon:
+            // after that fill the rim is open void in every level (CC2A's forest river, CCMERLIN's moat too).
+            const float far = 200000.0f;
+            render::WaterSurfaces wet;
+            wet.build(water, {});
+            const float rim = rimShare(wet);
+            const bool sea = rim > 0.25f;
+            if (sea || holeFill) {
+                const glm::vec2 c0 = r0 + glm::floor((cLo - r0) / kFillCell) * kFillCell;  // on the same cell lattice
+                fillCells(c0, cHi, r0, glm::max(r1, r0 + glm::ceil((r1 - r0) / kFillCell) * kFillCell));
+            }
+            if (sea) {  // ring around the level's ground out to the horizon
+                quad({cLo.x - far, cLo.y - far}, {cHi.x + far, cLo.y});
+                quad({cLo.x - far, cHi.y}, {cHi.x + far, cHi.y + far});
+                quad({cLo.x - far, cLo.y}, {cLo.x, cHi.y});
+                quad({cHi.x, cLo.y}, {cHi.x + far, cHi.y});
+            }
+            if (!fill.indices.empty()) {
+                addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
+                meshes_.back().water = true;
+                seaFill_ = meshes_.size() - 1;
+                sceneMeshCount_ = meshes_.size();
+            }
+            if (std::getenv("BBTIME_VK_MATERIALS")) {
+                // Flood check: ground below the fill under it where it is not water already, on a 37.5-unit grid.
+                render::WaterSurfaces filled;
+                filled.build(std::span(water).last(fill.indices.size()), {});
+                constexpr float s = kFillCell / 4.0f;
+                float flooded = 0.0f;
+                for (float z = cLo.y + 0.5f * s; z < cHi.y; z += s)
+                    for (float x = cLo.x + 0.5f * s; x < cHi.x; x += s)
+                        if (const auto g = top.height({x, z}); g && *g < y - 20.0f && filled.height({x, z}) && !wetAt({x, z}, g))
+                            flooded += s * s;
+                std::println(stderr, "sea plane y {:.0f} {} rim {:.2f} quads {} | flooded ground {:.1f} char^2", y, sea ? "sea (horizon)" : "local",
+                             rim, fill.indices.size() / 6, flooded / (kCharUnit * kCharUnit));
+            }
         }
         waterSurf_.build(water, ground);
         waves_.reset();
@@ -1587,19 +1833,20 @@ void Renderer::uploadScene(const Scene& scene) {
         if (m.blend != Blend::Additive && m.blend != Blend::Subtract) ranges.push_back({m.firstIndex, m.indexCount, m.baseVertex});
     const std::vector<uint32_t> normals = smoothNormals(verts, idx, ranges);
     const VkDeviceSize vBytes = verts.size() * sizeof(Vertex), iBytes = idx.size() * sizeof(uint32_t), nBytes = normals.size() * sizeof(uint32_t);
-    Buffer scratch;
+    Buffer scratch, geo; // geo: geometry staging (sized after the Enhanced water's fill mesh was generated)
     if (vBytes) {
         const VkBufferUsageFlags rtUse = rt_ ? kRtInput : 0;
+        geo = makeBuffer(vBytes + iBytes + nBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
         sceneVbo_ = makeBuffer(vBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | rtUse, false);
         sceneIbo_ = makeBuffer(iBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | rtUse, false);
-        std::memcpy(static_cast<uint8_t*>(staging.map) + off, verts.data(), vBytes);
-        std::memcpy(static_cast<uint8_t*>(staging.map) + off + vBytes, idx.data(), iBytes);
         sceneNrm_ = makeBuffer(nBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
-        std::memcpy(static_cast<uint8_t*>(staging.map) + off + vBytes + iBytes, normals.data(), nBytes);
-        const VkBufferCopy cv{off, 0, vBytes}, ci{off + vBytes, 0, iBytes}, cn{off + vBytes + iBytes, 0, nBytes};
-        vkCmdCopyBuffer(cb, staging.buf, sceneVbo_.buf, 1, &cv);
-        vkCmdCopyBuffer(cb, staging.buf, sceneIbo_.buf, 1, &ci);
-        vkCmdCopyBuffer(cb, staging.buf, sceneNrm_.buf, 1, &cn);
+        std::memcpy(geo.map, verts.data(), vBytes);
+        std::memcpy(static_cast<uint8_t*>(geo.map) + vBytes, idx.data(), iBytes);
+        std::memcpy(static_cast<uint8_t*>(geo.map) + vBytes + iBytes, normals.data(), nBytes);
+        const VkBufferCopy cv{0, 0, vBytes}, ci{vBytes, 0, iBytes}, cn{vBytes + iBytes, 0, nBytes};
+        vkCmdCopyBuffer(cb, geo.buf, sceneVbo_.buf, 1, &cv);
+        vkCmdCopyBuffer(cb, geo.buf, sceneIbo_.buf, 1, &ci);
+        vkCmdCopyBuffer(cb, geo.buf, sceneNrm_.buf, 1, &cn);
         memoryBarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | (rt_ ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : 0),
                       VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | (rt_ ? VK_ACCESS_2_SHADER_READ_BIT : 0));
@@ -1618,6 +1865,7 @@ void Renderer::uploadScene(const Scene& scene) {
     }
     endOneShot(cb);
     destroy(staging);
+    destroy(geo);
     destroy(scratch);
 }
 

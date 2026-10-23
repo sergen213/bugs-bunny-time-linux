@@ -470,9 +470,13 @@ struct App {
                 }
                 if (globals) w.G = *globals;
                 else if (litSave) std::ranges::copy(litSave->G(), w.G.begin());
+                // Files missing from the exe table are variants of a listed level (L03a_8, L_30Bank_0): its id, not
+                // 0 (TITLE: 4:3 framing, no Enhanced water / FSR, Esc rules).
                 litLevel = 0;
-                for (int id = 0; !bb::game::LitWorld::levelName(id).empty(); ++id)
-                    if (iequals(bb::game::LitWorld::levelName(id), level)) { litLevel = id; break; }
+                for (std::string_view name : {std::string_view(level), std::string_view(level).substr(0, level.rfind('_'))})
+                    if (litLevel == 0)
+                        for (int id = 0; !bb::game::LitWorld::levelName(id).empty(); ++id)
+                            if (iequals(bb::game::LitWorld::levelName(id), name)) { litLevel = id; break; }
                 w.level = litLevel;
                 // >D overlay key names: the first key bound to each config kbdMap action, in the exe's DIK spelling
                 // for the default keys (letters as is, arrows / Tab / Return as KEY_*).

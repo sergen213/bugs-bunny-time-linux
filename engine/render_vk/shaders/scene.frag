@@ -229,7 +229,12 @@ vec3 toSrgb(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
 vec3 copyColor(vec2 uv) { return toLinear(textureLod(sampler2D(uTex[L.waterSlots.x], uSamp[3]), uv, 0.0).rgb); }
 float copyDepth(vec2 uv) { return textureLod(sampler2D(uTex[L.waterSlots.y], uSamp[2]), uv, 0.0).r; }
 vec3 worldAt(vec2 uv, float depth) { // uv: render-target (top-left origin); the viewport's negative height flips y
-    vec4 p = L.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    if (depth >= 1.0) { // nothing drawn (a void under the water, CC2A river): far along the view ray, not 1/0 at far
+        vec4 a = L.invViewProj * vec4(ndc, 0.0, 1.0), b = L.invViewProj * vec4(ndc, 0.5, 1.0);
+        return a.xyz / a.w + normalize(b.xyz / b.w - a.xyz / a.w) * 1.0e5;
+    }
+    vec4 p = L.invViewProj * vec4(ndc, depth, 1.0);
     return p.xyz / p.w;
 }
 

@@ -116,8 +116,9 @@ private:
     // caster: drawn into the shadow map / BLAS; receiver: shadowed (and AO for opaque + alpha-tested)
     // material: packHalf2x16(reflection strength, roughness) for ray-traced reflections, 0 = none
     // water: Enhanced stylised water surface (reflectiveMaterials: translucent / animated blue up-facing, flat navy planes);
-    // sheen: a translucent layer just over such a plane that the stylised water replaces (not drawn with it)
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen; };
+    // sheen: a translucent layer just over such a plane that the stylised water replaces (not drawn with it); bed: such a
+    // plane under a higher water surface (drawn as is, the Enhanced water's fill covers it)
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen, bed; };
     struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; };
     struct RtGeo { uint64_t vtx, idx; uint32_t first; int32_t base; uint32_t tex, pad; }; // scene.frag Geo
     struct TexAnim { std::vector<uint32_t> frames; uint32_t start, hold; }; // frames as bindless slots
@@ -138,7 +139,7 @@ private:
     VkDeviceMemory createTextures(VkCommandBuffer cb, const Buffer& staging, VkDeviceSize& off, std::span<const TexSrc> texs,
                                   bool mips, std::vector<uint32_t>& slots);
     void addMeshes(std::span<const Mesh> meshes, bool actor, size_t casters, std::vector<Vertex>& verts, std::vector<uint32_t>& idx);
-    void reflectiveMaterials(const Scene& scene);
+    std::vector<glm::vec3> reflectiveMaterials(const Scene& scene);  // returns each scene mesh's texture mean colour
     void waterTargets(VkExtent2D ext);
     bool waterWaves(const Camera& cam, glm::vec4& field);
     void waterCopy(VkImage color, VkImage depth, bool depthResolved);
@@ -324,7 +325,6 @@ private:
     VkExtent2D waterExtent_{};
     static constexpr uint32_t kNoWater = UINT32_MAX;
     size_t seaFill_ = SIZE_MAX;  // meshes_ index of the open-water fill plane (uploadScene), SIZE_MAX = none
-    int waterFill_ = 0;          // reflectiveMaterials: 0 no fill, 1 over the water's bounds (a navy bed), 2 to the horizon (a sea)
 
     std::vector<V2> batch_;
 };
