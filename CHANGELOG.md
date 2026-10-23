@@ -3,6 +3,14 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.10.2 — 2026-10-22 (fix: launcher crashed on Wayland)
+
+- The 0.10.x AppImage launcher crashed at start on Wayland ("QOpenGLWidget is not supported on this platform",
+  SIGSEGV): the AppImage lacked Qt's `wayland-egl` client buffer integration, so Qt had no OpenGL there, and the
+  model viewer's GL widget made the whole window require it. The plugin is now bundled, and the viewer's GL widget is
+  created only when a model is first previewed, after a GL context probe; without OpenGL the viewer says so and the
+  rest of the launcher works.
+
 ## 0.10.1 — 2026-10-22 (fix: app menu entry kept starting the old AppImage)
 
 - An AppImage installed through an AppImage manager (Gear Lever `~/AppImages`, Shelly `~/.local/bin`,

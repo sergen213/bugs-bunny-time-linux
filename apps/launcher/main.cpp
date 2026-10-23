@@ -1108,7 +1108,8 @@ private:
     }
 
     // ------------------------------------------------------------ model viewer (Mods page)
-    ModelView* view_{};
+    ModelView* view_{};       // created on first preview (see viewerPage)
+    QVBoxLayout* viewHost_{};
     QListWidget* models_{};
     QLabel* viewNote_{};
     QComboBox *viewGame_{}, *viewLevel_{};
@@ -1350,13 +1351,14 @@ private:
         side->addLayout(edit);
         side->addWidget(viewGame_);
         side->addLayout(pick);
-        view_ = new ModelView;
-        view_->setMinimumSize(320, 240);
+        // The GL view is created on first use: a QOpenGLWidget switches the whole window to GL rendering, and where
+        // the platform has no GL (e.g. Wayland without a wayland-egl client integration) Qt then crashes at startup.
+        viewHost_ = new QVBoxLayout;
         viewNote_ = new QLabel("Static rest / bind pose (animations are not played). Drag = orbit, wheel = zoom, "
                                "double-click = reset.");
         viewNote_->setWordWrap(true);
         auto* right = new QVBoxLayout;
-        right->addWidget(view_, 1);
+        right->addLayout(viewHost_, 1);
         right->addWidget(viewNote_);
         l->addLayout(side, 2);
         l->addLayout(right, 3);
@@ -1365,6 +1367,17 @@ private:
         connect(models_, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* it) {
             if (!it || it->data(Qt::UserRole).isNull()) return;
             const QString file = it->data(Qt::UserRole).toString();
+            if (!view_) {
+                QOpenGLContext probe;
+                if (!probe.create()) {
+                    viewNote_->setText("3-D preview unavailable: no OpenGL on this display platform. Start the launcher "
+                                       "with QT_QPA_PLATFORM=xcb, or report it with the Logs page contents.");
+                    return;
+                }
+                view_ = new ModelView;
+                view_->setMinimumSize(320, 240);
+                viewHost_->addWidget(view_);
+            }
             const QString err = view_->load(path(file));
             viewNote_->setText(err.isEmpty() ? QString("%1 triangles · %2").arg(view_->triangles()).arg(file) : "Cannot read " + file + ": " + err);
         });

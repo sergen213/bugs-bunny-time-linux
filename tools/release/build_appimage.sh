@@ -22,8 +22,14 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -w /src $IMG 
     mkdir -p AppDir/usr/share/licenses/fidelityfx AppDir/usr/share/licenses/stb
     cp /src/third_party/fidelityfx-sdk/LICENSE.txt AppDir/usr/share/licenses/fidelityfx/LICENSE.txt
     cp /src/third_party/stb/LICENSE AppDir/usr/share/licenses/stb/LICENSE
+    # Wayland GL (launcher model viewer): linuxdeploy-plugin-qt skips the client buffer integrations; without
+    # wayland-egl Qt has no OpenGL on Wayland. Copied before linuxdeploy so their libraries get deployed too.
+    mkdir -p AppDir/usr/plugins/wayland-graphics-integration-client
+    cp /usr/lib/x86_64-linux-gnu/qt6/plugins/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so \
+        AppDir/usr/plugins/wayland-graphics-integration-client/
     LDAI_OUTPUT=bbtime-$VER-x86_64.AppImage linuxdeploy --appdir AppDir \
         -e apps/launcher/bbtime-launcher -e apps/bbtime/bbtime -e tools/bbtime-modkit \
+        --deploy-deps-only AppDir/usr/plugins/wayland-graphics-integration-client \
         -d /src/tools/release/appimage/bbtime.desktop -i /src/tools/release/appimage/bbtime.svg \
         --plugin qt --output appimage"
 mv $B/bbtime-$VER-x86_64.AppImage "$OUT/"
