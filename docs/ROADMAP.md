@@ -87,6 +87,24 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   low-contrast (0.35 / 0.05: TB VICASG01 rink), **polished floor** = opaque, bright, unsaturated, low-contrast (0.25 /
   0.08: TB ARCA01 marble square, LiT LB02). Roughness jitters the ray only with FSR on (its history averages it);
   without FSR the AO / reflection ray sets are fixed per pixel (no grain).
+- **Stylised interactive water** (`water = enhanced|cartoon|original` in settings.ini, `--water enhanced|cartoon|original`, Options row
+  "Water", launcher; default enhanced; Enhanced + Vulkan only, `water=original` and Original Fidelity draw byte-identical
+  to before). Ported from the Joan of Arc port (scene.frag `shadeWater`, `bb/render/water_waves.h`), distances rescaled
+  ×3.75 (Bugs ~300 units vs Joan ~80). Water = the reflection classifier's water meshes plus flat dark-blue opaque
+  planes (L03A sea, L02A1 river floor); a translucent layer > 200 units over such a plane makes it the bed (L02A1),
+  20–200 over it the layer is sheen the stylised sea replaces (L03A 880). A fill plane at the main water height covers
+  open water the level draws as sky dome / holes (to the horizon over a sea, over the water bounds over a bed). The
+  opaque + alpha-tested scene is copied (colour, depth; MSAA: depth resolved sample 0) and the water drawn opaque over
+  it: absorption teal→deep blue over the refracted bed, shoreline foam, two scrolling layers of a procedural tiling
+  normal map (no game data), Fresnel reflection (ray-traced with reflections on, else screen-space over the copy, else
+  the sky seen at the top of the screen), GGX sun glints with the frame's sun shadow; FSR reactive 0.4. Waves: a damped
+  2-D wave equation (`WaveField`, 256² cells of 15 units following the camera, fixed 1/60 s substeps, allocation-free)
+  walled by the shores (`WaterSurfaces`: ground within 600 units over the surface) and by wading bodies; the app feeds
+  players and drawn actors (`Renderer::setWaterBodies`, read-only: no gameplay effect): wakes while moving, a bob while
+  standing, a splash when falling through the surface. Heights uploaded as R16F per frame. Shots:
+  `local/shots/w11/water/` (side_*.png; side_fall_L02A1.png = Bugs falling into the L02A1 river). Implemented,
+  visual port (no original counterpart). `cartoon`: the same water toon-shaded (crisp crest lines, hard glints, solid
+  foam with a white shore rim, colour posterised into 5 luminance bands with soft steps).
 - **Frame time** at 1920×1080 (X11, MSAA 4×, vsync off, RX 7900 XTX RADV, `--frames 400`, ms per frame as the
   overlay FPS): LiT L01A off 0.12 / map 0.18 / rt 0.46 / rt_ao 1.9–2.2; TB ARCA01 off 0.08 / map 0.16 / rt 0.58 /
   rt_ao 2.4–2.7; forced fallback (rt_ao, `BBTIME_VK_NO_RT=1`) 0.18 / 0.16. Screenshots: `local/shots/w9vk/`.

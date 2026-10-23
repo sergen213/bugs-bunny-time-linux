@@ -89,6 +89,7 @@ Settings parseSettings(std::string_view text, std::vector<std::string>* warnings
         else if (key == "vsync") ok = boolean(v, s.vsync);
         else if (key == "shadows") ok = oneOf(v, s.shadows, {"off", "map", "rt", "rt_ao"});
         else if (key == "reflections") ok = boolean(v, s.reflections);
+        else if (key == "water") ok = oneOf(v, s.water, {"original", "enhanced", "cartoon"});
         else if (key == "upscaling") ok = oneOf(v, s.upscaling, {"off", "fsr_quality", "fsr_balanced", "fsr_performance", "native_aa"});
         else if (key == "frame_generation") ok = boolean(v, s.frameGeneration);
         else if (key == "music_volume") ok = number(v, s.musicVolume, 0, 100);
@@ -134,6 +135,7 @@ std::string formatSettings(const Settings& s) {
     kv("vsync", s.vsync ? "true" : "false");
     kv("shadows", s.shadows);
     kv("reflections", s.reflections ? "true" : "false");
+    kv("water", s.water);
     kv("upscaling", s.upscaling);
     kv("frame_generation", s.frameGeneration ? "true" : "false");
     kv("music_volume", s.musicVolume);

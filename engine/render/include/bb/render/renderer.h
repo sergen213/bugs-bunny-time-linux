@@ -34,6 +34,20 @@ enum class Shadows : uint8_t {
 // Performance 1/2, NativeAa 1 (FSR as anti-aliasing).
 enum class Upscaling : uint8_t { Off, Quality, Balanced, Performance, NativeAa };
 
+// Enhanced water surfaces (Vulkan backend only, docs/ROADMAP.md "Stylised interactive water"): Original = the games'
+// translucent / additive layers as drawn today; Enhanced = stylised water over the refracted bed (absorption, shore
+// foam, Fresnel sky / ray-traced reflection, sun glints) with interactive waves from WaterBody; Cartoon = the same
+// water toon-shaded (flat colour bands, crisp foam outlines, hard glints and wave-crest lines).
+enum class Water : uint8_t { Original, Enhanced, Cartoon };
+
+// A character or object for the Enhanced water's wave field (render_vk Renderer::setWaterBodies): engine-space feet
+// position, body radius and height. id: stable per body across frames (its motion gives wakes and splashes).
+struct WaterBody {
+    uint32_t id = 0;
+    glm::vec3 feet{0.0f};
+    float radius = 0.0f, height = 0.0f;
+};
+
 struct WindowConfig {
     int width = 1280, height = 720;
     bool fullscreen = false;
@@ -50,6 +64,7 @@ struct Settings {
     bool msaa = true;        // Enhanced mode only
     Shadows shadows = Shadows::RtAo; // Enhanced mode only, not with frame43 (3-D menus keep the original look)
     bool reflections = true;         // ray-traced reflections on water / ice / polished floors (Enhanced, ray queries)
+    Water water = Water::Enhanced;   // Enhanced mode only, not with frame43
     Upscaling upscaling = Upscaling::Off; // Enhanced, Vulkan; replaces MSAA while on
     bool frameGeneration = false;    // FSR frame generation (Enhanced, Vulkan; upscaling off = FSR native AA)
     bool fog = true;

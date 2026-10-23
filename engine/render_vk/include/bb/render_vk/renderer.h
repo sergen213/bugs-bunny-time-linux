@@ -3,6 +3,7 @@
 // template parameter; WindowConfig, Settings, Camera and Fidelity are shared with bb_render.
 #pragma once
 #include "bb/render/renderer.h"
+#include "bb/render/water_waves.h"
 
 #include <vulkan/vulkan.h>
 
@@ -74,6 +75,9 @@ public:
     // zones; the shadow map and the ray-tracing BLAS keep every zone.
     void setZoneView(const render::ZoneView& v) { zoneView_ = v; }
     const std::vector<render::ZoneEntry>& zoneTable() const { return zoneTable_; }
+    // Enhanced water (Settings::water): bodies wading / falling in this frame (positions, see render::WaterBody) and the
+    // seconds since the previous call. Drives the wave field drawScene steps; the game simulation never reads it back.
+    void setWaterBodies(std::span<const render::WaterBody> bodies, float dt);
 
     // 2D images: returns a bindless slot handle, 0 on invalid input.
     uint32_t createImage(const Texture& tex);
@@ -111,7 +115,9 @@ private:
                    VkCommandBuffer copyCmd[2]{}; VkFence copyFence[2]{}; VkSemaphore copyAcquired[2]{}; bool copyPending[2]{}; };
     // caster: drawn into the shadow map / BLAS; receiver: shadowed (and AO for opaque + alpha-tested)
     // material: packHalf2x16(reflection strength, roughness) for ray-traced reflections, 0 = none
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; };
+    // water: Enhanced stylised water surface (reflectiveMaterials: translucent / animated blue up-facing, flat navy planes);
+    // sheen: a translucent layer just over such a plane that the stylised water replaces (not drawn with it)
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen; };
     struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; };
     struct RtGeo { uint64_t vtx, idx; uint32_t first; int32_t base; uint32_t tex, pad; }; // scene.frag Geo
     struct TexAnim { std::vector<uint32_t> frames; uint32_t start, hold; }; // frames as bindless slots
@@ -133,11 +139,16 @@ private:
                                   bool mips, std::vector<uint32_t>& slots);
     void addMeshes(std::span<const Mesh> meshes, bool actor, size_t casters, std::vector<Vertex>& verts, std::vector<uint32_t>& idx);
     void reflectiveMaterials(const Scene& scene);
+    void waterTargets(VkExtent2D ext);
+    bool waterWaves(const Camera& cam, glm::vec4& field);
+    void waterCopy(VkImage color, VkImage depth, bool depthResolved);
     void updateFsr(const Settings& s);
     void fsrResolve(const Settings& s);
     void destroyFsrTargets();
     Image makeImage(VkExtent2D ext, VkFormat fmt, VkImageUsageFlags usage);
-    void beginPass(bool clear);
+    // clear: the frame's first pass (else colour is loaded). Enhanced water: storeDepth keeps the depth (with MSAA also
+    // resolved, sample 0, into the water depth copy at the end of the pass), loadDepth resumes on it.
+    void beginPass(bool clear, bool storeDepth = false, bool loadDepth = false);
     void buildAccel(VkCommandBuffer cb, VkAccelerationStructureTypeKHR type, std::span<const VkAccelerationStructureGeometryKHR> geoms,
                     std::span<const VkAccelerationStructureBuildRangeInfoKHR> ranges, bool fastBuild, Frame::Accel& out, Buffer& scratch);
     void blasGeometry(const GpuMesh& m, VkDeviceAddress vtx, VkDeviceAddress idx, uint32_t maxVertex,
@@ -295,6 +306,25 @@ private:
     std::vector<uint64_t> presentTimes_; // SDL_GetTicksNS after each vkQueuePresentKHR (BBTIME_VK_PRESENT_LOG)
     float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
     bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps; PC ABR texels (0x420d10)
+
+    // Enhanced water: surfaces / shore walls of the uploaded scene, the camera-following wave field, the bodies of
+    // this frame (setWaterBodies) and their previous positions. Bindless slots: copies of the opaque scene's colour
+    // and depth (refraction, absorption, shoreline; per frame), the wave heights (R16F, per frame), the procedural
+    // normal map (init). waterTime_: seconds of water animation.
+    struct WaterTrack { uint32_t id; glm::vec3 feet; float bob; bool seen; };
+    render::WaterSurfaces waterSurf_;
+    std::unique_ptr<render::WaveField> waves_;
+    std::vector<render::WaterBody> waterBodies_;
+    std::vector<WaterTrack> waterTracks_;
+    std::vector<uint16_t> waveHalf_;
+    float waterDt_ = 0.0f, waterTime_ = 0.0f;
+    bool waterCartoon_ = false;  // the Enhanced water toon-shaded (Water::Cartoon; diagnostics line)
+    bool waterOn_ = false;  // this drawScene draws the Enhanced water
+    uint32_t waterColorSlot_ = kNoWater, waterDepthSlot_ = kNoWater, waveSlot_ = kNoWater, waterNormalSlot_ = kNoWater;
+    VkExtent2D waterExtent_{};
+    static constexpr uint32_t kNoWater = UINT32_MAX;
+    size_t seaFill_ = SIZE_MAX;  // meshes_ index of the open-water fill plane (uploadScene), SIZE_MAX = none
+    int waterFill_ = 0;          // reflectiveMaterials: 0 no fill, 1 over the water's bounds (a navy bed), 2 to the horizon (a sea)
 
     std::vector<V2> batch_;
 };

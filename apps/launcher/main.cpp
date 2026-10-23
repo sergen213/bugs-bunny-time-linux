@@ -549,7 +549,7 @@ private:
     QToolButton* card_[2]{};
     QProcess* proc_ = nullptr;
     QLabel* gameStatus_[2]{};
-    QComboBox *renderer_{}, *fidelity_{}, *msaa_{}, *shadows_{}, *upscaling_{};
+    QComboBox *renderer_{}, *fidelity_{}, *msaa_{}, *shadows_{}, *upscaling_{}, *water_{};
     QSpinBox *width_{}, *height_{};
     QDoubleSpinBox* fov_{};
     QCheckBox *fullscreen_{}, *vsync_{}, *reflections_{}, *frameGen_{};
@@ -719,6 +719,11 @@ private:
         shadows_->setCurrentIndex(std::max(0, shadows_->findData(q(cfg_.shadows))));
         reflections_ = new QCheckBox("Ray-traced reflections (water, ice, polished floors)");
         reflections_->setChecked(cfg_.reflections);
+        water_ = new QComboBox;
+        water_->addItem("Enhanced (refraction, shore foam, reflections, waves)", "enhanced");
+        water_->addItem("Cartoon (toon-shaded, same effects)", "cartoon");
+        water_->addItem("Original", "original");
+        water_->setCurrentIndex(std::max(0, water_->findData(q(cfg_.water))));
         upscaling_ = new QComboBox;
         for (auto [label, key] : {std::pair{"Off", "off"}, std::pair{"FSR Quality", "fsr_quality"}, std::pair{"FSR Balanced", "fsr_balanced"},
                                   std::pair{"FSR Performance", "fsr_performance"}, std::pair{"FSR Native AA", "native_aa"}})
@@ -743,6 +748,7 @@ private:
         f->addRow("Anti-aliasing (MSAA)", msaa_);
         f->addRow("Shadows (Vulkan)", shadows_);
         f->addRow("", reflections_);
+        f->addRow("Water (Vulkan)", water_);
         f->addRow("Upscaling (Vulkan)", upscaling_);
         f->addRow("", frameGen_);
         f->addRow("Music volume", music_);
@@ -1570,6 +1576,7 @@ private:
         cfg_.msaa = msaa_->currentData().toInt();
         cfg_.shadows = shadows_->currentData().toString().toStdString();
         cfg_.reflections = reflections_->isChecked();
+        cfg_.water = water_->currentData().toString().toStdString();
         cfg_.upscaling = upscaling_->currentData().toString().toStdString();
         cfg_.frameGeneration = frameGen_->isChecked();
         cfg_.musicVolume = music_->value();

@@ -3,6 +3,18 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## Unreleased
+
+- Vulkan Enhanced: stylised interactive water (`water = enhanced`, `--water`, Options, launcher; ported from the Joan
+  of Arc port): teal-to-deep-blue water over the refracted bed, shoreline foam, ray-traced / screen-space reflections,
+  sun glints and waves the characters make (wakes, bobbing, splashes). LiT L03A's sea and L02A1's river become real
+  water surfaces. `water = cartoon` is the same water toon-shaded (flat colour bands, crisp foam rims and glints);
+  `water = original` and Original Fidelity render exactly as before.
+- LiT: Bugs no longer trails the time machine during the LS01 fly-in or his carrier on the CCMERLIN walk. The
+  carrier's attach item now places him on its hand part at once (the fly-in re-runs it every tick, so he follows the
+  machine on the same tick as the original), and a carried Bugs is drawn through his carrier's part chain like the
+  original's renderer. Positions equal the Wine oracle every counter (`testCarriedLs01`, RUNTIME_REFERENCE §26).
+
 ## 0.10.2 — 2026-10-22 (fix: launcher crashed on Wayland)
 
 - The 0.10.x AppImage launcher crashed at start on Wayland ("QOpenGLWidget is not supported on this platform",

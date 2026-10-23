@@ -357,6 +357,14 @@ public:
         const LitActor& a = actors[size_t(p.platform)];
         return {a.rot[0], a.yaw, a.rot[2]};
     }
+    // Bugs' drawn position / yaw: the draw walks his coordinate chain (0x40a1f0 -> GsGetLws 0x40a050) after the update,
+    // so a carried Bugs is drawn at his carrier's part of this tick even where his +0xe4 lags it (seat, cart, walk-in).
+    std::pair<V3, int16_t> playerDraw() const {
+        if (p.carrier < 0) return {p.pos, p.yaw};
+        int16_t yaw = p.yaw;
+        const V3 at = frameWorld(p.carrier, p.carrierPart, p.local, &yaw);
+        return {at, yaw};
+    }
     void behaviourForTest(size_t i) { behaviour(i); }  // one behaviour call of actor i (tests)
     int carrots() const { return G[3]; }
     int clocks() const { return G[5]; }

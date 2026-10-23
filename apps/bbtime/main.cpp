@@ -63,6 +63,7 @@ struct Args {
     int msaa = 4;
     bb::render::Shadows shadows = bb::render::Shadows::RtAo;
     bool reflections = true, frameGeneration = false;
+    bb::render::Water water = bb::render::Water::Enhanced;
     bb::render::Upscaling upscaling = bb::render::Upscaling::Off;
     float fov = 60.0f;
     std::map<std::string, std::string> bindings;  // action -> SDL key names (settings.ini, launcher)
@@ -87,6 +88,7 @@ constexpr const char* kUsage =
     "              [--width N] [--height N] [--fullscreen] [--hidden] [--mute] [--no-hud]\n"
     "              [--screenshot FILE.png|FILE.ppm] [--frames N] [--camera X,Y,Z,YAW,PITCH]\n"
     "              [--renderer gl|vk] [--vk-validation] [--shadows off|map|rt|rt_ao] [--reflections on|off]\n"
+    "              [--water original|enhanced|cartoon]\n"
     "              [--upscaling off|fsr_quality|fsr_balanced|fsr_performance|native_aa] [--frame-generation on|off]\n"
     "              [--autoplay KEYS*TICKS,...]\n"
     "              [--players 1|2] [--autoplay2 KEYS*TICKS,...]  (TB co-op; autoplay2 = player 2)\n"
@@ -123,6 +125,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
     };
     a.upscaling = upscaleMode(cfg.upscaling).value_or(a.upscaling);
     a.reflections = cfg.reflections;
+    a.water = cfg.water == "original" ? bb::render::Water::Original : cfg.water == "cartoon" ? bb::render::Water::Cartoon : bb::render::Water::Enhanced;
     a.frameGeneration = cfg.frameGeneration;
     a.fov = cfg.fov;
     a.vulkan = cfg.renderer == "vk";
@@ -181,6 +184,11 @@ std::optional<Args> parseArgs(int argc, char** argv) {
             auto v = value();
             ok = v && (*v == "on" || *v == "off");
             if (ok) (f == "--reflections" ? a.reflections : a.frameGeneration) = *v == "on";
+        }
+        else if (f == "--water") {
+            auto v = value();
+            ok = v && (*v == "original" || *v == "enhanced" || *v == "cartoon");
+            if (ok) a.water = *v == "original" ? bb::render::Water::Original : *v == "cartoon" ? bb::render::Water::Cartoon : bb::render::Water::Enhanced;
         }
         else if (f == "--autoplay" || f == "--autoplay2") {
             auto v = value();
@@ -360,6 +368,8 @@ struct App {
     SDL_Gamepad* pad2 = nullptr;          // TB player 2
     double frameTime = 1.0 / 60.0;
     float alpha = 0.0f;
+    float frameDt = 0.0f;                 // seconds this frame advances (one tick under --autoplay lockstep): water waves
+    std::vector<bb::render::WaterBody> waterBodies;  // Enhanced water: characters / objects that wade or splash
     uint32_t simTick = 0;                 // 30 Hz ticks since start (texture animation clock)
     std::vector<bb::AnimState> actorAnim; // per Scene::actors (player excluded in play mode)
     std::vector<bb::Mesh> actorMeshes;    // posed every frame
@@ -695,8 +705,8 @@ struct App {
             }
             break;
         case Screen::Options:
-            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 12) % 12;
-            else if (a == Action::Back || (a == Action::Accept && optSel == 11)) screen = Screen::Main;
+            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 13) % 13;
+            else if (a == Action::Back || (a == Action::Accept && optSel == 12)) screen = Screen::Main;
             else if (a != Action::Back) changeOption(a == Action::Left ? -1 : 1);
             break;
         case Screen::Game: {
@@ -733,8 +743,9 @@ struct App {
         case 6: players = 3 - players; break;  // applies when the next TB level starts
         case 7: s.shadows = bb::render::Shadows((int(s.shadows) + 4 + dir) % 4); break;
         case 8: s.reflections = !s.reflections; break;
-        case 9: s.upscaling = bb::render::Upscaling((int(s.upscaling) + 5 + dir) % 5); break;
-        case 10: s.frameGeneration = !s.frameGeneration; break;
+        case 9: s.water = bb::render::Water((int(s.water) + 3 + dir) % 3); break;
+        case 10: s.upscaling = bb::render::Upscaling((int(s.upscaling) + 5 + dir) % 5); break;
+        case 11: s.frameGeneration = !s.frameGeneration; break;
         }
     }
 
@@ -1069,7 +1080,7 @@ struct App {
         auto onoff = [](bool b) { return b ? "On" : "Off"; };
         static constexpr const char* kShadowNames[] = {"Off", "Shadow map", "Ray-traced", "Ray-traced + AO"};
         static constexpr const char* kUpscaleNames[] = {"Off", "FSR Quality", "FSR Balanced", "FSR Performance", "FSR Native AA"};
-        const std::string rows[11][2] = {
+        const std::string rows[12][2] = {
             {"Renderer mode", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"},
             {"Vertical FOV", std::format("{:.0f} deg", s.vfovDeg)},
             {"4:3 pillarbox", onoff(s.pillarbox)},
@@ -1079,9 +1090,11 @@ struct App {
             {"TB players", std::to_string(players)},
             {"Shadows", kShadowNames[int(s.shadows)]},
             {"Reflections", onoff(s.reflections)},
+            {"Water", s.water == bb::render::Water::Enhanced ? "Enhanced" : s.water == bb::render::Water::Cartoon ? "Cartoon" : "Original"},
             {"Upscaling", kUpscaleNames[int(s.upscaling)]},
             {"Frame generation", onoff(s.frameGeneration)}};
         std::string shadowNote = "Enhanced mode, Vulkan renderer", reflNote = "water / ice / polished floors; Vulkan, ray tracing",
+                    waterNote = "refraction, shore foam, reflections, waves; Enhanced, Vulkan",
                     fsrNote = "AMD FSR 3.1.4; Enhanced, Vulkan; replaces MSAA",
                     fgNote = "FSR frame interpolation: two frames shown per frame rendered";
         if constexpr (requires { r.rayTracing(); }) {
@@ -1089,32 +1102,32 @@ struct App {
             if (!r.rayTracing()) reflNote = "no ray tracing on this GPU: off";
             if (!r.fsrSupported()) fsrNote = fgNote = "FSR unsupported on this GPU: off";
         } else {
-            shadowNote = reflNote = fsrNote = fgNote = "Vulkan renderer only";
+            shadowNote = reflNote = waterNote = fsrNote = fgNote = "Vulkan renderer only";
         }
-        const std::string_view notes[12] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
+        const std::string_view notes[13] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
                                             "Original Fidelity mode", "Enhanced mode (off while FSR is on)", "", "F11 switches it anywhere",
                                             players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend", shadowNote,
-                                            reflNote, fsrNote, fgNote, ""};
+                                            reflNote, waterNote, fsrNote, fgNote, ""};
         if (tb) {  // config page pc03: labels in the key-label orange, values white (Controls page), Back image + red label
             page(games[1].options, 255);
             text(1, f.x(320), f.y(14), 30 * f.u, "Options", kTbRed, 0.5f);
-            for (int i = 0; i < 11; ++i) {
+            for (int i = 0; i < 12; ++i) {  // 21-px rows: 12 of them above the note line
                 const bool sel = optSel == i;
-                text(1, f.x(60), f.y(62.0f + 23.0f * float(i)), 22 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
-                text(1, f.x(600), f.y(62.0f + 23.0f * float(i)), 22 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
+                text(1, f.x(60), f.y(62.0f + 21.0f * float(i)), 20 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
+                text(1, f.x(600), f.y(62.0f + 21.0f * float(i)), 20 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
             }
             text(1, f.x(320), f.y(318), 22 * f.u, notes[optSel], kTbGrey, 0.5f);
-            const Game::Image& b = optSel == 11 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
+            const Game::Image& b = optSel == 12 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
             if (b.img) r.drawImage(b.img, f.x(35), f.y(375), float(b.w) * f.u, float(b.h) * f.u, s.fidelity == Fidelity::Enhanced);
-            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 11 ? kTbSel : kTbRed, 0.5f);
+            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 12 ? kTbSel : kTbRed, 0.5f);
         } else {  // the title slot-menu panel
             page(games[0].bg, 60);
             litPanel(f.x(70), f.y(56), 500 * f.u, 370 * f.u, f.u);
             text(0, f.x(320), f.y(74), 24 * f.u, "Options", kLitSel, 0.5f);
-            for (int i = 0; i < 12; ++i) {
-                const uint8_t* c = optSel == i ? (i == 11 ? kLitSel : kLitCur) : kLitText;
-                const float y = f.y(108.0f + 23.0f * float(i));
-                if (i == 11) { text(0, f.x(320), y, 14 * f.u, "Back", c, 0.5f); break; }
+            for (int i = 0; i < 13; ++i) {
+                const uint8_t* c = optSel == i ? (i == 12 ? kLitSel : kLitCur) : kLitText;
+                const float y = f.y(108.0f + 21.0f * float(i));
+                if (i == 12) { text(0, f.x(320), y, 14 * f.u, "Back", c, 0.5f); break; }
                 text(0, f.x(96), y, 14 * f.u, rows[i][0], c);
                 text(0, f.x(544), y, 14 * f.u, rows[i][1], c, 1.0f);
             }
@@ -1191,6 +1204,7 @@ struct App {
                 c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             }
             poseActors(lerp, c);
+            feedWater(lerp);
             // LiT zone/portal visibility (0x44c270): eye + player zones; the free-fly camera sees every zone.
             // Debug: BBTIME_LIT_ALL_ZONES=1 draws every zone (A/B against the walk).
             static const bool allZones = std::getenv("BBTIME_LIT_ALL_ZONES");
@@ -1350,6 +1364,34 @@ struct App {
         if (tbPlay) poseHud(c, tbPlay->world.hud);
         if constexpr (requires { r.setActorMeshes(actorMeshes, casters); }) r.setActorMeshes(actorMeshes, casters);
         else r.setActorMeshes(actorMeshes);
+    }
+
+    // Enhanced water (Vulkan): the players and the drawn actors / entities as bodies for the renderer's wave field
+    // (wakes, bobbing, splashes). Read-only view of the simulation: no gameplay effect.
+    void feedWater(bool lerp) {
+        if constexpr (requires { r.setWaterBodies(waterBodies, 0.0f); }) {
+            waterBodies.clear();
+            auto body = [&](uint32_t id, auto x, auto y, auto z, float radius, float height) {  // PS1 -> engine axes
+                waterBodies.push_back({id, {float(x), -float(y), -float(z)}, std::clamp(radius * 0.5f, 25.0f, 150.0f), std::max(height, 100.0f)});
+            };
+            auto boxHeight = [](const std::array<int16_t, 6>& b) { return float(b[1] - b[4]); };  // feet (max y) - top (min y)
+            if (play) {
+                const auto v = play->view(alpha, lerp);
+                body(0, v.player.x, v.player.y, v.player.z, 120.0f, 300.0f);
+                for (size_t i = 0; i < play->world.actors.size(); ++i) {
+                    const bb::game::LitActor& a = play->world.actors[i];
+                    if (!a.dead && a.visible && play->world.defs[size_t(a.def)].model >= 0)
+                        body(uint32_t(i + 1), a.pos.x, a.pos.y, a.pos.z, float(a.radius), boxHeight(a.box));
+                }
+            }
+            if (tbPlay) {
+                const auto v = tbPlay->view(alpha, lerp);
+                for (uint32_t k = 0; k < 2; ++k) body(k, v.pos[k].x, v.pos[k].y, v.pos[k].z, 120.0f, 300.0f);
+                for (const bb::game::TbActor& e : tbPlay->world.entities)
+                    if (e.active && e.drawn() && e.model && e.uid >= 2) body(e.uid, e.pos.x, e.pos.y, e.pos.z, float(e.radius), boxHeight(e.box));
+            }
+            r.setWaterBodies(waterBodies, frameDt);
+        }
     }
 
     // HUD (LiT 0x44b370 over LitWorld::hud, TB 0x463ef0 over TbWorld::hud): each shown element's template model on one
@@ -1584,6 +1626,7 @@ int run(const std::optional<Args>& args) {
         app.s.msaa = args->msaa > 0;
         app.s.shadows = args->shadows;
         app.s.reflections = args->reflections;
+        app.s.water = args->water;
         app.s.upscaling = args->upscaling;
         app.s.frameGeneration = args->frameGeneration;
         app.vsync = args->vsync;
@@ -1672,9 +1715,11 @@ int run(const std::optional<Args>& args) {
             if (app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) {  // lockstep: 1 tick
                 app.tick(float(step.dt));
                 app.alpha = 1.0f;
+                app.frameDt = float(step.dt);
             } else {
                 for (int n = step.advance(dt); n > 0; --n) app.tick(float(step.dt));
                 app.alpha = step.alpha();
+                app.frameDt = float(std::min(dt, 0.25));
             }
             if (app.screen == Screen::Main && app.mainSel < 2) musicIdx = app.mainSel; // highlighted game
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;

@@ -710,8 +710,11 @@ hop ends with flags14 0x800000.
 
 Carrying (item flag 0x20000000, R Verified on the L01a walk-in): the target (P2; Bugs = his entity id) becomes a child
 coordinate of the carrier (`+0xc4` = carrier `+0x7c`, `+0x70` = carrier, local offset `+0x11c` = 0, the carrier's
-`+0x6c` = target); the target's flags14 are not changed. Its world position is evaluated when it updates, so a carrier
-later in the update order leads it by one tick. Release (flag 0x4000): world position recomputed from the chain (=
+`+0x6c` = target); the target's flags14 are not changed. The attach itself recomputes its world position from the
+chain at once (0x443c20); afterwards it is evaluated when the target updates, so a carrier later in the update order
+leads it by one tick unless its step re-runs the attach item every tick (LS01 fly-in: same counter, R Verified,
+RUNTIME_REFERENCE §26). Drawing always walks the chain (GsGetLws 0x40a050), so a carried target is drawn at the
+carrier's part of the current tick. Release (flag 0x4000): world position recomputed from the chain (=
 the carrier's current position), `+0xdc/+0xe0` cleared, flags14 `&= 0xfffff5f6, |= 0x1000`, `+0x70 = 0`.
 
 Ground shadows (R Verified visually, details RUNTIME_REFERENCE.md §7): tag 0x46 (`+0x3a`) names a template entity

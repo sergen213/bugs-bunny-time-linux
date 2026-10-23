@@ -40,6 +40,7 @@ out-of-range values are skipped with a `line N:` warning and the default stays. 
 | `msaa` | 0, 2, 4, 8 (4) | `WindowConfig::msaaSamples` |
 | `shadows` | `off` \| `map` \| `rt` \| `rt_ao` (`rt_ao`) | Vulkan + Enhanced dynamic shadows (`rt`/`rt_ao` fall back to `map` without ray queries) |
 | `reflections` | boolean (`true`) | Vulkan + Enhanced ray-traced reflections on water / ice / polished floors (off without ray queries) |
+| `water` | `enhanced` \| `cartoon` \| `original` (`enhanced`) | Vulkan + Enhanced stylised interactive water (refraction, shore foam, reflections, waves); `cartoon` = the same toon-shaded; `original` = the games' own water layers |
 | `upscaling` | `off` \| `fsr_quality` \| `fsr_balanced` \| `fsr_performance` \| `native_aa` (`off`) | Vulkan + Enhanced AMD FSR 3.1.4 (render scale 1/1.5, 1/1.7, 1/2, 1); replaces MSAA while on |
 | `frame_generation` | boolean (`false`) | Vulkan + Enhanced FSR frame generation (one interpolated frame per rendered frame; with `upscaling = off` it runs FSR native AA) |
 | `music_volume`, `sfx_volume` | 0–100 (100) | audio |
@@ -80,7 +81,7 @@ game's level loader). Screenshots: `local/shots/w9launcher/`.
      detected game matches the slot, an executable matched, `Datas/` exists and nothing failed to decode;
   3. use in place (read-only) or copy `Datas/` to `$XDG_DATA_HOME/bbtime/<game>/` with a progress bar
      (`<dst>.partial` then rename; cancel removes the partial copy). Finish writes `lit_root`/`tb_root`.
-* **Graphics & audio** — renderer, fidelity, resolution (+ presets), fullscreen, vsync, FOV, MSAA, shadows, reflections, upscaling, frame generation
+* **Graphics & audio** — renderer, fidelity, resolution (+ presets), fullscreen, vsync, FOV, MSAA, shadows, reflections, water, upscaling, frame generation
   (Vulkan), music/effects volume.
 * **Controls** — editable key table, restore defaults; connected gamepads via SDL3 (Qt 6 has no gamepad module).
 * **Saves** — back up now, restore selected (the current saves are backed up first as `…-before-restore`).

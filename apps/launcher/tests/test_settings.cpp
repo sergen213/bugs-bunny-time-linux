@@ -33,6 +33,7 @@ int main() {
         "future_key = kept as is = really\n"
         "shadows = map\n"
         "reflections = off\n"
+        "water = original\n"
         "upscaling = fsr_balanced\n"
         "frame_generation = on\n"
         "mods = hd-textures, big-head ,,taz-swap\n"
@@ -43,7 +44,7 @@ int main() {
     for (const auto& x : w) std::println("warning {}", x);
     assert(s.width == 1920 && s.height == 1080 && !s.fullscreen && s.renderer == "vk" && s.fidelity == "enhanced");
     assert(s.fov == 72.5f && s.msaa == 4 && !s.vsync && s.musicVolume == 100 && s.sfxVolume == 40 && s.shadows == "map");
-    assert(!s.reflections && s.upscaling == "fsr_balanced" && s.frameGeneration);
+    assert(!s.reflections && s.water == "original" && s.upscaling == "fsr_balanced" && s.frameGeneration);
     assert(s.litRoot == "/games/Bugs Bunny/lit" && s.tbRoot.empty());
     assert(s.bindings.at("jump") == "Space,D" && s.bindings.at("kick") == "F" && !s.bindings.contains("fly"));
     assert(s.unknown.at("future_key") == "kept as is = really");

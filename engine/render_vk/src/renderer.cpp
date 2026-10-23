@@ -7,6 +7,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +16,7 @@
 #include <glm/gtc/packing.hpp>
 #include <numbers>
 #include <limits>
+#include <map>
 #include <fstream>
 #include <print>
 #include <ranges>
@@ -71,7 +74,8 @@ constexpr uint32_t kFrames = 2;
 constexpr uint32_t kNoSlot = UINT32_MAX;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT; // ponytail: no D24 fallback; every desktop driver has D32
 constexpr VkFormat kTexFormat = VK_FORMAT_R8G8B8A8_UNORM;
-constexpr VkBufferUsageFlags kStreamUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+constexpr VkBufferUsageFlags kStreamUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT; // + the Enhanced water's wave heights
 // Extra usage for buffers that feed acceleration-structure builds and scene.frag's buffer references.
 constexpr VkBufferUsageFlags kRtInput = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
@@ -116,8 +120,14 @@ struct LightUbo {
     float rayMin;
     uint32_t reflect, temporal;
     glm::mat4 curViewProj, prevViewProj; // motion vectors (FSR): unjittered
+    // Enhanced water (scene.frag shadeWater): render-target uv + depth -> world (this frame's jittered projection);
+    // wave field xy origin, z 1/(cell·N), w cell (0 = none); water x animation seconds, yz 1 / render-target size;
+    // bindless slots of the opaque colour copy, its depth, the wave heights and the normal map.
+    glm::mat4 invViewProj;
+    glm::vec4 waves, water;
+    glm::uvec4 waterSlots;
 };
-static_assert(sizeof(LightUbo) == 480);
+static_assert(sizeof(LightUbo) == 592);
 
 // Smooth normals: faces meeting at a welded position are averaged (weighted by their corner angle) when they are
 // within this angle of each other, so rounded models shade smoothly while box edges and creases stay hard.
@@ -244,6 +254,45 @@ const char* vendorName(uint32_t id) {
     case 0x10005: return "Mesa";
     default: return "unknown vendor";
     }
+}
+
+// Enhanced water's tiling normal map (scene.frag shadeWater's two scrolling layers): rgb = tangent normal (z up), a =
+// height, from 24 sine ripples with whole cycles per tile (seamless) in fixed pseudo-random directions; amplitude ∝
+// 1/wavenumber, so every ripple tilts the surface alike (~0.35 rms slope in total).
+Texture waterNormalMap() {
+    constexpr uint32_t N = 256, kWaves = 24;
+    struct Wave { float kx, ky, amp, phase; };
+    std::array<Wave, kWaves> waves{};
+    uint32_t seed = 0x9e3779b9u;
+    auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return float(seed >> 8) / float(1u << 24); };
+    for (Wave& w : waves) {
+        int kx = 0, ky = 0;
+        while (kx == 0 && ky == 0) {
+            const float a = rnd() * 6.2831853f, k = 3.0f + 17.0f * rnd() * rnd();
+            kx = int(std::lround(k * std::cos(a))), ky = int(std::lround(k * std::sin(a)));
+        }
+        w = {float(kx), float(ky), 0.1f * float(N) / (6.2831853f * std::hypot(float(kx), float(ky))), rnd() * 6.2831853f};
+    }
+    std::vector<glm::vec3> hg(N * N); // height, d/dx, d/dy (texels)
+    float lo = 1e9f, hi = -1e9f;
+    for (uint32_t y = 0; y < N; ++y)
+        for (uint32_t x = 0; x < N; ++x) {
+            glm::vec3 s(0.0f);
+            for (const Wave& w : waves) {
+                const float a = 6.2831853f * (w.kx * float(x) + w.ky * float(y)) / float(N) + w.phase, c = 6.2831853f / float(N) * w.amp * std::cos(a);
+                s += glm::vec3(w.amp * std::sin(a), c * w.kx, c * w.ky);
+            }
+            hg[y * N + x] = s;
+            lo = std::min(lo, s.x), hi = std::max(hi, s.x);
+        }
+    Texture t{.name = "water_normal", .width = N, .height = N};
+    t.rgba.resize(size_t(N) * N * 4);
+    for (size_t i = 0; i < hg.size(); ++i) {
+        const glm::vec3 n = glm::normalize(glm::vec3(-hg[i].y, -hg[i].z, 1.0f)) * 0.5f + 0.5f;
+        const float h = (hg[i].x - lo) / (hi - lo);
+        for (int c = 0; c < 4; ++c) t.rgba[i * 4 + size_t(c)] = uint8_t(std::lround(255.0f * (c < 3 ? n[c] : h)));
+    }
+    return t;
 }
 
 } // namespace
@@ -952,6 +1001,26 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
     Texture white{.name = "white", .width = 1, .height = 1, .rgba = {255, 255, 255, 255}};
     if (createImage(white) != kSlotWhite || createImage(render::fontAtlas()) != kSlotFont)
         return "cannot create white/font textures";
+    {   // Enhanced water: the procedural normal map (mipmapped, sampled repeating) and the wave-height image (drawScene)
+        const Texture n = waterNormalMap();
+        Buffer staging = makeBuffer(n.rgba.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+        VkCommandBuffer cb = beginOneShot();
+        VkDeviceSize off = 0;
+        std::vector<uint32_t> slot;
+        const TexSrc src{n.width, n.height, n.rgba.data()};
+        VkDeviceMemory mem = createTextures(cb, staging, off, {&src, 1}, true, slot);
+        constexpr uint32_t N = render::WaveField::kN;
+        Image w = makeImage({N, N}, VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        imageBarrier(cb, w.img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        endOneShot(cb);
+        destroy(staging);
+        waveSlot_ = allocSlot(w.view);
+        if (slot[0] == kNoSlot || waveSlot_ == kNoSlot) return "bindless table full (water textures)";
+        slots_[slot[0]].mem = mem;
+        waterNormalSlot_ = slot[0];
+        slots_[waveSlot_] = w;
+    }
     SDL_GetWindowSizeInPixels(window_, &w_, &h_);
     return {};
 } catch (const std::exception& e) {
@@ -1164,7 +1233,8 @@ void Renderer::recreateSwapchain() {
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         check(vkCreateSemaphore(device_, &sci, nullptr, &presentReady_.emplace_back()), "vkCreateSemaphore");
     }
-    depth_ = makeTarget(kDepthFormat, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    // TRANSFER_SRC: the Enhanced water copies the opaque scene's depth (drawScene).
+    depth_ = makeTarget(kDepthFormat, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (msaaMax_ > VK_SAMPLE_COUNT_1_BIT) {
         msaaColor_ = makeTarget(swapFormat_, msaaMax_, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
         msaaDepth_ = makeTarget(kDepthFormat, msaaMax_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
@@ -1219,7 +1289,7 @@ void Renderer::addMeshes(std::span<const Mesh> ms, bool actor, size_t casters, s
         meshes_.push_back({tex, m.blend, m.twoSided, actor, world && solid, world && (solid || m.blend == Blend::Alpha), int32_t(verts.size()),
                            uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, animOk ? m.textureAnim : -1, 0,
                            // FSR reactive: LiT type-4 sprite effects (apps/bbtime poseActors names them) and animated textures
-                           (actor && m.name == "sprite") || animOk, m.zone});
+                           (actor && m.name == "sprite") || animOk, m.zone, false});
         if (actor) actorLayout_.push_back(uint32_t(m.vertices.size()));
         if (!actor && world && solid) {
             casterLo_ = glm::min(casterLo_, lo);
@@ -1299,7 +1369,7 @@ void Renderer::buildAccel(VkCommandBuffer cb, VkAccelerationStructureTypeKHR typ
 // the surface colour = texture mean (opaque texels) x mean vertex colour x Scene::colorScale (TB textures are grey and
 // coloured by their vertices), contrast = the texture's luma standard deviation.
 // - water: translucent (Alpha / Additive) or animated surfaces whose colour is blue-dominant -> strength 0.6, roughness
-//   0.03 (LiT L02A1 / L03A water, TB VIQ01 ice water);
+//   0.03 (LiT L02A1 / L03A water, TB VIQ01 ice water); also GpuMesh::water, the Enhanced stylised water (Settings::water);
 // - ice: opaque, strongly blue (b > 1.5 r, b > 1.25 g), luma > 0.55, contrast < 0.1 -> strength 0.35, roughness 0.05 (TB VICASG01);
 // - polished floor: opaque, luma > 0.6, saturation < 0.25, contrast < 0.1 -> strength 0.25, roughness 0.08 (TB ARCA01
 //   marble square, AZBOSS01).
@@ -1330,6 +1400,9 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
     };
     const bool dump = std::getenv("BBTIME_VK_MATERIALS") != nullptr;
     size_t k = 0;
+    std::vector<glm::vec3> seaTris;                          // opaque water planes (Enhanced water)
+    std::vector<GpuMesh*> planes;
+    std::vector<std::pair<GpuMesh*, const Mesh*>> layers;    // translucent / animated water layers
     for (const Mesh& m : scene.meshes) {
         if (m.vertices.empty() || m.indices.empty()) continue;
         GpuMesh& g = meshes_[k++];
@@ -1366,15 +1439,46 @@ void Renderer::reflectiveMaterials(const Scene& scene) {
         float strength = 0.0f, rough = 0.0f;
         if ((m.blend == Blend::Alpha || m.blend == Blend::Additive || (m.textureAnim >= 0 && m.blend != Blend::Subtract)) && c.b > c.r * 1.15f &&
             c.b > c.g * 0.95f)
-            strength = 0.6f, rough = 0.03f;
+            strength = 0.6f, rough = 0.03f, g.water = true;
         else if (m.blend == Blend::Opaque && st.contrast < 0.1f && luma > 0.55f && c.b > c.r * 1.5f && c.b > c.g * 1.25f) strength = 0.35f, rough = 0.05f;
         else if (m.blend == Blend::Opaque && luma > 0.6f && sat < 0.25f && st.contrast < 0.1f) strength = 0.25f, rough = 0.08f;
+        // Enhanced water only (no reflection material): the flat dark-blue planes the games draw as open water / river
+        // beds under their translucent sheen (LiT L03A sea, L02A1 river).
+        else if (m.blend == Blend::Opaque && m.textureAnim < 0 && st.contrast < 0.02f && luma < 0.25f && c.b > 0.1f && c.b > c.r * 1.8f &&
+                 c.b > c.g * 1.6f)
+            g.water = true;
+        if (g.water && m.blend == Blend::Opaque) {
+            planes.push_back(&g);
+            for (uint32_t i : m.indices) seaTris.push_back({m.vertices[i].pos[0], m.vertices[i].pos[1], m.vertices[i].pos[2]});
+        } else if (g.water) {
+            layers.emplace_back(&g, &m);
+        }
         if (dump)
             std::println(stderr, "material {} blend {} anim {} area {:.0f} up {:.2f} centre {:.0f} {:.0f} {:.0f} tex {} rgb {:.2f} {:.2f} {:.2f} "
-                         "sat {:.2f} contrast {:.3f} -> {}", m.name, int(m.blend), m.textureAnim, area, up, g.center.x, g.center.y, g.center.z,
-                         t, c.r, c.g, c.b, sat, st.contrast, strength);
+                         "vertex {:.2f} {:.2f} {:.2f} sat {:.2f} contrast {:.3f} -> {}", m.name, int(m.blend), m.textureAnim, area, up,
+                         g.center.x, g.center.y, g.center.z, t, c.r, c.g, c.b, vc.r, vc.g, vc.b, sat, st.contrast, strength);
         if (strength > 0.0f) g.material = glm::packHalf2x16(glm::vec2(strength, rough));
     }
+    // Translucent layers over an opaque water plane: well above it (L02A1's sheen 500 units over the river's navy floor)
+    // they are the surface and the plane is its bed; a little above it (L03A's 880 layer over the sea at 800) they are
+    // sheen the stylised sea replaces (GpuMesh::sheen, not drawn with it); coplanar ones are part of the surface.
+    render::WaterSurfaces sea;
+    sea.build(seaTris, {});
+    std::vector<float> beds;
+    for (auto [g, m] : layers) {
+        float above = -1e9f, bed = 0.0f;
+        for (const Vertex& v : m->vertices)
+            if (const auto h = sea.height({v.pos[0], v.pos[2]}); h && v.pos[1] - *h > above) above = v.pos[1] - *h, bed = *h;
+        if (above > 200.0f) beds.push_back(bed);
+        else if (above > 20.0f) g->sheen = true, g->water = false;
+    }
+    waterFill_ = planes.empty() ? 0 : beds.empty() ? 2 : 1;
+    for (GpuMesh* g : planes)
+        if (std::ranges::any_of(beds, [&](float b) { return std::abs(g->center.y - b) < 10.0f; })) g->water = false;
+    if (dump)
+        for (const GpuMesh& g : meshes_)
+            if (g.water || g.sheen)
+                std::println(stderr, "{} centre {:.0f} {:.0f} {:.0f} blend {}", g.water ? "water" : "sheen", g.center.x, g.center.y, g.center.z, int(g.blend));
 }
 
 void Renderer::uploadScene(const Scene& scene) {
@@ -1402,6 +1506,7 @@ void Renderer::uploadScene(const Scene& scene) {
         if (!m.vertices.empty() && !m.indices.empty())
             bytes += m.vertices.size() * (sizeof(Vertex) + sizeof(uint32_t)) + m.indices.size() * sizeof(uint32_t);
     if (!bytes) return;
+    bytes += 4 * (sizeof(Vertex) + sizeof(uint32_t)) + 6 * sizeof(uint32_t); // the Enhanced water's fill plane (uploadScene)
 
     Buffer staging = makeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
     VkCommandBuffer cb = beginOneShot();
@@ -1427,6 +1532,56 @@ void Renderer::uploadScene(const Scene& scene) {
     sceneMeshCount_ = meshes_.size();
     zones_ = scene.zones;
     reflectiveMaterials(scene);
+    {   // Enhanced water: surface heights + shore walls (ground = the opaque / alpha-tested world) and a fresh wave field
+        std::vector<glm::vec3> water, ground;
+        glm::vec2 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+        std::map<int, float> seaArea;  // opaque water planes: area by height (10-unit steps)
+        glm::vec3 seaColor(0.0f);
+        float seaTotal = 0.0f;
+        for (const GpuMesh& m : meshes_) {
+            const bool solid = m.caster;  // opaque / alpha-tested world, not the sky
+            if (!m.water && !solid) continue;
+            for (uint32_t i = 0; i < m.indexCount; ++i) {
+                const Vertex& v = verts[size_t(int64_t(idx[m.firstIndex + i]) + m.baseVertex)];
+                (m.water ? water : ground).push_back({v.pos[0], v.pos[1], v.pos[2]});
+                if (m.water) lo = glm::min(lo, glm::vec2(v.pos[0], v.pos[2])), hi = glm::max(hi, glm::vec2(v.pos[0], v.pos[2]));
+            }
+            if (!m.water) continue;
+            for (uint32_t i = 0; i + 2 < m.indexCount; i += 3) {
+                const Vertex* t[3];
+                for (uint32_t j = 0; j < 3; ++j) t[j] = &verts[size_t(int64_t(idx[m.firstIndex + i + j]) + m.baseVertex)];
+                auto p = [&](int j) { return glm::vec3(t[j]->pos[0], t[j]->pos[1], t[j]->pos[2]); };
+                const float a = 0.5f * glm::length(glm::cross(p(1) - p(0), p(2) - p(0)));
+                seaArea[int(std::lround(p(0).y / 10.0f))] += a;
+                seaColor += a * glm::vec3(t[0]->rgba[0], t[0]->rgba[1], t[0]->rgba[2]);
+                seaTotal += a;
+            }
+        }
+        // Open water where the level has no surface mesh (LiT L03A: the sea is the sky dome's lower half; L02A1: the
+        // river's middle shows its navy floor, and a hole in it): a plane at the main water height, drawn first so the
+        // level's own water overwrites it, over the water's bounds (a river over a bed) or to the horizon (a sea).
+        seaFill_ = SIZE_MAX;
+        if (waterFill_ && seaTotal > 0.0f) {
+            const float y = 10.0f * float(std::ranges::max_element(seaArea, {}, &std::pair<const int, float>::second)->first);
+            const glm::u8vec3 c(glm::round(seaColor / seaTotal));
+            Mesh fill;
+            fill.name = "water fill";
+            fill.blend = Blend::Alpha;  // neither a caster nor in the opaque pass
+            const float e = waterFill_ == 2 ? 200000.0f : 2.0f * kCharUnit;
+            for (const glm::vec2& q : {lo - e, glm::vec2(hi.x + e, lo.y - e), hi + e, glm::vec2(lo.x - e, hi.y + e)})
+                fill.vertices.push_back({.pos = {q.x, y, q.y}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
+            fill.indices = {0, 2, 1, 0, 3, 2};  // facing up
+            addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
+            meshes_.back().water = true;
+            seaFill_ = meshes_.size() - 1;
+            sceneMeshCount_ = meshes_.size();
+            for (const glm::vec2& q : {lo, glm::vec2(hi.x, lo.y), hi, lo, hi, glm::vec2(lo.x, hi.y)}) water.push_back({q.x, y, q.y});
+        }
+        waterSurf_.build(water, ground);
+        waves_.reset();
+        if (!waterSurf_.empty()) waves_ = std::make_unique<render::WaveField>([this](glm::vec2 p) { return waterSurf_.wet(p); });
+        waterTracks_.clear();
+    }
     std::vector<TriRange> ranges;
     for (const GpuMesh& m : meshes_)
         if (m.blend != Blend::Additive && m.blend != Blend::Subtract) ranges.push_back({m.firstIndex, m.indexCount, m.baseVertex});
@@ -1567,8 +1722,10 @@ void Renderer::beginFrame(const Settings& s) {
 
 // Opens the frame's dynamic-rendering pass on its target (swapchain image or Frame::realUi; resolved from the MSAA target when on). clear: the
 // frame's first pass; else a resume after drawScene's shadow / acceleration-structure work: colour is kept (the MSAA
-// target is always stored for that), depth is cleared (drawScene clears its viewport anyway).
-void Renderer::beginPass(bool clear) {
+// target is always stored for that), depth is cleared (drawScene clears its viewport anyway). Enhanced water (drawScene):
+// storeDepth keeps the depth for the pass after its copy (MSAA: also resolved, sample 0, into the water depth copy),
+// loadDepth resumes on it.
+void Renderer::beginPass(bool clear, bool storeDepth, bool loadDepth) {
     VkCommandBuffer cb = frames_[frame_].cmd;
     const Image& depth = msaaOn_ ? msaaDepth_ : depth_;
     VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -1585,8 +1742,13 @@ void Renderer::beginPass(bool clear) {
     VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     depthAtt.imageView = depth.view;
     depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAtt.loadOp = loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAtt.storeOp = storeDepth ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    if (storeDepth && msaaOn_) {
+        depthAtt.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+        depthAtt.resolveImageView = slots_[waterDepthSlot_].view;
+        depthAtt.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    }
     depthAtt.clearValue.depthStencil = {1.0f, 0};
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, extent_};
@@ -1621,9 +1783,9 @@ void Renderer::destroyFsrTargets() {
 }
 
 namespace {
-// FSR image usages (Fsr::Image::usage must match the images' create info).
-constexpr VkImageUsageFlags kFsrInput = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-constexpr VkImageUsageFlags kFsrDepth = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+// FSR image usages (Fsr::Image::usage must match the images' create info). TRANSFER_SRC: the Enhanced water's copies.
+constexpr VkImageUsageFlags kFsrInput = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr VkImageUsageFlags kFsrDepth = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 constexpr VkImageUsageFlags kFsrShared = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr VkImageUsageFlags kFsrDisplay = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 constexpr VkFormat kFsrDisplayFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1743,6 +1905,135 @@ void Renderer::fsrResolve(const Settings& s) {
     beginPass(false);
 }
 
+// ---------------------------------------------------------------- Enhanced water
+
+void Renderer::setWaterBodies(std::span<const render::WaterBody> bodies, float dt) {
+    waterBodies_.assign(bodies.begin(), bodies.end());
+    waterDt_ += dt;
+    waterTime_ += dt;
+}
+
+// The copies of the opaque scene the water refracts (render-target size ext): colour (swapchain format) and depth.
+// Recreated (after the GPU idles) only when the size changes.
+void Renderer::waterTargets(VkExtent2D ext) {
+    if (waterColorSlot_ != kNoWater && waterExtent_.width == ext.width && waterExtent_.height == ext.height) return;
+    waitIdle();
+    for (uint32_t* s : {&waterColorSlot_, &waterDepthSlot_})
+        if (*s != kNoWater) freeSlot(std::exchange(*s, kNoWater));
+    Image c = makeImage(ext, swapFormat_, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    Image d = makeImage(ext, kDepthFormat, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    VkCommandBuffer cb = beginOneShot();
+    for (const auto& [img, aspect] : {std::pair{c.img, VK_IMAGE_ASPECT_COLOR_BIT}, std::pair{d.img, VK_IMAGE_ASPECT_DEPTH_BIT}})
+        imageBarrier(cb, img, aspect, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    endOneShot(cb);
+    waterColorSlot_ = allocSlot(c.view);
+    waterDepthSlot_ = allocSlot(d.view);
+    if (waterColorSlot_ == kNoWater || waterDepthSlot_ == kNoWater) throw std::runtime_error("bindless table full (water copies)");
+    slots_[waterColorSlot_] = c;
+    slots_[waterDepthSlot_] = d;
+    waterExtent_ = ext;
+}
+
+// Copies the opaque scene (colour target `color`, single-sample depth `depth` unless the pass already resolved it into
+// the water depth copy) for the water; the frame's pass is closed. Leaves both attachments ready to be loaded again.
+void Renderer::waterCopy(VkImage color, VkImage depth, bool depthResolved) {
+    VkCommandBuffer cb = frames_[frame_].cmd;
+    constexpr auto C = VK_IMAGE_ASPECT_COLOR_BIT, D = VK_IMAGE_ASPECT_DEPTH_BIT;
+    constexpr auto COLOR_OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, COPY = VK_PIPELINE_STAGE_2_COPY_BIT,
+                   FRAG = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    constexpr auto DEPTH = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    constexpr auto SRC = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DST = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, READ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const VkImage wc = slots_[waterColorSlot_].img, wd = slots_[waterDepthSlot_].img;
+    const VkExtent3D ext{waterExtent_.width, waterExtent_.height, 1};
+    imageBarrier(cb, color, C, 0, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SRC, COLOR_OUT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, COPY,
+                 VK_ACCESS_2_TRANSFER_READ_BIT);
+    imageBarrier(cb, wc, C, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, DST, FRAG, 0, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageCopy rc{{C, 0, 0, 1}, {}, {C, 0, 0, 1}, {}, ext};
+    vkCmdCopyImage(cb, color, SRC, wc, DST, 1, &rc);
+    imageBarrier(cb, wc, C, 0, 1, DST, READ, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(cb, color, C, 0, 1, SRC, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, COPY, 0, COLOR_OUT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    if (depthResolved) { // multisample resolves synchronise as colour attachment writes
+        imageBarrier(cb, wd, D, 0, 1, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, READ, COLOR_OUT | DEPTH,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    } else {
+        imageBarrier(cb, depth, D, 0, 1, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SRC, DEPTH, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, COPY,
+                     VK_ACCESS_2_TRANSFER_READ_BIT);
+        imageBarrier(cb, wd, D, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, DST, FRAG, 0, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        rc.srcSubresource.aspectMask = rc.dstSubresource.aspectMask = D;
+        vkCmdCopyImage(cb, depth, SRC, wd, DST, 1, &rc);
+        imageBarrier(cb, wd, D, 0, 1, DST, READ, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        imageBarrier(cb, depth, D, 0, 1, SRC, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, COPY, 0, DEPTH,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    }
+    // The attachments the next pass loads (MSAA colour / depth, FSR motion / reactive) were written by this pass.
+    memoryBarrier(cb, COLOR_OUT | DEPTH, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, COLOR_OUT | DEPTH,
+                  VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+}
+
+// One frame of the wave field: it follows the view (a quarter window ahead of the camera), the bodies of
+// setWaterBodies wade / bob / splash, the field steps the time since the last frame and its heights are uploaded
+// (outside a render pass). field = scene.frag's L.waves; false (zero) when the water is at rest.
+bool Renderer::waterWaves(const Camera& cam, glm::vec4& field) {
+    field = glm::vec4(0.0f);
+    if (!waves_) return false;
+    using render::WaveField;
+    const float dt = std::exchange(waterDt_, 0.0f);
+    const glm::vec2 ahead(-std::sin(cam.yaw), -std::cos(cam.yaw)); // camera yaw 0 looks down -z
+    waves_->follow(glm::vec2(cam.pos.x, cam.pos.z) + ahead * (0.25f * float(WaveField::kN) * WaveField::kCell));
+    for (WaterTrack& t : waterTracks_) t.seen = false;
+    for (const render::WaterBody& b : waterBodies_) {
+        auto it = std::ranges::find(waterTracks_, b.id, &WaterTrack::id);
+        const bool known = it != waterTracks_.end();
+        if (!known) it = waterTracks_.insert(waterTracks_.end(), {b.id, b.feet, waterTime_, true});
+        WaterTrack& t = *it;
+        const glm::vec3 prev = std::exchange(t.feet, b.feet);
+        t.seen = true;
+        const glm::vec2 xz(b.feet.x, b.feet.z);
+        const std::optional<float> h = waterSurf_.height(xz);
+        if (!h || !known || dt <= 0.0f) continue;
+        // Falling through the surface (faster than 300 units/s: not standing on something floating at the waterline): a
+        // splash by the fall speed.
+        if (prev.y > *h && b.feet.y <= *h && prev.y - b.feet.y > 300.0f * dt) {
+            const glm::vec3 at = glm::mix(prev, b.feet, (prev.y - *h) / (prev.y - b.feet.y));
+            waves_->ripple({at.x, at.z}, std::clamp((prev.y - b.feet.y) / dt / 1500.0f, 0.4f, 1.0f));
+            t.bob = waterTime_;
+        }
+        // Wading (feet in the water, the body not under it): a wall + a wake while moving, a faint bob every 1.2..1.5 s
+        // standing (phased by id, so a crowd does not pulse together).
+        if (b.feet.y <= *h + 8.0f && b.feet.y > *h - b.height) {
+            const glm::vec2 move = xz - glm::vec2(prev.x, prev.z);
+            waves_->wade(xz, b.radius, move, dt);
+            if (glm::length(move) > 112.0f * dt) t.bob = waterTime_;
+            else if (waterTime_ - t.bob >= 1.2f + 0.3f * glm::fract(float(b.id) * 0.618f)) waves_->ripple(xz, 0.15f), t.bob = waterTime_;
+        }
+    }
+    std::erase_if(waterTracks_, [](const WaterTrack& t) { return !t.seen; });
+    waves_->step(dt);
+    const std::span<const float> h = waves_->heights();
+    if (h.empty()) return false;
+    waveHalf_.resize(h.size());
+    for (size_t i = 0; i < h.size(); ++i) waveHalf_[i] = uint16_t(glm::packHalf1x16(h[i]));
+    const auto [buf, off] = streamWrite(waveHalf_.data(), waveHalf_.size() * sizeof(uint16_t));
+    VkCommandBuffer cb = frames_[frame_].cmd;
+    const VkImage img = slots_[waveSlot_].img;
+    constexpr auto FRAG = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, COPY = VK_PIPELINE_STAGE_2_COPY_BIT;
+    imageBarrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, FRAG, 0, COPY,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = off;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {uint32_t(WaveField::kN), uint32_t(WaveField::kN), 1};
+    vkCmdCopyBufferToImage(cb, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    imageBarrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, COPY,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    const glm::vec2 o = waves_->origin();
+    field = glm::vec4(o.x, o.y, 1.0f / (WaveField::kCell * float(WaveField::kN)), WaveField::kCell);
+    return true;
+}
+
 void Renderer::drawScene(const Camera& cam, const Settings& s) {
     if (meshes_.empty() || !recording_) return;
     flush2D();
@@ -1762,11 +2053,17 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     const bool rtPath = rt_ && (mode >= Shadows::Rt || refl);
     const bool lit = mode != Shadows::Off || refl;
     const bool fsr = fsrMode_ && fsr_->created();          // beginFrame: Enhanced, !frame43, FSR wanted and usable
-    if (mode != drawnMode_ || refl != reflectionsOn_ || fsr != fsrScene_ || diag_.empty()) {
+    // Enhanced water: drawn over a copy of the opaque scene (a swapchain without TRANSFER_SRC cannot be copied: off).
+    const bool waterWanted = enhanced && s.water != render::Water::Original && !waterSurf_.empty() && (fsr || swapReadable_);
+    const bool cartoon = s.water == render::Water::Cartoon;
+    if (mode != drawnMode_ || refl != reflectionsOn_ || fsr != fsrScene_ || waterWanted != waterOn_ || cartoon != waterCartoon_ || diag_.empty()) {
         static constexpr const char* kNames[] = {"off", "shadow map (4 cascades)", "ray-query", "ray-query + RT AO"};
         drawnMode_ = mode;
         reflectionsOn_ = refl;
-        diag_ = std::format("{} | {} | shadows {}  reflections {}", rtProbe_, fsrProbe_, kNames[int(mode)], refl ? "RT" : "off");
+        waterOn_ = waterWanted;
+        waterCartoon_ = cartoon;
+        diag_ = std::format("{} | {} | shadows {}  reflections {}  water {}", rtProbe_, fsrProbe_, kNames[int(mode)], refl ? "RT" : "off",
+                            !waterWanted ? "original" : cartoon ? "cartoon" : "stylised");
         if (fsr)
             diag_ += std::format("\nFSR {}x{} -> {}x{}  frame generation {}", fsrRender_.width, fsrRender_.height, fsrDisplay_.width,
                                  fsrDisplay_.height, fgMode_ ? "on (2 presents per frame)" : "off");
@@ -1788,6 +2085,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     const glm::mat4 viewProj = clipFix * proj * view;
     const bool zoned = render::walkZones(zones_, proj * view, zoneView_, zoneTable_, zoneDrawn_);
     auto shown = [&](const GpuMesh& m) { return !zoned || m.zone < 0 || zoneDrawn_[size_t(m.zone)]; };
+    bool water = false; // this frame draws stylised water: the opaque scene is copied for it
+    for (size_t i = 0; waterOn_ && i < sceneMeshCount_ && !water; ++i) water = meshes_[i].water && shown(meshes_[i]);
+    if (water) waterTargets(fsr ? fsrRender_ : extent_);
+    const bool lightSet = lit || fsr || water; // set 1 (LightUbo) bound, smooth normals streamed
     pc.viewProj = viewProj;
     float jitter[2] = {0.0f, 0.0f};
     if (fsr) { // sub-pixel jitter of FSR's sequence, as a clip-space translation (NDC y up = pixel y down)
@@ -1811,7 +2112,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     if (!actorIdx_.empty()) {
         std::tie(geomV[1], offV[1]) = streamWrite(actorVerts_.data(), actorVerts_.size() * sizeof(Vertex));
         std::tie(geomI[1], offI[1]) = streamWrite(actorIdx_.data(), actorIdx_.size() * sizeof(uint32_t));
-        if (lit || fsr) {
+        if (lightSet) {
             if (actorNrm_.empty()) {
                 std::vector<TriRange> ranges;
                 for (size_t i = sceneMeshCount_; i < meshes_.size(); ++i)
@@ -1826,7 +2127,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
             std::tie(geomP[1], offP[1]) = streamWrite(prev.data(), prev.size() * sizeof(Vertex));
         }
     }
-    const uint32_t bindings = fsr ? 3 : lit ? 2 : 1;
+    const uint32_t bindings = fsr ? 3 : lightSet ? 2 : 1;
     int boundGeom = -1;
     auto bindGeom = [&](const GpuMesh& m) {
         if (int g = m.actor; g != boundGeom) {
@@ -1838,13 +2139,14 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         }
     };
 
-    // Shadow map, acceleration structures and FSR's offscreen targets: recorded outside the frame's render pass.
-    const bool outside = mode == Shadows::Map || rtPath || fsr;
+    // Shadow map, acceleration structures, FSR's offscreen targets and the water's wave heights: recorded outside the
+    // frame's render pass.
+    const bool outside = mode == Shadows::Map || rtPath || fsr || water;
     if (outside) {
         vkCmdEndRendering(cb);
         passOpen_ = false;
     }
-    if (lit || fsr) {
+    if (lightSet) {
         LightUbo L{};
         L.curViewProj = viewProj;
         L.prevViewProj = prevValid_ && !fsrReset_ ? prevViewProj_ : viewProj;
@@ -1862,6 +2164,12 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         L.rayMin = kRayMin;
         const float far = std::max(s.fog && s.fogEnd > s.fogStart ? std::min(s.fogEnd, s.zFar) : s.zFar, s.zNear * 2.0f);
         for (uint32_t c = 0; c < kCascades; ++c) L.splits[int(c)] = std::min(kCascadeEnd[c], far);
+        if (water) {
+            L.invViewProj = glm::inverse(pc.viewProj);
+            waterWaves(cam, L.waves);
+            L.water = glm::vec4(waterTime_, 1.0f / float(waterExtent_.width), 1.0f / float(waterExtent_.height), cartoon ? 1.0f : 0.0f);
+            L.waterSlots = glm::uvec4(waterColorSlot_, waterDepthSlot_, waveSlot_, waterNormalSlot_);
+        }
 
         if (mode == Shadows::Map) {
             // Cascades: bounding sphere of each view-frustum slice (rotation-invariant radius), light-space centre snapped
@@ -2001,17 +2309,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         std::memcpy(f.light.map, &L, sizeof L);
     }
     const VkClearColorValue fogClear{{s.fogColor[0], s.fogColor[1], s.fogColor[2], 1.0f}};
-    if (fsr) { // the scene at render resolution into colour + motion + depth (cleared by the pass)
-        constexpr auto COLOR_OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        constexpr auto DEPTH = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-        // Previous frame's readers: FSR's compute passes.
-        for (const Image* i : {&fsrColor_, &fsrMotion_, &fsrReactive_})
-            imageBarrier(cb, i->img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, COLOR_OUT,
-                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        imageBarrier(cb, fsrDepth_.img, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, DEPTH,
-                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    // FSR: the scene at render resolution into colour + motion + depth (cleared by the pass; load: resumed after the
+    // water's copy of the opaque scene).
+    auto beginFsr = [&](bool load) {
         VkRenderingAttachmentInfo col[3]{{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}, {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},
                                          {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}};
         col[0].imageView = fsrColor_.view;
@@ -2019,14 +2319,14 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         col[2].imageView = fsrReactive_.view;
         for (VkRenderingAttachmentInfo& a : col) {
             a.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            a.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
             a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         }
         col[0].clearValue.color = fogClear;
         VkRenderingAttachmentInfo dep{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         dep.imageView = fsrDepth_.view;
         dep.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        dep.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        dep.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         dep.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         dep.clearValue.depthStencil = {1.0f, 0};
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -2037,6 +2337,19 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         ri.pDepthAttachment = &dep;
         vkCmdBeginRendering(cb, &ri);
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
+    };
+    if (fsr) {
+        constexpr auto COLOR_OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        constexpr auto DEPTH = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        // Previous frame's readers: FSR's compute passes.
+        for (const Image* i : {&fsrColor_, &fsrMotion_, &fsrReactive_})
+            imageBarrier(cb, i->img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, COLOR_OUT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        imageBarrier(cb, fsrDepth_.img, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, DEPTH,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        beginFsr(false);
     } else if (outside) {
         // Resume the frame's pass: colour (incl. the MSAA resolve) and depth of the first pass come before its loads.
         memoryBarrier(cb, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -2045,9 +2358,14 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
                           VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                       VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
                           VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-        beginPass(false);
+        if (water && msaaOn_) // the pass resolves its depth into the water's copy (synchronised as a colour attachment write)
+            imageBarrier(cb, slots_[waterDepthSlot_].img, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        beginPass(false, water);
     }
-    if (lit || fsr) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &f.lightSet, 0, nullptr);
+    if (lightSet) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 1, 1, &f.lightSet, 0, nullptr);
     boundGeom = -1;
 
     if (!fsr) {
@@ -2066,14 +2384,17 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     vkCmdPushConstants(cb, layout_, kPushStages, 0, sizeof pc, &pc);
 
     VkPipeline bound = VK_NULL_HANDLE;
+    const GpuMesh* fill = seaFill_ < meshes_.size() ? &meshes_[seaFill_] : nullptr; // open-water plane (Enhanced water only)
     auto draw = [&](const GpuMesh& m) {
         // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
         // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
         const bool pcSub = original && m.blend == Blend::Subtract;
         const bool pcSemi = original && linearOriginal_ && (m.blend == Blend::Alpha || m.blend == Blend::Additive) &&
                             (m.texture != kSlotWhite || m.textureAnim >= 0);
-        const int b = m.blend == Blend::Alpha || pcSub || pcSemi ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
-        const int kind = !lit ? 0 : rtPath ? 2 : 1;
+        // Stylised water (bit 7): opaque and depth-writing over the opaque-scene copy, always a lit variant (vWorld).
+        const bool w = water && m.water;
+        const int b = w ? 0 : m.blend == Blend::Alpha || pcSub || pcSemi ? 1 : m.blend == Blend::Additive ? 2 : m.blend == Blend::Subtract ? 3 : 0;
+        const int kind = w ? (rtPath ? 2 : 1) : !lit ? 0 : rtPath ? 2 : 1;
         const VkPipeline p = fsr ? pipeLit_[kind][1][0][b] : kind == 0 ? pipe3D_[msaaOn_][b] : pipeLit_[kind][0][msaaOn_][b];
         if (p != bound) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
         bindGeom(m);
@@ -2084,6 +2405,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         pc.material = refl ? m.material : 0u;
         if (m.blend == Blend::Alpha) pc.flags |= 16u;
         if (m.reactive) pc.flags |= 32u;
+        if (w) pc.flags = 128u, pc.material = 0u, pc.alphaRef = -1.0f;
         if (m.textureAnim >= 0) {
             const TexAnim& a = texAnims_[size_t(m.textureAnim)];
             pc.tex = a.frames[(a.start + texTick_ / a.hold) % a.frames.size()];
@@ -2098,10 +2420,22 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     // back-to-front by mesh centre without depth writes.
     for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
         for (const GpuMesh& m : meshes_)
-            if (m.blend == pass && shown(m)) draw(m);
+            if (m.blend == pass && shown(m) && !(water && m.water)) draw(m);
+    if (water) { // copy the opaque scene, then the water over it before the translucent rest
+        vkCmdEndRendering(cb);
+        passOpen_ = false;
+        if (fsr) waterCopy(fsrColor_.img, fsrDepth_.img, false);
+        else waterCopy(target_, msaaOn_ ? VK_NULL_HANDLE : depth_.img, msaaOn_);
+        if (fsr) beginFsr(true);
+        else beginPass(false, false, true);
+        if (fill && shown(*fill)) draw(*fill);  // first: the level's own water overwrites it where they coincide
+        for (const GpuMesh& m : meshes_)
+            if (m.water && &m != fill && shown(m)) draw(m);
+    }
     std::vector<const GpuMesh*> translucent;
     for (const GpuMesh& m : meshes_)
-        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) translucent.push_back(&m);
+        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m) && !(water && (m.water || m.sheen)) && &m != fill)
+            translucent.push_back(&m);
     std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
         const glm::vec3 d = m->center - cam.pos;
         return glm::dot(d, d);

@@ -1041,13 +1041,15 @@ void testFocusL03acom(const std::filesystem::path& file) {
     std::printf("L03ACOM camera focus actor 398 matches the original\n");
 }
 
-// Hand-carried Bugs (local/wine/compare/w10/ls01/{b03,walk}.csv, Proton-GE /b03 and LS01 → CCMERLIN): in the time
-// machine he hangs on carrier 620, itself on actor 89's part 0 (its +0x68 at the attach, kept while 89's anim 1
-// jitters part 1): seated at (28800, bob, 3800) yaw −1949 as the oracle every counter from 245; CCMERLIN's walk takes
-// the hand part's heading (−660, not the carrier's 0); its position is the oracle's one tick earlier (known carry lag).
+// Hand-carried Bugs (local/wine/compare/w10/ls01/b03.csv Proton-GE /b03, w11/carry/b70.csv /b70): in the time machine
+// he hangs on carrier 620, itself on actor 89's part 0 (its +0x68 at the attach, kept while 89's anim 1 jitters part 1).
+// During the fly-in 620's step re-runs its attach item every tick, which recomputes his position from the chain after 89
+// moved (0x443c20; w11/carry/hook_b03.txt): same counter as the part. Seated (no re-attach) his +0xe4 is one tick
+// behind it, yet he is drawn through the chain at the part of this tick (playerDraw). CCMERLIN's walk takes the hand
+// part's heading (−660, not the carrier's 0) and is one tick behind the hand there too (w11/carry/carrier_b70.txt).
 void testCarriedLs01(const std::filesystem::path& dir) {
     struct At { int cnt; V3 pos; int16_t yaw; };
-    auto run = [](const std::filesystem::path& file, const char* name, std::span<const At> want) {
+    auto run = [](const std::filesystem::path& file, const char* name, std::span<const At> want, auto&& extra) {
         const BzeFile bze = loadBze(file);
         const Scene scene = buildLitScene(bze, name);
         LitWorld w = LitWorld::load(bze, &scene);
@@ -1056,17 +1058,23 @@ void testCarriedLs01(const std::filesystem::path& dir) {
         size_t k = 0;
         for (int t = 0; k < want.size(); ++t) {
             w.tick({});
+            extra(w, 2 * t + 3);
             if (2 * t + 3 != want[k].cnt) continue;
-            assert(w.p.carrier >= 0 && w.p.pos == want[k].pos && w.p.yaw == want[k].yaw);
+            assert(w.p.carrier >= 0 && w.p.pos == want[k].pos && ((w.p.yaw - want[k].yaw) & 0xfff) == 0);
             ++k;
         }
     };
-    const At seat[] = {{259, {28800, -476, 3800}, -1949}, {299, {28800, -480, 3800}, -1948}, {397, {28800, -441, 3800}, -1948},
-                       {577, {28800, -441, 3800}, -1948}, {607, {28800, -491, 3800}, -1949}};
-    run(dir / "LS01.bze", "LS01", seat);
-    const At walk[] = {{105, {11218, -589, 6449}, -660}, {401, {10198, -589, 7453}, -660}, {603, {5664, -572, 10212}, -660}};
-    run(dir / "CCMerlin.bze", "CCMERLIN", walk);
-    std::printf("LS01 time machine seat and CCMERLIN walk heading match the original\n");
+    const At ls01[] = {{3, {28800, -491, 3800}, 0},          {5, {28800, -2104, 548}, -1949},   {47, {28805, -2099, 7547}, -1949},
+                       {49, {28821, -2083, 7541}, -1948},    {91, {29163, -1203, 2267}, 1960},  {155, {27413, -731, 6090}, 1228},
+                       {239, {28816, -491, 3800}, -1949},    {259, {28800, -476, 3800}, -1949}, {299, {28800, -480, 3800}, -1948},
+                       {397, {28800, -441, 3800}, -1948},    {577, {28800, -441, 3800}, -1948}, {607, {28800, -491, 3800}, -1949}};
+    run(dir / "LS01.bze", "LS01", ls01, [](const LitWorld& w, int cnt) {  // seated: drawn at 620's +0xe4 (tm_hand.txt)
+        if (cnt == 259) assert(w.playerDraw().first == V3(28800, -471, 3800));
+    });
+    const At walk[] = {{13, {11535, -589, 6137}, 0},          {15, {11528, -589, 6144}, -660},   {105, {11218, -589, 6449}, -660},
+                       {401, {10198, -589, 7453}, -660},     {603, {5664, -572, 10212}, -660}};
+    run(dir / "CCMerlin.bze", "CCMERLIN", walk, [](const LitWorld&, int) {});
+    std::printf("LS01 time machine fly-in / seat and CCMERLIN walk match the original every checked counter\n");
 }
 
 // LS01 clock-gate displays (local/wine/compare/w10b/parts/gate_peek_{nowhere,era1}.txt, Proton-GE /b03): five type-14

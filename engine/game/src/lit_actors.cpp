@@ -1287,10 +1287,14 @@ void LitWorld::type14(size_t i) {
                         if (!(p.flags14 & 0x1000000)) {
                             // 0x440120: Bugs' coordinate becomes a child of the carrier's (+0xc4, +0x70); his flags14
                             // are left alone (runtime: 2 throughout the L01a walk-in) and the turn error 0x4b3c20 reset.
+                            // His world position is recomputed from the chain at once (0x443c20), so a carrier whose
+                            // step re-runs this item every tick has him at its part of the same counter (runtime: LS01
+                            // fly-in, CCMERLIN walk; local/wine/compare/w11/carry/hook_b03.txt).
                             if (f & 0x1000000) p.reg = a.reg;
                             p.carrier = int32_t(i);
                             p.carrierPart = attachPart(int32_t(i), a.handSet);
                             p.local = {};
+                            p.pos = frameWorld(p.carrier, p.carrierPart, p.local);
                             p.platform = p.rope = -1;
                             turnErr_ = -1;
                             if (!(f & 0x80)) a.rider = -2;

@@ -50,7 +50,10 @@ struct Play {
     Snap view(float a, bool interpolate) const;
 
 private:
-    Snap snap() const { return {world.cam.eye, world.cam.target, world.p.pos, world.p.yaw, world.p.lean, world.playerParentRot()}; }
+    Snap snap() const {
+        const auto [at, yaw] = world.playerDraw();
+        return {world.cam.eye, world.cam.target, at, yaw, world.p.lean, world.playerParentRot()};
+    }
 };
 
 // TB play mode: view of the bb_game TbWorld (both characters, camera), interpolated like Play.

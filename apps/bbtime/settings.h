@@ -33,6 +33,9 @@ struct Settings {
     std::string shadows = "rt_ao";
     // Vulkan, Enhanced only: ray-traced reflections on water / ice / polished floors (needs ray queries, else off).
     bool reflections = true;
+    // Vulkan, Enhanced only: water surfaces. enhanced (stylised water: refracted bed, shore foam, reflections, glints,
+    // waves from the characters) | cartoon (the same, toon-shaded) | original (the games' own translucent layers).
+    std::string water = "enhanced";
     // Vulkan, Enhanced only: FSR 3.1.4. upscaling: off | fsr_quality | fsr_balanced | fsr_performance | native_aa;
     // frame_generation (FSR frame interpolation, one generated frame per rendered frame; with upscaling off it runs
     // FSR as native AA).
