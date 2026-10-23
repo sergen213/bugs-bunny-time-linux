@@ -331,10 +331,24 @@ vec3 shadeWater(vec3 p, float light) {
     vec3 below = copyColor(ruv);
     float path = distance(p, bed), bedDepth = max(p.y - bed.y, 0.0);
 
-    // Absorption (red first: teal shallows) + in-scattered colour from teal to deep blue, lit like the level.
+    // Absorption (red first: teal shallows) + in-scattered colour from teal to deep blue, lit like the level. With the
+    // colour an opaque original surface had (pc.material, GpuMesh::tint) the scattered colour takes its hue, no dimmer
+    // than it, and the dominant channel absorbs least (AZCASG05's lavender stream, LiT L02A5's navy); an additive
+    // layer's colour was light added to its bed (tint a = 0: TB TRQ01's blue layer over a pink basin), so absorption
+    // stays neutral and the bed keeps its own hue.
     vec3 lightC = vec3(light);
-    vec3 tr = exp(-vec3(0.0080, 0.0026, 0.0019) / kWU * path);
-    vec3 scatter = mix(vec3(0.05, 0.32, 0.30), vec3(0.006, 0.05, 0.11), smoothstep(20.0 * kWU, 260.0 * kWU, bedDepth)) * lightC;
+    vec3 kAbs = vec3(0.0080, 0.0026, 0.0019), shallowC = vec3(0.05, 0.32, 0.30) * lightC, deepC = vec3(0.006, 0.05, 0.11) * lightC;
+    vec4 tint = unpackUnorm4x8(pc.material);
+    tint.rgb = toLinear(tint.rgb);
+    float tm = max(tint.r, max(tint.g, tint.b));
+    if (tm > 1e-3) {
+        vec3 hue = tint.rgb / tm, a = 1.5 - hue;
+        shallowC = hue * max(0.32 * light, tm);
+        deepC = hue * max(0.11 * light, 0.5 * tm);
+        kAbs = mix(vec3(0.0042), a * (0.0042 * 3.0 / (a.r + a.g + a.b)), tint.a);
+    }
+    vec3 tr = exp(-kAbs / kWU * path);
+    vec3 scatter = mix(shallowC, deepC, smoothstep(20.0 * kWU, 260.0 * kWU, bedDepth));
     vec3 c = below * tr + scatter * (1.0 - tr);
 
     // Reflection with Schlick Fresnel; sun glints on the ripples. Both fade in over the first units of depth so the
@@ -432,7 +446,7 @@ void main() {
     else if ((pc.flags & 16u) != 0u) re = c.a;                            // alpha-blended: by its coverage
     if ((pc.flags & 32u) != 0u) re = max(re, c.a);
     if ((pc.flags & 128u) != 0u) re = 0.4;                               // stylised water: scrolling ripples, refraction
-    if (pc.material != 0u) re = max(re, 0.5 * unpackHalf2x16(pc.material).x);
+    if (pc.material != 0u && (pc.flags & 128u) == 0u) re = max(re, 0.5 * unpackHalf2x16(pc.material).x);
     oReactive = min(re, 0.9);                                             // FSR's recommended ceiling
 #endif
 }

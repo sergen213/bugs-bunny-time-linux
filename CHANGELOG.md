@@ -3,13 +3,18 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
-## Unreleased
+## 0.11.0 — 2026-10-23 (Wave 11: stylised interactive water, LiT carry fixes)
 
 - Vulkan Enhanced: stylised interactive water (`water = enhanced`, `--water`, Options, launcher; ported from the Joan
   of Arc port): teal-to-deep-blue water over the refracted bed, shoreline foam, ray-traced / screen-space reflections,
   sun glints and waves the characters make (wakes, bobbing, splashes). LiT L03A's sea and L02A1's river become real
   water surfaces. `water = cartoon` is the same water toon-shaded (flat colour bands, crisp foam rims and glints);
   `water = original` and Original Fidelity render exactly as before.
+  Open seas drawn as void + surf lines (TB VIQ01, VIQ02, VICA01, LiT L03A2) become water out to the horizon — told
+  from a river or moat (CC2A, TRCA01, Merlin) by how far one sees over the water — and keep the original's glowing
+  surf / ripple lines; LiT L02A5's sloped stream is water over its whole width; the water takes the colour the
+  original gave it (TB TRQ01's pink fountain, AZCASG05's lavender stream, LiT L02A5 / L03A navy), translucent
+  sheens keep the teal look.
 - LiT: Bugs no longer trails the time machine during the LS01 fly-in or his carrier on the CCMERLIN walk. The
   carrier's attach item now places him on its hand part at once (the fly-in re-runs it every tick, so he follows the
   machine on the same tick as the original), and a carried Bugs is drawn through his carrier's part chain like the

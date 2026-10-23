@@ -101,7 +101,9 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   static opaque navy planes without a water layer within 200 units over them, unless the lone planes are one height,
   the level's lowest ground and ≥ 10 % of its ground's bounding area (CC3A open sea) or lie up to 200 under real water
   (L03A, L03ACOM) — else floor tiles (L05A5 / L05A2 platforms, L01D2_8 moonlit rock, L04C1). Animated opaque blue is a
-  water surface (L04E2 park pond, l04e, TB AZCASG05). A fill plane at the main water height covers open water the
+  water surface (L04E2 park pond, l04e, TB AZCASG05); a sloped (up 0.85–0.9) opaque navy surface is a stream bed drawn
+  as stylised water where it lies when a water layer runs within 200 units over it (L02A5: its rim strips), never a
+  fill plane. A fill plane at the main water height covers open water the
   level draws as sky dome / holes: 150-unit cells over the opaque planes / beds where there is no ground, the ground
   is above the surface, a bed (incl. blue / teal vertex-lit seabed under the surface: L03A rocks under the docks), the
   game's sheen layer, or the level's own water at that height (closes cell-edge gaps) — never dry ground below the
@@ -110,12 +112,20 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   L03ACOM, L04E2). A level with no opaque planes / beds whose layers at the main height have no ground at all under
   at least 25 % of their triangles draws its water as surf / ripple layers around holes the backdrop shows through (TB
   TRCA01 moat, VIQ02 / VICA01 sea, LiT CC2A river, L03A2 sea): the fill starts around those layers and covers the
-  open cells of the whole level area (horizon only by the rim rule; VIQ02 / VICA01 end at the level-ground box edge).
-  No fill for layers with ground under them (L02B1 / L02B2 strips, L03C lagoon, TB pools, VIQ01 cliff surf) or with a
-  static layer at that height, the game's own surface whose gaps are deliberate (CCMERLIN / Merlin moat: drawbridge).
-  Where nothing was drawn under the water (copy depth = clear) the bed is taken far along the view ray. The
+  open cells of the whole level area. So does an open sea whose surf lines hug an island's cliffs (TB VIQ01: ground
+  under every layer, the void past them). Open sea = sight lines over the water (32 directions from up to 64 layer
+  triangles, marched to the ground box edge, blocked by ground > 600 units over the water): > 18 % reach the edge and
+  > half of their steps cross void (L03A2 0.75 / 0.76, VIQ02 0.44 / 0.93, VICA01 and VIQ01 0.24 / 0.88; not CC2A's
+  river 0.01, TRCA01's moat 0, L02B1 0.11, L03C 0.06); an open sea runs to the horizon too. The surf / ripple layers
+  of a filled sea are also drawn as the original over the stylised water, so their glow lines stay (VIQ01 cliffs).
+  No fill for layers with ground under them that are not an open sea (L02B1 / L02B2 strips, L03C lagoon, TB pools) or
+  with a static layer at that height, the game's own surface whose gaps are deliberate (CCMERLIN / Merlin moat:
+  drawbridge). Where nothing was drawn under the water (copy depth = clear) the bed is taken far along the view ray. The
   opaque + alpha-tested scene is copied (colour, depth; MSAA: depth resolved sample 0) and the water drawn opaque over
-  it: absorption teal→deep blue over the refracted bed, shoreline foam, two scrolling layers of a procedural tiling
+  it: absorption teal→deep blue over the refracted bed — or the original's colour: an opaque surface's hue (texture
+  mean × vertex colour) at no less than its brightness, its dominant channel absorbed least (AZCASG05 lavender stream,
+  L02A5 / L03A navy), an additive layer's colour as light added over a neutral-absorbing bed (TRQ01's blue layer over
+  the pink basin); alpha-blended sheens keep the teal default — shoreline foam, two scrolling layers of a procedural tiling
   normal map (no game data), Fresnel reflection (ray-traced with reflections on, else screen-space over the copy, else
   the sky seen at the top of the screen), GGX sun glints with the frame's sun shadow; FSR reactive 0.4. Waves: a damped
   2-D wave equation (`WaveField`, 256² cells of 15 units following the camera, fixed 1/60 s substeps, allocation-free)

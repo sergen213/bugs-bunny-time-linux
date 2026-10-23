@@ -117,8 +117,11 @@ private:
     // material: packHalf2x16(reflection strength, roughness) for ray-traced reflections, 0 = none
     // water: Enhanced stylised water surface (reflectiveMaterials: translucent / animated blue up-facing, flat navy planes);
     // sheen: a translucent layer just over such a plane that the stylised water replaces (not drawn with it); bed: such a
-    // plane under a higher water surface (drawn as is, the Enhanced water's fill covers it)
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen, bed; };
+    // plane under a higher water surface (drawn as is, the Enhanced water's fill covers it); surf: an additive surf /
+    // ripple line of a hole-filled sea, drawn as the original over the stylised water too (its glow line stays); slope:
+    // a sloped navy stream bed, stylised water where it lies (never a fill plane); tint: packUnorm4x8 of the colour the
+    // original draws the water in (texture mean x vertex colour x scene scale), the stylised water's hue and brightness
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen, bed, surf, slope; uint32_t tint; };
     struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; };
     struct RtGeo { uint64_t vtx, idx; uint32_t first; int32_t base; uint32_t tex, pad; }; // scene.frag Geo
     struct TexAnim { std::vector<uint32_t> frames; uint32_t start, hold; }; // frames as bindless slots
