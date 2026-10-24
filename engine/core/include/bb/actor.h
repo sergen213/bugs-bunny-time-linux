@@ -42,6 +42,7 @@ struct AnimState {
     uint16_t frame = 0;          // frame counter (+0x146)
     uint8_t ticksPerFrame = 0;   // resolution >> 1 (u8: 0 wraps to a 256-tick hold, as the original)
     uint8_t countdown = 0;
+    bool holdEnd = false;        // this call counted the frame hold down to 0 (the TB exe then runs the anim's logic)
     uint8_t skip = 0;            // +0x148 frame skip: the next frame step applies this many frames (then 0)
     uint32_t flags = 0;          // 0x100 finished, 0x200 playing, 0x1000 (re)started, 0x2000 last shown frame, 0x10 paused
     size_t next = 0;             // index of the next TOD frame the applier reads
@@ -63,6 +64,17 @@ uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint3
 void applyTodFrame(AnimState& st, const Tod& tod, size_t frame);
 // Rebuilds part p's matrix from its rot / scale (RotMatrix 0x407a50 + ScaleMatrix 0x408060) after code changed them.
 void rebuildPart(TodPart& p);
+
+// Enhanced pose interpolation (render only, never fed back into the simulation; BBLIT-Remaster's idea, docs/ROADMAP.md
+// "Enhanced"): the pose to draw at render alpha a in [0, 1] after the tick that left `cur`, `prev` being the state one
+// tick earlier. The app's root / camera interpolation draws a tick behind (prev -> cur); poses follow the same clock
+// along their TOD frames: a frame held h ticks moves linearly into the next one over its hold (that frame applied to a
+// copy, from the TOD), so 15 Hz clips glide instead of stepping every other tick, and the tick that applies a frame
+// finishes the move from prev. Parts blend by shortest-arc rotation (quaternion slerp of the coord matrix), linear
+// scale and translation; code-posed parts (0x400), paused / finished clips and non-TOD animations blend prev -> cur.
+// A part that appears, changes object / parent / visibility, is zero-scaled or mirrored, or jumps (more than half its
+// offset + 500) snaps to the later pose. Texture links are untouched (they keep the tick's record).
+AnimState interpolatePose(const AnimState& prev, const AnimState& cur, float a);
 
 // Appends the posed model as engine-space meshes (Mesh::texture indexes Scene::textures). Root coordinate =
 // Trans(pos) * RotMatrix(rot) * Scale(scale) in PS1 space (actor +0xe4 / +0xdc / +0xcc). Parts are drawn when

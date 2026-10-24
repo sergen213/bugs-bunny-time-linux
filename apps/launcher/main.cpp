@@ -550,9 +550,9 @@ private:
     QProcess* proc_ = nullptr;
     QLabel* gameStatus_[2]{};
     QComboBox *renderer_{}, *fidelity_{}, *msaa_{}, *shadows_{}, *upscaling_{}, *water_{};
-    QSpinBox *width_{}, *height_{};
+    QSpinBox *width_{}, *height_{}, *cameraSpeed_{}, *jumpBuffer_{}, *haze_{}, *titleLogo_{}, *pushR_{};
     QDoubleSpinBox* fov_{};
-    QCheckBox *fullscreen_{}, *vsync_{}, *reflections_{}, *frameGen_{};
+    QCheckBox *fullscreen_{}, *vsync_{}, *reflections_{}, *frameGen_{}, *hudEdges_{}, *stickCamera_{}, *cameraInvert_{};
     QSlider *music_{}, *sfx_{};
     QTableWidget* binds_{};
     QListWidget *pads_{}, *backups_{}, *logs_{};
@@ -731,6 +731,19 @@ private:
         upscaling_->setCurrentIndex(std::max(0, upscaling_->findData(q(cfg_.upscaling))));
         frameGen_ = new QCheckBox("FSR frame generation");
         frameGen_->setChecked(cfg_.frameGeneration);
+        hudEdges_ = new QCheckBox("HUD counters at the screen edges (Enhanced, wide screens)");
+        hudEdges_->setChecked(cfg_.hudEdges);
+        auto spin = [](int lo, int hi, int v, const char* suffix, const char* off) {
+            auto* b = new QSpinBox;
+            b->setRange(lo, hi);
+            b->setValue(v);
+            b->setSuffix(suffix);
+            if (off) b->setSpecialValueText(off);
+            return b;
+        };
+        haze_ = spin(0, 100, cfg_.haze, " % (Lost in Time levels 1A, 1B, 1D)", "Off");
+        titleLogo_ = spin(50, 100, cfg_.titleLogo, " % of its depth (100: as the original)", nullptr);
+        pushR_ = spin(0, 120, cfg_.pushR, " units", "Off");
         auto slider = [](int v) {
             auto* s = new QSlider(Qt::Horizontal);
             s->setRange(0, 100);
@@ -751,6 +764,10 @@ private:
         f->addRow("Water (Vulkan)", water_);
         f->addRow("Upscaling (Vulkan)", upscaling_);
         f->addRow("", frameGen_);
+        f->addRow("", hudEdges_);
+        f->addRow("Ground haze (Vulkan)", haze_);
+        f->addRow("Title logo depth", titleLogo_);
+        f->addRow("Pushed stone clearance", pushR_);
         f->addRow("Music volume", music_);
         f->addRow("Effects volume", sfx_);
         keyLabels(f);
@@ -792,6 +809,28 @@ private:
         l->addWidget(new QLabel("Connected gamepads (SDL standard layout; the game maps them like a PlayStation pad):"));
         l->addWidget(pads_);
         l->addWidget(refresh, 0, Qt::AlignLeft);
+        // Enhanced-only gameplay aids (BBLIT-Remaster's; Original Fidelity plays exactly as the exe).
+        auto* aids = new QFormLayout;
+        stickCamera_ = new QCheckBox("Right stick turns the Lost in Time camera (like L2 / R2)");
+        stickCamera_->setChecked(cfg_.stickCamera);
+        cameraInvert_ = new QCheckBox("Invert");
+        cameraInvert_->setChecked(cfg_.cameraInvert);
+        cameraSpeed_ = new QSpinBox;
+        cameraSpeed_->setRange(10, 200);
+        cameraSpeed_->setValue(cfg_.cameraSpeed);
+        cameraSpeed_->setSuffix(" per tick at full tilt (L2 / R2: 38)");
+        jumpBuffer_ = new QSpinBox;
+        jumpBuffer_->setRange(0, 8);
+        jumpBuffer_->setValue(cfg_.jumpBuffer);
+        jumpBuffer_->setSpecialValueText("Off");
+        jumpBuffer_->setSuffix(" ticks before landing");
+        aids->addRow("", stickCamera_);
+        aids->addRow("", cameraInvert_);
+        aids->addRow("Camera speed", cameraSpeed_);
+        aids->addRow("Jump buffer", jumpBuffer_);
+        keyLabels(aids);
+        l->addWidget(new QLabel("Enhanced mode only:"));
+        l->addLayout(aids);
         refreshPads();
         return w;
     }
@@ -1166,13 +1205,21 @@ private:
             if (models_->item(r)->data(Qt::UserRole).toString() == select) models_->setCurrentRow(r);
     }
 
-    // External files of a .gltf (buffers, images) as written in its URIs, percent-decoded; data: URIs and .glb
-    // (embedded) have none. ponytail: external URIs inside a .glb are not followed.
+    // External files of a glTF (buffers, images) as written in its URIs, percent-decoded; data: URIs are embedded.
+    // .gltf = the JSON itself; .glb = its first chunk (12-byte header, then u32 length, u32 type "JSON"), whose
+    // buffers / images may name external files too (the BIN chunk is the uri-less buffer 0).
     static std::vector<std::string> sideUris(const fs::path& file) {
         std::vector<std::string> out;
         QFile f(q(file));
-        if (q(file.extension()).toLower() != ".gltf" || !f.open(QIODevice::ReadOnly)) return out;
-        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        const QString ext = q(file.extension()).toLower();
+        if ((ext != ".gltf" && ext != ".glb") || !f.open(QIODevice::ReadOnly)) return out;
+        QByteArray json = f.readAll();
+        if (ext == ".glb") {
+            const auto u32 = [&](qsizetype at) { return at + 4 <= json.size() ? qFromLittleEndian<quint32>(json.constData() + at) : 0u; };
+            if (u32(0) != 0x46546c67 || u32(16) != 0x4e4f534a || u32(12) > quint32(json.size() - 20)) return out;  // "glTF", "JSON"
+            json = json.mid(20, qsizetype(u32(12)));
+        }
+        const QJsonObject o = QJsonDocument::fromJson(json).object();
         for (const char* arr : {"buffers", "images"})
             for (const QJsonValue v : o.value(arr).toArray())
                 if (const QString u = v.toObject().value("uri").toString(); !u.isEmpty() && !u.startsWith("data:"))
@@ -1579,6 +1626,14 @@ private:
         cfg_.water = water_->currentData().toString().toStdString();
         cfg_.upscaling = upscaling_->currentData().toString().toStdString();
         cfg_.frameGeneration = frameGen_->isChecked();
+        cfg_.hudEdges = hudEdges_->isChecked();
+        cfg_.haze = haze_->value();
+        cfg_.titleLogo = titleLogo_->value();
+        cfg_.pushR = pushR_->value();
+        cfg_.stickCamera = stickCamera_->isChecked();
+        cfg_.cameraInvert = cameraInvert_->isChecked();
+        cfg_.cameraSpeed = cameraSpeed_->value();
+        cfg_.jumpBuffer = jumpBuffer_->value();
         cfg_.musicVolume = music_->value();
         cfg_.sfxVolume = sfx_->value();
         collectMods();

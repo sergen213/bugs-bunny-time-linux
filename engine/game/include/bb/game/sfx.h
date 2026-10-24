@@ -17,8 +17,9 @@ namespace bb::game {
 
 // LiT tag 0x04 (8 B): {u16 id, u8 bank, u8 program, u16 flags, u8 add, u8 chance}; TB (12 B): add, chance and
 // maxDist are u16. flags: 2 non-positional (levels = add), 0x10 released when the emitter is freed, 0x20 a looping
-// voice follows its emitter, 0x80 chance (plays when rand() >= chance * 0x80), 0x100 emitter part offset (not
-// applied), 0x200 add `add` to both levels, 0x400 speech (language table), TB 0x4000 maxDist replaces 0x1000.
+// voice follows its emitter, 0x80 chance (plays when rand() >= chance * 0x80), 0x100 emitter part offset (LiT
+// 0x41f620: + the first part's translation), 0x200 add `add` to both levels, 0x400 speech (language table), TB 0x4000
+// maxDist replaces 0x1000.
 struct SfxEntry {
     uint16_t id = 0;
     uint8_t bank = 0, program = 0;
@@ -30,7 +31,7 @@ struct SfxEntry {
 // view angle (FPATAN · 2048/π, 4096 units; the exes' constants differ in the last digits); beyond maxDist both are 0.
 std::array<uint8_t, 2> sfxLevels(const V3& src, const V3& eye, const V3& target, int32_t maxDist, bool tb);
 // Start volume in DirectSound hundredths of dB from the levels, the program volume byte and the config SFX volume
-// (LiT 0x9ca850 0..100, TB GD+0x97 0..127); TB tracks with the same formula.
+// (LiT 0x9ca850 0..100, TB GD+0x97 0..128, default 0x80); TB tracks with the same formula.
 int32_t sfxVolumeLit(std::array<uint8_t, 2> lv, uint8_t progVolume, int32_t config);
 int32_t sfxVolumeTb(std::array<uint8_t, 2> lv, uint8_t progVolume, int32_t config);
 inline int32_t sfxPan(std::array<uint8_t, 2> lv) { return (int32_t(lv[0]) - lv[1]) * 3000 >> 7; }
@@ -44,7 +45,7 @@ public:
     // false = the original without a sound device (the Wine oracle): the mixer never runs, so voices never free and
     // started voices stay 'start pending' (C85/C87 see them playing) — replays of oracle traces set this.
     bool device = true;
-    int32_t volume = 100;  // config SFX volume: LiT 0..100, TB 0..127
+    int32_t volume = 100;  // config SFX volume: LiT 0..100, TB 0..128
     std::vector<SfxEntry> table;
     std::vector<std::array<uint8_t, 8>> programs, speechPrograms;  // {u16 blob (1-based), ?, ?, volume, ?, note, ?}
     std::shared_ptr<const std::vector<AiffSound>> bank, speech;    // section-3 bank / language speech bank
@@ -60,17 +61,24 @@ public:
     static std::shared_ptr<const std::vector<AiffSound>> loadBank(std::span<const uint8_t> section, BzeVariant game);
 
     // Emitter: a world handle, 0 = none. The callback answers true for a player (levels fixed 100/100), else fills
-    // the emitter's world position.
-    using Where = std::function<bool(int32_t emitter, V3& pos)>;
+    // the emitter's world position (flags: the entry's, for 0x100).
+    using Where = std::function<bool(int32_t emitter, uint16_t flags, V3& pos)>;
     // 0x41deb0 / 0x407080: mode 1 start (needs a free voice, then the chance roll), mode 2 release.
     void request(int32_t emitter, uint16_t id, uint16_t mode, MsvcRand& rand);
     void releaseOwned(int32_t emitter);                  // 0x41f5d0 / 0x407220
     bool playing(uint16_t id, int32_t emitter) const;   // C85/C87, TB 0x35/0x37 (emitter 0 = any voice)
     // One mixer pass (0x41edb0 / 0x42ae60) heard from the camera eye looking at target.
     void mix(const V3& eye, const V3& target, const Where& where);
+    // TB pause (0x4014c0): 0x42b5c0 stops every playing buffer copy in place and records its blob, once per pause
+    // (rescanned each paused tick while nothing was recorded); 0x42b680 plays copy 0 of each recorded one-shot blob
+    // again (stopped copies resume where they stopped, idle ones from the start; the other copies stay stopped) and
+    // every looping instance, then clears the record.
+    void pauseAll();
+    void resumeAll();
 
 private:
-    struct Copy { uint8_t kind = 0; uint32_t start = 0; uint64_t len = 0; uint32_t rate = 1; };  // 1 once, 2 looping
+    // 1 once, 2 looping, 3 stopped in place (len = what is left); vol / pan = the buffer's last SetVolume / SetPan.
+    struct Copy { uint8_t kind = 0; uint32_t start = 0; uint64_t len = 0; uint32_t rate = 1; int32_t vol = 0, pan = 0; };
     struct Loop { uint16_t blob = 0; uint8_t pair = 0; int32_t emitter = 0; bool looping = false; };
     bool busy(const Copy& c) const { return c.kind == 2 || (c.kind == 1 && uint64_t(now_ - c.start) * c.rate < c.len); }
     std::array<uint8_t, 2> levels(const Voice& v, const SfxEntry& e, const Where& where, const V3& eye,
@@ -80,6 +88,7 @@ private:
     std::vector<std::array<Copy, 10>> copies_;  // per blob index: the exes' 10 DirectSound buffer copies
     std::vector<Loop> loops_;                    // 0x553200 / 0x5e56c0 looping instances (<= 10)
     uint32_t now_ = 0;                           // mixer passes
+    std::vector<uint16_t> paused_;               // 0x5e5900: blobs stopped by pauseAll
 };
 
 } // namespace bb::game

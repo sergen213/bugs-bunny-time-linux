@@ -70,7 +70,7 @@ Sfx synthetic(bool loop) {
 void testVoices() {
     const V3 eye{0, 0, 0}, tgt{0, 0, 1000};
     MsvcRand rand;
-    auto where = [](int32_t e, V3& p) {
+    auto where = [](int32_t e, uint16_t, V3& p) {
         if (e == 1) return true;
         p = e == 7 ? V3{1000, 0, 1000} : V3{9000, 0, 0};
         return false;
@@ -110,7 +110,7 @@ void testVoices() {
         s.mix(eye, tgt, where);  // tracking: same levels, volume to the instance
         assert(s.cmds.size() == 1 && s.cmds[0].op == SfxCmd::Volume && s.cmds[0].volume == -1313);
         s.cmds.clear();
-        s.mix(eye, tgt, [](int32_t, V3& p) { p = {9000, 0, 0}; return false; });
+        s.mix(eye, tgt, [](int32_t, uint16_t, V3& p) { p = {9000, 0, 0}; return false; });
         assert(!(s.voices[0].state & 0x8000) && s.cmds.empty());
         s.request(7, 5, 1, rand);  // same emitter again: no second instance, tracking resumes
         s.mix(eye, tgt, where);
@@ -126,6 +126,24 @@ void testVoices() {
         s.request(1, 6, 1, rand);  // chance 0x80 * 0x80 = 0x4000: plays when rand() >= 16384
         s.mix(eye, tgt, where);
         assert(s.voices[0].lv == (Lv{90, 90}) && s.cmds[0].pan == 0);
+    }
+    {  // TB pause (0x42b5c0 / 0x42b680): stopped in place, its voice freed, copy 0 resumes from where it stopped
+        Sfx s = synthetic(false);
+        s.request(7, 5, 1, rand);
+        s.mix(eye, tgt, where);
+        s.cmds.clear();
+        s.pauseAll();
+        assert(s.cmds.size() == 1 && s.cmds[0].op == SfxCmd::Pause && s.cmds[0].key == 10);
+        s.mix(eye, tgt, where);
+        assert(s.voices[0].state == 0);
+        s.cmds.clear();
+        s.pauseAll();  // recorded already: no rescan
+        assert(s.cmds.empty());
+        s.resumeAll();
+        assert(s.cmds.size() == 1 && s.cmds[0].op == SfxCmd::Resume && s.cmds[0].key == 10);
+        s.cmds.clear();
+        s.resumeAll();  // record cleared
+        assert(s.cmds.empty());
     }
 }
 

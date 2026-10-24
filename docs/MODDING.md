@@ -55,7 +55,7 @@ The launcher's **Mods** page lists installed mods: tick to enable, ▲ / ▼ to 
 and **the later one wins** when two mods provide the same file; the page lists those conflicts. The order is saved
 as `mods = a,b,c` in `settings.ini`. The game also takes `--mods a,b,c` (replaces the list) and `--no-mods`.
 Every applied override is logged once (`bbtime: mod override <key> <- <file>`, in the launcher's Logs page) and the
-F3 overlay shows `mods: N active, M overrides`.
+F7 overlay shows `mods: N active, M overrides`.
 
 Other buttons: **New mod…** (creates the folder, `mod.json` and the empty sub-folders), **Open folder**, **Install
 from .zip…** (an archive with `mod.json` at its root or in one top folder), **Remove**, **Export assets…**.

@@ -18,7 +18,14 @@ std::filesystem::path tbLevelTrack(const std::filesystem::path& gameRoot, int n)
 // Call once per frame with the wanted track (empty = silence). A new path restarts; the same path keeps streaming.
 // At its end `next` follows (looping); empty or equal `next` = the track loops. paused: the stream holds its position
 // (LiT 0x41d5c0). The OpenAL device opens on the first non-empty track, so --mute (always empty) stays silent.
-void playMusic(const std::filesystem::path& track, const std::filesystem::path& next = {}, bool paused = false);
+// size > 0 plays only bytes [offset, offset + size) of `track`, once (a LiT speech clip, LitWorld::speechClip).
+void playMusic(const std::filesystem::path& track, const std::filesystem::path& next = {}, bool paused = false,
+               uint64_t offset = 0, uint64_t size = 0);
+// LiT speech file 0x41e1e0: Datas/speeches/Speech<NN>.xa of config language NN (empty when this disc lacks it).
+std::filesystem::path litSpeechFile(const std::filesystem::path& gameRoot, int language);
+// TB speech file 0x42a030: Datas/SPEECH/<GD+0x93 as %.2d>/Speech<clip>.xa (empty when this disc lacks it: the exe then
+// times the clip instead, TbWorld::speechAudio false).
+std::filesystem::path tbSpeechFile(const std::filesystem::path& gameRoot, int language, int clip);
 // The shared device (opened on demand, nullptr if OpenAL has no device) for sound effects.
 bb::AudioDevice* audioDevice();
 

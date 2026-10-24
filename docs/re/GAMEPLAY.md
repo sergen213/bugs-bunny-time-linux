@@ -137,9 +137,11 @@ are level-triggered. Dead zone `DAT_004b3234 = 0x32` (50), set in `0x4474b0`. Wi
 the stick also sets D-pad bits (beyond the dead zone).
 
 Other input paths (O): **demo playback** when `G[0x0f] ≠ 0` (set by chunk 0x47 tag 0x48, stream at `DAT_004b249c`,
-4 u16 per tick = {+0x3e, +0x0e, +0x0c, +0x10}; a real Start press is turned into Select 0x100, *inferred* demo skip); `S[0x17]` (`0x4b2277`)
-∉ {0, 4} zeroes all words; input recording to a buffer (`/r:` switch, `DAT_004b1d04`); pad absent for 4 ticks → Start
-injected (PS1 "controller removed" pause); no pad processing while `DAT_004b3e48 ≠ 0` (loading) or without a player;
+4 u16 per tick = {+0x3e, +0x0e, +0x0c, +0x10}; a real Start press is turned into Select 0x100, *inferred* demo skip;
+no PC BZE carries one); `S[0x17]` (`0x4b2277`) ∉ {0, 4} zeroes all words; `/r:FILE` records and `/p:FILE` plays back
+report bytes 2 / 3 per pass (`DAT_004b1d04` 1 / 2, written at exit / loaded for a boot into level 0; R: RUNTIME_REFERENCE
+§30); pad absent for 4 ticks → Start injected (PS1 "controller removed" pause; dead code on PC: PadGetState 0x402fe0
+always returns 6); no pad processing while `DAT_004b3e48 ≠ 0` (loading) or without a player;
 all words zero while a level change is pending or the player is scripted (flags14 & 0x1000000) and not paused;
 frozen player (flags14 0x80000000 or camera flags 0x100) keeps only Start (player code). Rumble emulation `0x4b3240..46` → `PadSetAct` (no-op on PC).
 
@@ -899,7 +901,7 @@ GAME_DATA (LiT, `*(0x52fd00) + 0x10000`): +0 current level, +4 checksum, +0x0a..
 +0x1c fogDist, +0x30/+0x34 volumes (logic A122–A127 change them in steps of 10/5 and call WriteConfig `0x409a10`),
 +0x38 joystick enabled (C98), +0x3c joyMap[10], +0x46 kbdMap[16] (§2.1), +0x10/+0x14 resolution (A108/A114/A118),
 +0x18 fullscreen (A111). The configuration options (A102–A127, C92–C95) belong to the pause menu of every playable
-level (LOGIC.md); the title has none, and bbtime's own Options screen covers video and audio settings.
+level (LOGIC.md); the title has none. bbtime runs them and keeps the fields in settings.ini (RUNTIME_REFERENCE §30).
 
 ### 8.2 TB — O/H
 

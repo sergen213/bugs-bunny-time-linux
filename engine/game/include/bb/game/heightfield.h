@@ -42,9 +42,9 @@ public:
     const Zone* findZone(const V3& p, int hint) const;
     // GroundAt 0x436c20. Like the exe it overwrites p.y with the zone's y_bottom (open/wall/floor).
     void groundAt(V3& p, Ground& r) const;
-    // TraceGround 0x434cd0 (XZ move by dx/dz from p, y = p.y). Clamps dx/dz when blocked; overwrites p.y with
-    // the end zone's y_bottom. Implemented (approximation): sub-cell walk with the documented block rules, not
-    // the exe's DDA with its 15-entry history buffer.
+    // TraceGround 0x434cd0 (XZ move by dx/dz from p, y = p.y), transcribed: cell / sub-cell walk per axis branch
+    // with its 16-entry history. Clamps dx/dz when blocked or leaving every zone; overwrites p.y with the zone's
+    // y_bottom of the last entry (as the exe).
     void trace(V3& p, int32_t& dx, int32_t& dz, Ground& r) const;
 
     // Raw signed sub-cell byte at (x, z) in zone z (caller guarantees inside); cell word flags out.
@@ -53,7 +53,7 @@ public:
 private:
     std::vector<uint8_t> blk_;
     std::vector<Zone> zones_;
-    std::array<int, 0x3c> first_{};  // first record of each id (DAT_004b3c60), -1 = none
+    std::array<int, 0x3c> first_{};  // first record of each id (0x4b3c60), -1 = none
 };
 
 } // namespace bb::game

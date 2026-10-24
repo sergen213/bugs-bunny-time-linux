@@ -48,6 +48,32 @@ constexpr uint8_t kAdvance[256] = {
 } // namespace
 
 uint8_t LitWorld::fontGlyph(uint8_t c) { return kGlyph[c]; }
+
+std::string LitWorld::dikName(uint8_t code) {
+    // 0x45e030: 106 x {char name[32], u32 DIK code} (bugs.exe bytes), searched by 0x402250.
+    static constexpr std::pair<uint8_t, const char*> kDik[] = {
+        {1, "Esc"}, {59, "KEY_F1"}, {60, "KEY_F2"}, {61, "KEY_F3"}, {62, "KEY_F4"}, {63, "KEY_F5"}, {64, "KEY_F6"},
+        {65, "KEY_F7"}, {66, "KEY_F8"}, {67, "KEY_F9"}, {68, "KEY_F10"}, {87, "KEY_F11"}, {88, "KEY_F12"}, {183,
+        "KEY_SYSRQ"}, {70, "KEY_SCROLLLOCK"}, {41, "KEY_TICK"}, {2, "1"}, {3, "2"}, {4, "3"}, {5, "4"}, {6, "5"},
+        {7, "6"}, {8, "7"}, {9, "8"}, {10, "9"}, {11, "0"}, {12, "KEY_MINUS"}, {13, "KEY_EQUAL"}, {14,
+        "KEY_BACKSPACE"}, {210, "KEY_INSERT"}, {199, "KEY_HOME"}, {201, "KEY_PAGEUP"}, {69, "KEY_NUMLOCK"}, {181,
+        "KEY_PADSLASH"}, {55, "KEY_PADSTAR"}, {74, "KEY_PADMINUS"}, {15, "KEY_TAB"}, {16, "Q"}, {17, "W"}, {18,
+        "E"}, {19, "R"}, {20, "T"}, {21, "Y"}, {22, "U"}, {23, "I"}, {24, "O"}, {25, "P"}, {26, "KEY_LEFTBRACKET"},
+        {27, "KEY_RIGHTBRACKET"}, {43, "KEY_BACKSLASH"}, {211, "KEY_DELETE"}, {207, "KEY_END"}, {209,
+        "KEY_PAGEDOWN"}, {71, "KEY_PAD7"}, {72, "KEY_PAD8"}, {73, "KEY_PAD9"}, {78, "KEY_PADPLUS"}, {58,
+        "KEY_CAPSLOCK"}, {30, "A"}, {31, "S"}, {32, "D"}, {33, "F"}, {34, "G"}, {35, "H"}, {36, "J"}, {37, "K"},
+        {38, "L"}, {39, "KEY_SEMICOLON"}, {40, "KEY_APOSTROPHE"}, {28, "KEY_ENTER"}, {75, "KEY_PAD4"}, {76,
+        "KEY_PAD5"}, {77, "KEY_PAD6"}, {42, "KEY_LEFTSHIFT"}, {44, "Z"}, {45, "X"}, {46, "C"}, {47, "V"}, {48, "B"},
+        {49, "N"}, {50, "M"}, {51, "KEY_COMMA"}, {52, "KEY_PERIOD"}, {53, "KEY_SLASH"}, {54, "KEY_RIGHTSHIFT"},
+        {200, "KEY_UPARROW"}, {79, "KEY_PAD1"}, {80, "KEY_PAD2"}, {81, "KEY_PAD3"}, {156, "KEY_PADENTER"}, {29,
+        "KEY_LEFTCTRL"}, {219, "KEY_LEFTWINDOW"}, {56, "KEY_LEFTALT"}, {57, "KEY_SPACE"}, {184, "KEY_RIGHTALT"},
+        {220, "KEY_RIGHTWINDOW"}, {221, "KEY_KEYBOARDMOUSE"}, {157, "KEY_RIGHTCTRL"}, {203, "KEY_LEFTARROW"}, {208,
+        "KEY_DOWNARROW"}, {205, "KEY_RIGHTARROW"}, {82, "KEY_PAD0"}, {83, "KEY_PADPERIOD"}, {0, "NULL"}, {255, " "},
+        {4294967295, "*END*"}};
+    for (const auto& [c, n] : kDik)
+        if (c == code) return n;
+    return {};
+}
 uint8_t LitWorld::fontAdvance(uint8_t c) { return kAdvance[c]; }
 
 uint32_t LitWorld::overlay(uint16_t script, LitActor* resume) {

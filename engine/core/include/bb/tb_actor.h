@@ -20,7 +20,7 @@ Tod parseTbTod(std::span<const uint8_t> d);
 void applyTbFrame(AnimState& st, const Tod& tod, size_t frame);
 
 // Role-13 actor model `model` -> ActorModel objects/meshes (textures resolved against s.textures by the
-// "{level}/tex/{id}" names buildTbScene gives them; texture links show their start frame).
+// "{level}/tex/{id}" names buildTbScene gives them; texture-linked faces carry Mesh::textureAnim like the world's).
 ActorModel buildTbActorModel(const Scene& s, std::span<const uint8_t> model);
 
 // Adds every placed TB entity (chunks 0x07/0x0a/0x63) that links a role-1 rig and a role-13 model which

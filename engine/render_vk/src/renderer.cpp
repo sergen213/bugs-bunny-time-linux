@@ -73,7 +73,10 @@ constexpr uint32_t kUiFrag[] = {
 
 constexpr uint32_t kFrames = 2;
 constexpr uint32_t kNoSlot = UINT32_MAX;
-constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT; // ponytail: no D24 fallback; every desktop driver has D32
+// Depth attachments, the shadow map and the water's sampled depth copy: D32 float, else 24-bit depth (Vulkan requires
+// one of the two as a depth attachment); chosen per device in init (depthFormat_).
+constexpr VkFormatFeatureFlags kDepthFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                                VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 constexpr VkFormat kTexFormat = VK_FORMAT_R8G8B8A8_UNORM;
 constexpr VkBufferUsageFlags kStreamUsage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT; // + the Enhanced water's wave heights
@@ -97,10 +100,9 @@ struct Push3D {
 static_assert(sizeof(Push3D) == 128 && offsetof(Push3D, alphaRef) == 104);
 
 // Enhanced sun shadows (docs/ROADMAP.md "Ray tracing"). Neither exe has a dynamic light (LiT draws blob shadows, TB
-// none), so the sun is a choice made per level: 55° high, behind the level's opening camera (its yaw at the first
-// drawScene after uploadScene) and 35° to its right, so the opening view is front-lit and shadows fall away from the
-// camera, short and readable under the characters. ponytail: a per-level override table if some level's art
-// contradicts it.
+// none), so there is no original to port: the sun is placed per level by this rule: 55° high, behind the level's
+// opening camera (its yaw at the first drawScene after uploadScene) and 35° to its right, so the opening view is
+// front-lit and shadows fall away from the camera, short and readable under the characters.
 constexpr float kSunElevation = 0.96f, kSunSide = 0.6f; // radians
 constexpr float kShadowBrightness = 0.55f; // shadowed surfaces keep 55% of their (baked, vertex-lit) colour
 // Bugs-scale objects are a few hundred units tall (MODELS.md §3, both games); the effect sizes follow that unit.
@@ -383,7 +385,8 @@ VkImageView Renderer::newView(VkImage img, VkFormat fmt, VkImageAspectFlags aspe
     return v;
 }
 
-// Render target with its own allocation. ponytail: no LAZILY_ALLOCATED memory (tilers only; desktop GPUs lack it).
+// Render target with its own allocation. Transient attachments (MSAA colour / depth) take lazily allocated memory
+// where the device has it (tile-based GPUs), plain device-local memory otherwise.
 Renderer::Image Renderer::makeTarget(VkFormat fmt, VkSampleCountFlagBits samples, VkImageUsageFlags usage) {
     Image im;
     im.img = newImage(extent_.width, extent_.height, fmt, samples, usage, 1);
@@ -391,10 +394,14 @@ Renderer::Image Renderer::makeTarget(VkFormat fmt, VkSampleCountFlagBits samples
     vkGetImageMemoryRequirements(device_, im.img, &r);
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = r.size;
-    ai.memoryTypeIndex = memoryType(r.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    constexpr VkMemoryPropertyFlags kLazy = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
+    bool lazy = false;
+    for (uint32_t i = 0; (usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) && i < memProps_.memoryTypeCount; ++i)
+        lazy |= (r.memoryTypeBits & (1u << i)) && (memProps_.memoryTypes[i].propertyFlags & kLazy) == kLazy;
+    ai.memoryTypeIndex = memoryType(r.memoryTypeBits, lazy ? kLazy : VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
     check(vkAllocateMemory(device_, &ai, nullptr, &im.mem), "vkAllocateMemory(target)");
     check(vkBindImageMemory(device_, im.img, im.mem, 0), "vkBindImageMemory");
-    const bool depth = fmt == kDepthFormat;
+    const bool depth = fmt == depthFormat_;
     im.view = newView(im.img, fmt, depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 1);
     return im;
 }
@@ -590,6 +597,7 @@ Renderer::~Renderer() {
         for (auto& row : pipe3D_)
             for (VkPipeline p : row) vkDestroyPipeline(device_, p, nullptr);
         for (VkPipeline p : pipe2D_) vkDestroyPipeline(device_, p, nullptr);
+        for (VkPipeline p : pipe2DMul_) vkDestroyPipeline(device_, p, nullptr);
         for (auto& kind : pipeLit_)
             for (auto& mv : kind)
                 for (auto& row : mv)
@@ -694,6 +702,13 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
         }
     }
     if (!gpu_) return "no Vulkan 1.3 device with dynamic rendering, synchronization2, descriptor indexing and presentation";
+    depthFormat_ = VK_FORMAT_UNDEFINED;
+    for (const VkFormat f : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_X8_D24_UNORM_PACK32}) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(gpu_, f, &fp);
+        if ((fp.optimalTilingFeatures & kDepthFeatures) == kDepthFeatures) { depthFormat_ = f; break; }
+    }
+    if (depthFormat_ == VK_FORMAT_UNDEFINED) return "no sampled depth format (D32 / D24) on this device";
 
     VkPhysicalDeviceVulkan12Properties p12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
     VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &p12};
@@ -903,7 +918,7 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
         // Shadow map: kCascades layers of D32, sampled as one array.
         VkImageCreateInfo ic{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ic.imageType = VK_IMAGE_TYPE_2D;
-        ic.format = kDepthFormat;
+        ic.format = depthFormat_;
         ic.extent = {kShadowSize, kShadowSize, 1};
         ic.mipLevels = 1;
         ic.arrayLayers = kCascades;
@@ -920,7 +935,7 @@ std::string Renderer::init(const WindowConfig& cfg, bool validation) try {
         VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         vc.image = shadowMap_.img;
         vc.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-        vc.format = kDepthFormat;
+        vc.format = depthFormat_;
         vc.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, kCascades};
         check(vkCreateImageView(device_, &vc, nullptr, &shadowMap_.view), "vkCreateImageView(shadow)");
         vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -1072,11 +1087,13 @@ void Renderer::createPipelines() {
         b.colorWriteMask = 0xF;
         return b;
     };
-    const VkPipelineColorBlendAttachmentState blends[4] = {
+    VkPipelineColorBlendAttachmentState blends[5] = {
         blend(false, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD),                // Opaque + AlphaTest
         blend(true, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD),  // Alpha (and the 2D layer)
         blend(true, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD),                  // Additive
-        blend(true, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_REVERSE_SUBTRACT)};    // Subtract: dst - src
+        blend(true, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_REVERSE_SUBTRACT),     // Subtract: dst - src
+        blend(true, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD)};                // 2D multiply: dst · src
+    blends[4].srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
 
     // shadow: depth-only caster pass into a shadow-map layer (no culling, slope-scaled depth bias). inputs: scene vertex
     // bindings (1 Vertex, 2 + normals, 3 + previous positions = motion vectors into a second colour attachment).
@@ -1129,7 +1146,7 @@ void Renderer::createPipelines() {
         const VkFormat formats[3] = {swapFormat_, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8_UNORM};
         ri.colorAttachmentCount = shadow ? 0 : mv ? 3 : 1;
         ri.pColorAttachmentFormats = formats;
-        ri.depthAttachmentFormat = kDepthFormat;
+        ri.depthAttachmentFormat = depthFormat_;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
         ci.stageCount = 2;
         ci.pStages = st;
@@ -1155,6 +1172,7 @@ void Renderer::createPipelines() {
             if (rt_) pipeLit_[2][0][m][b] = make(lv, rf, false, b, samples, false, 2);
         }
         pipe2D_[m] = make(uv, uf, true, 1, samples);
+        pipe2DMul_[m] = make(uv, uf, true, 4, samples);
     }
     for (int b = 0; fsrOk_ && b < 4; ++b) { // FSR renders without MSAA
         pipeLit_[0][1][0][b] = make(vv, vf, false, b, VK_SAMPLE_COUNT_1_BIT, false, 3);
@@ -1237,10 +1255,10 @@ void Renderer::recreateSwapchain() {
         check(vkCreateSemaphore(device_, &sci, nullptr, &presentReady_.emplace_back()), "vkCreateSemaphore");
     }
     // TRANSFER_SRC: the Enhanced water copies the opaque scene's depth (drawScene).
-    depth_ = makeTarget(kDepthFormat, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    depth_ = makeTarget(depthFormat_, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (msaaMax_ > VK_SAMPLE_COUNT_1_BIT) {
         msaaColor_ = makeTarget(swapFormat_, msaaMax_, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
-        msaaDepth_ = makeTarget(kDepthFormat, msaaMax_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
+        msaaDepth_ = makeTarget(depthFormat_, msaaMax_, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT);
     }
     swapDirty_ = false;
 }
@@ -1285,16 +1303,22 @@ void Renderer::addMeshes(std::span<const Mesh> ms, bool actor, size_t casters, s
         }
         const uint32_t tex = m.texture >= 0 && size_t(m.texture) < texSlot_.size() ? texSlot_[size_t(m.texture)] : kSlotWhite;
         const bool animOk = m.textureAnim >= 0 && size_t(m.textureAnim) < texAnims_.size() && !texAnims_[size_t(m.textureAnim)].frames.empty();
-        // Sun shadows: TB sky domes (tb_level.cpp "sky…" groups) and HUD models neither cast nor receive; additive /
+        // Sun shadows: TB sky domes (Mesh::background) and HUD models neither cast nor receive; additive /
         // subtractive glows only add light; translucent surfaces receive but do not cast.
-        const bool world = actor ? i < casters : !m.name.starts_with("sky");
+        const bool world = !m.background && (actor ? i < casters : !m.name.starts_with("sky"));
         const bool solid = m.blend == Blend::Opaque || m.blend == Blend::AlphaTest;
         meshes_.push_back({tex, m.blend, m.twoSided, actor, world && solid, world && (solid || m.blend == Blend::Alpha), int32_t(verts.size()),
                            uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, animOk ? m.textureAnim : -1, 0,
                            // FSR reactive: LiT type-4 sprite effects (apps/bbtime poseActors names them) and animated textures
                            (actor && m.name == "sprite") || animOk, m.zone, false});
         meshes_.back().late = m.late;
+        meshes_.back().background = m.background;
+        meshes_.back().farClip = m.farClip;
+        meshes_.back().fogEnd = m.fogEnd;
         meshes_.back().tris = render::triCentroids(m);
+        meshes_.back().unitUv = std::ranges::all_of(m.vertices, [](const Vertex& v) {
+            return v.uv[0] >= -1e-4f && v.uv[0] <= 1.0001f && v.uv[1] >= -1e-4f && v.uv[1] <= 1.0001f;
+        });
         if (actor) actorLayout_.push_back(uint32_t(m.vertices.size()));
         if (!actor && world && solid) {
             casterLo_ = glm::min(casterLo_, lo);
@@ -1775,6 +1799,11 @@ void Renderer::uploadScene(const Scene& scene) {
                              surface ? ", static surface layer (no hole fill)" : openSea ? ", open sea" : "");
         }
         water.insert(water.end(), slopeTris.begin(), slopeTris.end());
+        const size_t layerTris = water.size();  // the level's own water (the fills append after it)
+        Mesh fill;
+        fill.name = "water fill";
+        fill.blend = Blend::Alpha;  // neither a caster nor in the opaque pass
+        glm::vec4 fillTint(0.0f);
         if (seaTotal > 0.0f && pLo.x <= pHi.x) {
             const float y = 10.0f * float(std::ranges::max_element(seaArea, {}, &std::pair<const int, float>::second)->first);
             const glm::u8vec3 c(glm::round(seaColor / seaTotal));
@@ -1812,9 +1841,6 @@ void Renderer::uploadScene(const Scene& scene) {
                 const auto o = own.height(p), b = beds.height(p);
                 return (o && std::abs(*o - y) < 20.0f) || sheens.height(p) || (g && b && std::abs(*g - *b) < 10.0f);
             };
-            Mesh fill;
-            fill.name = "water fill";
-            fill.blend = Blend::Alpha;  // neither a caster nor in the opaque pass
             auto quad = [&](glm::vec2 a, glm::vec2 b) {
                 const uint32_t n = uint32_t(fill.vertices.size());
                 for (const glm::vec2& q : {a, glm::vec2(b.x, a.y), b, glm::vec2(a.x, b.y)})
@@ -1862,12 +1888,8 @@ void Renderer::uploadScene(const Scene& scene) {
                 quad({cHi.x, cLo.y}, {cHi.x + far, cHi.y});
             }
             if (!fill.indices.empty()) {
-                addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
-                meshes_.back().water = true;
                 const int bin = int(std::lround(y / 10.0f));  // the fill: the water at its height's mean tint
-                meshes_.back().tint = glm::packUnorm4x8(seaTint[bin] / seaArea[bin]);
-                seaFill_ = meshes_.size() - 1;
-                sceneMeshCount_ = meshes_.size();
+                fillTint = seaTint[bin] / seaArea[bin];
             }
             if (std::getenv("BBTIME_VK_MATERIALS")) {
                 // Flood check: ground below the fill under it where it is not water already, on a 37.5-unit grid (the
@@ -1883,6 +1905,52 @@ void Renderer::uploadScene(const Scene& scene) {
                 std::println(stderr, "sea plane y {:.0f} {} rim {:.2f} quads {} | flooded ground {:.1f} char^2 | ground box {:.0f} {:.0f} .. {:.0f} {:.0f}", y,
                              sea ? "sea (horizon)" : "local", rim, fill.indices.size() / 6, flooded / (kCharUnit * kCharUnit), cLo.x, cLo.y, cHi.x, cHi.y);
             }
+        }
+        // TB water zones (Scene::waterZones, the exe's 0x1000 trigger zones): the game measures depth from their top, so
+        // a zone holding the level's own water layers (within 100 units of its top) is open water there even where
+        // the game draws only scattered additive patches over the bed (Granny pond): its top rectangle joins the fill,
+        // at the surface Bugs swims in. Zones over pits or without layers (kill / trigger volumes) are left alone.
+        for (const auto& z : scene.waterZones) {
+            const float zy = z[0][1];
+            auto inside = [&](glm::vec2 p) {  // convex quad, either winding
+                int pos = 0, neg = 0;
+                for (size_t k = 0; k < 4; ++k) {
+                    const glm::vec2 a(z[k][0], z[k][2]), b(z[(k + 1) % 4][0], z[(k + 1) % 4][2]);
+                    const float cr = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+                    pos += cr > 0.0f, neg += cr < 0.0f;
+                }
+                return !pos || !neg;
+            };
+            bool held = false;
+            for (size_t i = 0; i + 2 < layerTris && !held; i += 3) {
+                const glm::vec3 c = (water[i] + water[i + 1] + water[i + 2]) / 3.0f;
+                held = std::abs(c.y - zy) < 100.0f && inside({c.x, c.z});
+            }
+            if (!held) continue;
+            if (fill.indices.empty()) {  // no sea fill: the tint of the layers at the zone's height
+                glm::vec4 t(0.0f);
+                float a = 0.0f;
+                for (const auto& [bin, area] : seaArea)
+                    if (std::abs(10.0f * float(bin) - zy) < 100.0f) t += seaTint[bin], a += area;
+                fillTint = a > 0.0f ? t / a : glm::vec4(0.0f);
+            }
+            const uint32_t n = uint32_t(fill.vertices.size());
+            const glm::u8vec3 c(glm::round(seaColor / std::max(seaTotal, 1e-6f)));
+            for (const auto& q : z) fill.vertices.push_back({.pos = {q[0], zy, q[2]}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
+            const glm::vec3 e1(z[1][0] - z[0][0], 0.0f, z[1][2] - z[0][2]), e2(z[3][0] - z[0][0], 0.0f, z[3][2] - z[0][2]);
+            const bool up = glm::cross(e1, e2).y > 0.0f;  // facing up
+            for (uint32_t k : up ? std::initializer_list<uint32_t>{0, 1, 2, 0, 2, 3} : std::initializer_list<uint32_t>{0, 2, 1, 0, 3, 2})
+                fill.indices.push_back(n + k);
+            for (uint32_t k : {0u, 1u, 2u, 0u, 2u, 3u}) water.push_back({z[k][0], zy, z[k][2]});
+            if (std::getenv("BBTIME_VK_MATERIALS"))
+                std::println(stderr, "water zone fill y {:.0f} ({:.0f} {:.0f} .. {:.0f} {:.0f})", zy, z[0][0], z[0][2], z[2][0], z[2][2]);
+        }
+        if (!fill.indices.empty()) {
+            addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
+            meshes_.back().water = true;
+            meshes_.back().tint = glm::packUnorm4x8(fillTint);
+            seaFill_ = meshes_.size() - 1;
+            sceneMeshCount_ = meshes_.size();
         }
         waterSurf_.build(water, ground);
         waves_.reset();
@@ -2080,7 +2148,7 @@ Renderer::Image Renderer::makeImage(VkExtent2D ext, VkFormat fmt, VkImageUsageFl
     ai.memoryTypeIndex = memoryType(r.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     check(vkAllocateMemory(device_, &ai, nullptr, &im.mem), "vkAllocateMemory(FSR)");
     check(vkBindImageMemory(device_, im.img, im.mem, 0), "vkBindImageMemory(FSR)");
-    im.view = newView(im.img, fmt, fmt == kDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    im.view = newView(im.img, fmt, fmt == depthFormat_ ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 1);
     return im;
 }
 
@@ -2114,7 +2182,7 @@ void Renderer::updateFsr(const Settings& s) {
     fsrColor_ = makeImage(fsrRender_, swapFormat_, kFsrInput);
     fsrMotion_ = makeImage(fsrRender_, VK_FORMAT_R16G16_SFLOAT, kFsrInput);
     fsrReactive_ = makeImage(fsrRender_, VK_FORMAT_R8_UNORM, kFsrInput);
-    fsrDepth_ = makeImage(fsrRender_, kDepthFormat, kFsrDepth);
+    fsrDepth_ = makeImage(fsrRender_, depthFormat_, kFsrDepth);
     fsrDilatedDepth_ = makeImage(fsrRender_, VK_FORMAT_R32_SFLOAT, kFsrShared);
     fsrDilatedMotion_ = makeImage(fsrRender_, VK_FORMAT_R16G16_SFLOAT, kFsrShared);
     fsrPrevDepth_ = makeImage(fsrRender_, VK_FORMAT_R32_UINT, kFsrShared);
@@ -2163,7 +2231,7 @@ void Renderer::fsrResolve(const Settings& s) {
     u.color = img(fsrColor_, swapFormat_, fsrRender_, kFsrInput);
     u.motion = img(fsrMotion_, VK_FORMAT_R16G16_SFLOAT, fsrRender_, kFsrInput);
     u.reactive = img(fsrReactive_, VK_FORMAT_R8_UNORM, fsrRender_, kFsrInput);
-    u.depth = img(fsrDepth_, kDepthFormat, fsrRender_, kFsrDepth);
+    u.depth = img(fsrDepth_, depthFormat_, fsrRender_, kFsrDepth);
     u.dilatedDepth = img(fsrDilatedDepth_, VK_FORMAT_R32_SFLOAT, fsrRender_, kFsrShared);
     u.dilatedMotion = img(fsrDilatedMotion_, VK_FORMAT_R16G16_SFLOAT, fsrRender_, kFsrShared);
     u.prevDepth = img(fsrPrevDepth_, VK_FORMAT_R32_UINT, fsrRender_, kFsrShared);
@@ -2222,25 +2290,31 @@ void Renderer::setWaterBodies(std::span<const render::WaterBody> bodies, float d
     waterTime_ += dt;
 }
 
-// The copies of the opaque scene the water refracts (render-target size ext): colour (swapchain format) and depth.
+// The copies of the opaque scene the water refracts (render-target size ext): colour (swapchain format) and depth;
+// the backdrop the Enhanced fog fades into.
 // Recreated (after the GPU idles) only when the size changes.
 void Renderer::waterTargets(VkExtent2D ext) {
     if (waterColorSlot_ != kNoWater && waterExtent_.width == ext.width && waterExtent_.height == ext.height) return;
     waitIdle();
-    for (uint32_t* s : {&waterColorSlot_, &waterDepthSlot_})
+    for (uint32_t* s : {&waterColorSlot_, &waterDepthSlot_, &backdropSlot_})
         if (*s != kNoWater) freeSlot(std::exchange(*s, kNoWater));
     Image c = makeImage(ext, swapFormat_, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    Image d = makeImage(ext, kDepthFormat, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    Image b = makeImage(ext, swapFormat_, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    Image d = makeImage(ext, depthFormat_, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
     VkCommandBuffer cb = beginOneShot();
-    for (const auto& [img, aspect] : {std::pair{c.img, VK_IMAGE_ASPECT_COLOR_BIT}, std::pair{d.img, VK_IMAGE_ASPECT_DEPTH_BIT}})
+    for (const auto& [img, aspect] : {std::pair{c.img, VK_IMAGE_ASPECT_COLOR_BIT}, std::pair{d.img, VK_IMAGE_ASPECT_DEPTH_BIT},
+                                      std::pair{b.img, VK_IMAGE_ASPECT_COLOR_BIT}})
         imageBarrier(cb, img, aspect, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     endOneShot(cb);
     waterColorSlot_ = allocSlot(c.view);
     waterDepthSlot_ = allocSlot(d.view);
-    if (waterColorSlot_ == kNoWater || waterDepthSlot_ == kNoWater) throw std::runtime_error("bindless table full (water copies)");
+    backdropSlot_ = allocSlot(b.view);
+    if (waterColorSlot_ == kNoWater || waterDepthSlot_ == kNoWater || backdropSlot_ == kNoWater)
+        throw std::runtime_error("bindless table full (water / backdrop copies)");
     slots_[waterColorSlot_] = c;
     slots_[waterDepthSlot_] = d;
+    slots_[backdropSlot_] = b;
     waterExtent_ = ext;
 }
 
@@ -2253,16 +2327,10 @@ void Renderer::waterCopy(VkImage color, VkImage depth, bool depthResolved) {
                    FRAG = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     constexpr auto DEPTH = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     constexpr auto SRC = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DST = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, READ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    const VkImage wc = slots_[waterColorSlot_].img, wd = slots_[waterDepthSlot_].img;
+    const VkImage wd = slots_[waterDepthSlot_].img;
     const VkExtent3D ext{waterExtent_.width, waterExtent_.height, 1};
-    imageBarrier(cb, color, C, 0, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SRC, COLOR_OUT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, COPY,
-                 VK_ACCESS_2_TRANSFER_READ_BIT);
-    imageBarrier(cb, wc, C, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, DST, FRAG, 0, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    copyColor(color, slots_[waterColorSlot_].img);
     VkImageCopy rc{{C, 0, 0, 1}, {}, {C, 0, 0, 1}, {}, ext};
-    vkCmdCopyImage(cb, color, SRC, wc, DST, 1, &rc);
-    imageBarrier(cb, wc, C, 0, 1, DST, READ, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    imageBarrier(cb, color, C, 0, 1, SRC, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, COPY, 0, COLOR_OUT,
-                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     if (depthResolved) { // multisample resolves synchronise as colour attachment writes
         imageBarrier(cb, wd, D, 0, 1, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, READ, COLOR_OUT | DEPTH,
                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -2280,6 +2348,23 @@ void Renderer::waterCopy(VkImage color, VkImage depth, bool depthResolved) {
     memoryBarrier(cb, COLOR_OUT | DEPTH, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, COLOR_OUT | DEPTH,
                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+}
+
+// Copies the colour target `color` (render-target size) into the sampled image dst; color stays an attachment.
+void Renderer::copyColor(VkImage color, VkImage dst) {
+    VkCommandBuffer cb = frames_[frame_].cmd;
+    constexpr auto C = VK_IMAGE_ASPECT_COLOR_BIT;
+    constexpr auto COLOR_OUT = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, COPY = VK_PIPELINE_STAGE_2_COPY_BIT,
+                   FRAG = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    constexpr auto SRC = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DST = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, READ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageBarrier(cb, color, C, 0, 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SRC, COLOR_OUT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, COPY,
+                 VK_ACCESS_2_TRANSFER_READ_BIT);
+    imageBarrier(cb, dst, C, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, DST, FRAG, 0, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    const VkImageCopy rc{{C, 0, 0, 1}, {}, {C, 0, 0, 1}, {}, {waterExtent_.width, waterExtent_.height, 1}};
+    vkCmdCopyImage(cb, color, SRC, dst, DST, 1, &rc);
+    imageBarrier(cb, dst, C, 0, 1, DST, READ, COPY, VK_ACCESS_2_TRANSFER_WRITE_BIT, FRAG, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(cb, color, C, 0, 1, SRC, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, COPY, 0, COLOR_OUT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
 // One frame of the wave field: it follows the view (a quarter window ahead of the camera), the bodies of
@@ -2301,7 +2386,7 @@ bool Renderer::waterWaves(const Camera& cam, glm::vec4& field) {
         const glm::vec3 prev = std::exchange(t.feet, b.feet);
         t.seen = true;
         const glm::vec2 xz(b.feet.x, b.feet.z);
-        const std::optional<float> h = waterSurf_.height(xz);
+        const std::optional<float> h = b.surface ? b.surface : waterSurf_.height(xz);
         if (!h || !known || dt <= 0.0f) continue;
         // Falling through the surface (faster than 300 units/s: not standing on something floating at the waterline): a
         // splash by the fall speed.
@@ -2396,19 +2481,33 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     auto shown = [&](const GpuMesh& m) { return !zoned || m.zone < 0 || zoneDrawn_[size_t(m.zone)]; };
     bool water = false; // this frame draws stylised water: the opaque scene is copied for it
     for (size_t i = 0; waterOn_ && i < sceneMeshCount_ && !water; ++i) water = meshes_[i].water && shown(meshes_[i]);
-    if (water) waterTargets(fsr ? fsrRender_ : extent_);
+    // Enhanced fog fades into the backdrop (BBLIT-Remaster: per pixel to the sky behind, not a flat colour): the
+    // background layer (TB domes, LiT's type-9 sky in Enhanced) is copied before the world draws over it.
+    const bool anyBack = std::ranges::any_of(meshes_, [&](const GpuMesh& m) { return m.background && shown(m); });
+    const bool backdrop = enhanced && s.fog && s.fogEnd > s.fogStart && anyBack && (fsr || swapReadable_);
+    if (water || backdrop) waterTargets(fsr ? fsrRender_ : extent_);
     const bool lightSet = lit || fsr || water; // set 1 (LightUbo) bound, smooth normals streamed
-    pc.viewProj = viewProj;
     float jitter[2] = {0.0f, 0.0f};
+    glm::mat4 jit(1.0f);
     if (fsr) { // sub-pixel jitter of FSR's sequence, as a clip-space translation (NDC y up = pixel y down)
         Fsr::jitter(fsrFrame_++, fsrRender_, fsrDisplay_, jitter[0], jitter[1]);
         fsrJitter_[0] = jitter[0];
         fsrJitter_[1] = jitter[1];
-        const glm::mat4 j = glm::translate(glm::mat4(1.0f), glm::vec3(2.0f * jitter[0] / float(vp.w), -2.0f * jitter[1] / float(vp.h), 0.0f));
-        pc.viewProj = clipFix * j * proj * view;
+        jit = glm::translate(glm::mat4(1.0f), glm::vec3(2.0f * jitter[0] / float(vp.w), -2.0f * jitter[1] / float(vp.h), 0.0f));
     }
+    pc.viewProj = clipFix * jit * proj * view;
+    // The background layer's far plane: a TB dome with Mesh::farClip (0x465710 flag 0x2000000) clips at 64000, any
+    // other at the world's zFar.
+    const glm::mat4 viewProjMain = pc.viewProj;
+    const glm::mat4 viewProjBack = clipFix * jit * render::projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, std::max(s.zFar, 64000.0f)) * view;
     pc.viewZ = glm::vec4(view[0][2], view[1][2], view[2][2], view[3][2]);
     pc.fogColorScale = glm::vec4(s.fogColor[0], s.fogColor[1], s.fogColor[2], s.colorScale(colorScale_));
+    // scene.frag bit 13: the fog colour is the backdrop copy (bindless slot in r); bit 14 ground haze: g its top, b the
+    // horizon's screen v (camera pitch; no roll), the background's band below it in fog (0..5 degrees).
+    const bool haze = backdrop && s.haze > 0.0f;
+    const float tanHalf = std::tan(s.vfovRad() * 0.5f);
+    const float horizonV = 0.5f + 0.5f * std::tan(cam.pitch) / tanHalf, hazeBand = std::tan(5.0f * std::numbers::pi_v<float> / 180.0f) * 0.5f / tanHalf;
+    if (backdrop) pc.fogColorScale = glm::vec4(float(backdropSlot_), s.hazeTop, horizonV, pc.fogColorScale.a);
     pc.texGamma = s.texGamma(texGamma_);
     pc.fog = s.fog ? glm::vec2(s.fogStart, s.fogEnd) : glm::vec2(0.0f);
     pc.samp = original ? (linearOriginal_ ? kSampLinear : kSampNearest) : kSampTrilinear;
@@ -2476,7 +2575,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         if (water) {
             L.invViewProj = glm::inverse(pc.viewProj);
             waterWaves(cam, L.waves);
-            L.water = glm::vec4(waterTime_, 1.0f / float(waterExtent_.width), 1.0f / float(waterExtent_.height), cartoon ? 1.0f : 0.0f);
+            // w: 1 = cartoon, + 2 = a background layer (TB sky dome) is drawn: the water reflects / fades into it
+            const bool bgLayer = std::ranges::any_of(meshes_, [&](const GpuMesh& m) { return m.background && shown(m); });
+            L.water = glm::vec4(waterTime_, 1.0f / float(waterExtent_.width), 1.0f / float(waterExtent_.height), (cartoon ? 1.0f : 0.0f) + (bgLayer ? 2.0f : 0.0f));
             L.waterSlots = glm::uvec4(waterColorSlot_, waterDepthSlot_, waveSlot_, waterNormalSlot_);
         }
 
@@ -2697,6 +2798,12 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     // tri / tris: a run of the mesh's triangles (bugs.exe sorted pass); ref: alpha-test reference of a blended mesh;
     // zw: depth writes of a blended mesh (pc_order.h).
     auto draw = [&](const GpuMesh& m, bool stylised = true, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f, bool zw = false) {
+        uint32_t tex = m.texture;
+        if (m.textureAnim >= 0) {
+            const TexAnim& a = texAnims_[size_t(m.textureAnim)];
+            const int32_t lt = size_t(m.textureAnim) < linkTex_.size() ? linkTex_[size_t(m.textureAnim)] : -1;
+            tex = lt < 0 ? a.frames[(a.start + texTick_ / a.hold) % a.frames.size()] : size_t(lt) < texSlot_.size() ? texSlot_[size_t(lt)] : kSlotWhite;
+        }
         // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
         // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
         const bool pcSub = original && m.blend == Blend::Subtract;
@@ -2709,6 +2816,10 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         const VkPipeline p = fsr ? pipeLit_[kind][1][0][b] : kind == 0 ? pipe3D_[msaaOn_][b] : pipeLit_[kind][0][msaaOn_][b];
         if (p != bound) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
         bindGeom(m);
+        if (m.background) {
+            const glm::mat4& vpm = m.farClip > 0.0f ? viewProjBack : viewProjMain;
+            if (pc.viewProj != vpm) pc.viewProj = vpm, vkCmdPushConstants(cb, layout_, kPushStages, 0, sizeof pc.viewProj, &pc.viewProj);
+        }
         vkCmdSetCullMode(cb, m.twoSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
         vkCmdSetDepthWriteEnable(cb, b == 0 || zw);
         pc.alphaRef = m.blend == Blend::AlphaTest ? 0.5f : ref;
@@ -2719,21 +2830,70 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         if (m.reactive) pc.flags |= 32u;
         if (w) pc.flags = 128u, pc.material = m.tint, pc.alphaRef = -1.0f;  // stylised water: material = the original's colour
         if (original && linearOriginal_) pc.flags |= 256u;  // scene.vert: bugs.exe's screen-linear eye depth
-        if (m.textureAnim >= 0) {
-            const TexAnim& a = texAnims_[size_t(m.textureAnim)];
-            pc.tex = a.frames[(a.start + texTick_ / a.hold) % a.frames.size()];
-        } else {
-            pc.tex = m.texture;
-        }
-        vkCmdPushConstants(cb, layout_, kPushStages, offsetof(Push3D, alphaRef), sizeof(Push3D) - offsetof(Push3D, alphaRef), &pc.alphaRef);
+        if (original && m.background) pc.flags |= 512u;     // scene.vert: bblit2.exe's CPU projection (sky domes)
+        pc.tex = tex;
+        if (!w && !original && m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && m.unitUv) pc.flags |= 4096u;
+        if (backdrop && !m.background) pc.flags |= 8192u;
+        if (haze) pc.flags |= 16384u | (m.background ? 32768u : 0u) | uint32_t(std::lround(s.haze * 100.0f)) << 16;
+        // Fog: none on the background layer (TB has no fog; the dome sits beyond any fog range), Mesh::fogEnd in
+        // Original Fidelity (LiT per-object D), else the scene's.
+        pc.fog = haze && m.background                   ? glm::vec2(horizonV, hazeBand)
+                 : !s.fog || m.background                 ? glm::vec2(0.0f)
+                 : original && m.fogEnd > 0.0f ? glm::vec2(0.75f * m.fogEnd, m.fogEnd)
+                                               : glm::vec2(s.fogStart, s.fogEnd);
+        vkCmdPushConstants(cb, layout_, kPushStages, offsetof(Push3D, fog), sizeof(Push3D) - offsetof(Push3D, fog), &pc.fog);
         vkCmdDrawIndexed(cb, std::min(m.indexCount - 3 * tri, 3 * tris), 1, m.firstIndex + 3 * tri, m.baseVertex, 0);
         ++drawCalls_;
     };
-    // Same passes as the GL renderer: opaque, alpha-tested (depth-writing, unsorted), then translucent
-    // back-to-front by mesh centre without depth writes.
+    // Translucent meshes per polygon back to front by mean eye z, the order bugs.exe draws its blended polygons in
+    // (0x413440, pc_order.h), without depth writes; LiT Original Fidelity: bugs.exe's whole blended pass, untextured
+    // faces first, then layer 1 sorted per triangle, then layer 2 (Mesh::late), all depth-writing, alpha test GREATER 0
+    // except the sorted part.
+    const bool pcOrder = original && linearOriginal_;
+    auto blendedPass = [&](const std::vector<const GpuMesh*>& list) {
+        constexpr float kGreater0 = 0.5f / 255.0f;
+        auto apart = [&](const GpuMesh& m) { return pcOrder && ((m.texture == kSlotWhite && m.textureAnim < 0) || m.late); };
+        for (const GpuMesh* m : list)
+            if (pcOrder && m->texture == kSlotWhite && m->textureAnim < 0 && !m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
+        std::vector<render::PcTri> tris;
+        const glm::vec4 zRow(view[0][2], view[1][2], view[2][2], view[3][2]);  // eye-space z of a world point
+        for (uint32_t i = 0; i < list.size(); ++i) {
+            if (apart(*list[i])) continue;
+            for (uint32_t t = 0; t < list[i]->tris.size(); ++t) tris.push_back({glm::dot(zRow, glm::vec4(list[i]->tris[t], 1.0f)), i, t});
+        }
+        render::drawPcSorted(tris, [&](uint32_t i, uint32_t t, uint32_t n) { draw(*list[i], false, t, n, -1.0f, pcOrder); });
+        for (const GpuMesh* m : list)
+            if (pcOrder && m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
+    };
+    // TB OT layer 0 (Mesh::background, 0x422eb0): the sky domes first, then the depth clear, so the world and the
+    // Enhanced sea draw over them at any distance.
+    if (anyBack) {
+        for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
+            for (const GpuMesh& m : meshes_)
+                if (m.blend == pass && m.background && shown(m)) draw(m, false);
+        std::vector<const GpuMesh*> back;
+        for (const GpuMesh& m : meshes_)
+            if (m.background && m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) back.push_back(&m);
+        blendedPass(back);
+        if (backdrop) {  // the backdrop alone, for the fog (the pass resumes as the water's does)
+            vkCmdEndRendering(cb);
+            passOpen_ = false;
+            copyColor(fsr ? fsrColor_.img : target_, slots_[backdropSlot_].img);
+            if (fsr) beginFsr(true);
+            else beginPass(false, water, true);
+        }
+        VkClearAttachment clear{VK_IMAGE_ASPECT_DEPTH_BIT};
+        clear.clearValue.depthStencil = {1.0f, 0};
+        const VkClearRect clearRect{rect, 0, 1};
+        vkCmdClearAttachments(cb, 1, &clear, 1, &clearRect);
+        pc.viewProj = viewProjMain;
+        vkCmdPushConstants(cb, layout_, kPushStages, 0, sizeof pc, &pc);
+    }
+    // Same passes as the GL renderer: opaque, alpha-tested (depth-writing, unsorted), then the translucent ones.
     for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
         for (const GpuMesh& m : meshes_)
-            if (m.blend == pass && shown(m) && !(water && m.water)) draw(m);
+            if (m.blend == pass && !m.background && shown(m) && !(water && m.water)) draw(m);
+    auto blendedHere = [&](const GpuMesh& m) { return !m.background && shown(m) && !(water && (m.water || m.sheen) && !m.surf) && &m != fill; };
     if (water) { // copy the opaque scene, then the water over it before the translucent rest
         vkCmdEndRendering(cb);
         passOpen_ = false;
@@ -2747,34 +2907,9 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     }
     std::vector<const GpuMesh*> translucent;
     for (const GpuMesh& m : meshes_)
-        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m) && !(water && (m.water || m.sheen) && !m.surf) && &m != fill)
+        if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && blendedHere(m))
             translucent.push_back(&m);
-    const bool pcOrder = original && linearOriginal_;
-    if (!pcOrder) {
-        std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
-            const glm::vec3 d = m->center - cam.pos;
-            return glm::dot(d, d);
-        });
-        for (const GpuMesh* m : translucent) draw(*m, false);
-    } else {
-        // bugs.exe (LiT Original Fidelity, pc_order.h): untextured blended faces first, then layer 1 sorted per
-        // triangle, then layer 2 (Mesh::late); all depth-writing, alpha test GREATER 0 except the sorted pass.
-        constexpr float kGreater0 = 0.5f / 255.0f;
-        auto plain = [&](const GpuMesh& m) { return m.texture == kSlotWhite && m.textureAnim < 0; };
-        for (const GpuMesh* m : translucent)
-            if (plain(*m) && !m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
-        std::vector<render::PcTri> tris;
-        const glm::mat4 view = cam.view();
-        const glm::vec4 zRow(view[0][2], view[1][2], view[2][2], view[3][2]);  // eye-space z of a world point
-        for (uint32_t i = 0; i < translucent.size(); ++i) {
-            const GpuMesh& m = *translucent[i];
-            if (plain(m) || m.late) continue;
-            for (uint32_t t = 0; t < m.tris.size(); ++t) tris.push_back({glm::dot(zRow, glm::vec4(m.tris[t], 1.0f)), i, t});
-        }
-        render::drawPcSorted(tris, [&](uint32_t i, uint32_t t, uint32_t n) { draw(*translucent[i], false, t, n, -1.0f, true); });
-        for (const GpuMesh* m : translucent)
-            if (m->late) draw(*m, false, 0, UINT32_MAX, kGreater0, true);
-    }
+    blendedPass(translucent);
     if (fsr) fsrResolve(s);
 }
 
@@ -2810,6 +2945,12 @@ void Renderer::drawRect(float x, float y, float w, float h, const uint8_t rgba[4
     quad2D(kSlotWhite, kSampUiNearest, x, y, w, h, 0, 0, 1, 1, rgba);
 }
 
+void Renderer::multiplyRect(float x, float y, float w, float h, const uint8_t rgb[4]) {
+    flush2D();
+    drawRect(x, y, w, h, rgb);
+    flush2D(true);
+}
+
 void Renderer::drawText(float x, float y, int scale, std::string_view text, const uint8_t rgba[4]) {
     const float g = float(kGlyph * scale);
     float cx = x;
@@ -2830,14 +2971,14 @@ void Renderer::drawText(float x, float y, int scale, std::string_view text, cons
 }
 
 // One draw for the whole 2D batch: the texture/sampler travel per vertex (bindless), so draw order is kept.
-void Renderer::flush2D() {
+void Renderer::flush2D(bool multiply) {
     if (batch_.empty() || !recording_) {
         batch_.clear();
         return;
     }
     VkCommandBuffer cb = frames_[frame_].cmd;
     const auto [buf, off] = streamWrite(batch_.data(), batch_.size() * sizeof(V2));
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe2D_[msaaOn_]);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (multiply ? pipe2DMul_ : pipe2D_)[msaaOn_]);
     vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
     const VkViewport viewport{0.0f, 0.0f, float(w_), float(h_), 0.0f, 1.0f};
     const VkRect2D scissor{{0, 0}, extent_};
@@ -2848,7 +2989,7 @@ void Renderer::flush2D() {
     vkCmdBindVertexBuffers(cb, 0, 1, &buf, &off);
     vkCmdDraw(cb, uint32_t(batch_.size()), 1, 0, 0);
     ++drawCalls_;
-    if (genPending_) uiDraws_.push_back({buf, off, uint32_t(batch_.size())});
+    if (genPending_) uiDraws_.push_back({buf, off, uint32_t(batch_.size()), multiply});
     batch_.clear();
 }
 
@@ -2892,7 +3033,8 @@ void Renderer::submitFrame(Buffer* readback, Buffer* genReadback) {
         ri.pDepthAttachment = &depthAtt;
         vkCmdBeginRendering(f.cmd, &ri);
         vkCmdBindDescriptorSets(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_, 0, nullptr);
-        vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe2D_[0]);
+        VkPipeline bound = pipe2D_[0];
+        vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bound);
         vkCmdSetCullMode(f.cmd, VK_CULL_MODE_NONE);
         const VkViewport viewport{0.0f, 0.0f, float(w_), float(h_), 0.0f, 1.0f};
         const VkRect2D scissor{{0, 0}, extent_};
@@ -2901,6 +3043,8 @@ void Renderer::submitFrame(Buffer* readback, Buffer* genReadback) {
         const float screen[2] = {float(std::max(w_, 1)), float(std::max(h_, 1))};
         vkCmdPushConstants(f.cmd, layout_, kPushStages, 0, sizeof screen, screen);
         for (const UiDraw& d : uiDraws_) {
+            if (VkPipeline p = (d.multiply ? pipe2DMul_ : pipe2D_)[0]; p != bound)
+                vkCmdBindPipeline(f.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = p);
             vkCmdBindVertexBuffers(f.cmd, 0, 1, &d.buf, &d.off);
             vkCmdDraw(f.cmd, d.count, 1, 0, 0);
         }

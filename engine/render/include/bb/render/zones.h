@@ -9,13 +9,16 @@
 namespace bb::render {
 
 // Per-frame inputs of 0x44c270: camera pseudo-actor zone (0x4b39b4 +0x26, eye in FindZone 0x436b60), player zone
-// (0x4b324c +0x26), camera-node mode (0x4b3940 & 0x300: the player-zone pass is skipped). Both < 0 = no zone view.
+// (0x4b324c +0x26), camera-node mode (0x4b3940 & 0x300: the player-zone pass is skipped), the A17 zone message queue
+// 0x4b2480 of the last tick (a portal to a queued zone adds it flagged). Both zones < 0 = no zone view.
 struct ZoneView {
     int16_t camZone = -1, playerZone = -1;
     bool cameraNode = false;
+    std::vector<uint16_t> messages;
 };
 
-// Visible-zone table 0x4b3460 entry: zone id, flag word bit 0 (walk depth exceeded: neither drawn nor actor-visible).
+// Visible-zone table 0x4b3460 entry: zone id, flag word bit 0 (walk depth exceeded or zone queued by A17: neither
+// drawn nor walked; actor-visible only with flags8 0x10000).
 struct ZoneEntry {
     int16_t zone = -1;
     bool flagged = false;

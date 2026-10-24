@@ -177,7 +177,7 @@ void WaveField::kick(glm::vec2 p, float amplitude, float sigma) {
 }
 
 void WaveField::wade(glm::vec2 p, float r, glm::vec2 move, float dt) {
-    if (bodies_.size() < bodies_.capacity()) bodies_.push_back({p, r});  // ponytail: > 256 waders lose their wall
+    bodies_.push_back({p, r});  // cleared each step, its capacity kept: no per-frame allocation once grown
     const float dist = glm::length(move);
     if (dt <= 0.0f || dist < kMinSpeed * dt) return;
     const glm::vec2 ahead = move / dist * (r + kWakeSigma);

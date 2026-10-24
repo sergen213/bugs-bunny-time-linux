@@ -239,6 +239,7 @@ int findAnim(const ActorModel& model, uint16_t animId) {
 
 uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint32_t mode) {
     mode &= 0xffff;  // u16 parameter
+    st.holdEnd = false;
     if (!mode) {
         if (st.flags & AnimPause) return AnimPlaying;
         if (st.flags & 0x100) return finishedResult(st.flags);
@@ -298,11 +299,130 @@ uint32_t animTick(const ActorModel& model, AnimState& st, uint16_t animId, uint3
         st.frame = uint16_t(st.frame + n);
         st.countdown = st.ticksPerFrame;
     }
-    --st.countdown;
+    st.holdEnd = --st.countdown == 0;
     if (uint32_t(st.frame) == uint32_t(st.last) - 1u) st.flags |= 0x2000;
     if (st.countdown != 0 || st.frame != st.last || !(st.flags & AnimOnce)) return AnimPlaying;
     st.flags = (st.flags & ~0x200u) | 0x100;
     return finishedResult(st.flags);
+}
+
+namespace {
+
+using Quat = std::array<float, 4>;  // w, x, y, z
+
+Quat toQuat(const M3& r) {  // rotation matrix (row major) -> unit quaternion (Shepperd)
+    const float tr = r[0] + r[4] + r[8];
+    Quat q;
+    if (tr > 0.0f) {
+        const float s = std::sqrt(tr + 1.0f) * 2.0f;
+        q = {0.25f * s, (r[7] - r[5]) / s, (r[2] - r[6]) / s, (r[3] - r[1]) / s};
+    } else if (r[0] > r[4] && r[0] > r[8]) {
+        const float s = std::sqrt(1.0f + r[0] - r[4] - r[8]) * 2.0f;
+        q = {(r[7] - r[5]) / s, 0.25f * s, (r[1] + r[3]) / s, (r[2] + r[6]) / s};
+    } else if (r[4] > r[8]) {
+        const float s = std::sqrt(1.0f + r[4] - r[0] - r[8]) * 2.0f;
+        q = {(r[2] - r[6]) / s, (r[1] + r[3]) / s, 0.25f * s, (r[5] + r[7]) / s};
+    } else {
+        const float s = std::sqrt(1.0f + r[8] - r[0] - r[4]) * 2.0f;
+        q = {(r[3] - r[1]) / s, (r[2] + r[6]) / s, (r[5] + r[7]) / s, 0.25f * s};
+    }
+    return q;
+}
+
+M3 fromQuat(const Quat& q) {
+    const auto [w, x, y, z] = q;
+    return {1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y),
+            2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+            2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)};
+}
+
+Quat slerp(Quat a, const Quat& b, float t) {
+    float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (d < 0.0f) {  // shortest arc
+        for (float& c : a) c = -c;
+        d = -d;
+    }
+    float wa = 1.0f - t, wb = t;
+    if (d < 0.9995f) {
+        const float th = std::acos(std::min(d, 1.0f)), s = std::sin(th);
+        wa = std::sin((1.0f - t) * th) / s, wb = std::sin(t * th) / s;
+    }
+    Quat q;
+    float n = 0.0f;
+    for (size_t i = 0; i < 4; ++i) q[i] = wa * a[i] + wb * b[i], n += q[i] * q[i];
+    n = std::sqrt(n);
+    for (float& c : q) c /= n;
+    return q;
+}
+
+// m = R · diag(s) (coordMatrix): s = column lengths, R = columns / s. False for a zero / mirrored scale.
+bool polar(const M3& m, M3& r, V3& s) {
+    for (size_t j = 0; j < 3; ++j) {
+        s[j] = std::sqrt(m[j] * m[j] + m[3 + j] * m[3 + j] + m[6 + j] * m[6 + j]);
+        if (s[j] < 1e-4f) return false;
+        for (size_t i = 0; i < 3; ++i) r[i * 3 + j] = m[i * 3 + j] / s[j];
+    }
+    const float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+    return det > 0.0f;
+}
+
+TodPart blendPart(const TodPart& a, const TodPart& b, float t) {
+    if (a.id != b.id || a.object != b.object || a.parent != b.parent || a.dead != b.dead || ((a.flags ^ b.flags) & 0x8006)) return b;
+    float da = 0.0f, dd = 0.0f;
+    for (size_t k = 0; k < 3; ++k) da = std::max(da, float(std::abs(a.trans[k]))), dd = std::max(dd, float(std::abs(b.trans[k] - a.trans[k])));
+    if (dd > 0.5f * da + 500.0f) return b;  // a teleport, not motion
+    M3 ra, rb;
+    V3 sa, sb;
+    if (!polar(a.m, ra, sa) || !polar(b.m, rb, sb)) return b;
+    TodPart p = b;
+    p.m = fromQuat(slerp(toQuat(ra), toQuat(rb), t));
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j) p.m[i * 3 + j] *= sa[j] + (sb[j] - sa[j]) * t;
+    for (size_t k = 0; k < 3; ++k) p.trans[k] = int32_t(std::lround(float(a.trans[k]) + float(b.trans[k] - a.trans[k]) * t));
+    return p;
+}
+
+// Parts of `to` blended from `from` by t (a part `from` lacks snaps).
+AnimState blendPose(const AnimState& from, const AnimState& to, float t) {
+    AnimState r = to;
+    for (size_t i = 0; i < r.parts.size() && i < from.parts.size(); ++i) r.parts[i] = blendPart(from.parts[i], to.parts[i], t);
+    return r;
+}
+
+} // namespace
+
+AnimState interpolatePose(const AnimState& prev, const AnimState& cur, float a) {
+    a = std::clamp(a, 0.0f, 1.0f);
+    AnimState r = blendPose(prev, cur, a);  // code-posed parts, paused / finished / non-TOD clips: the tick's own motion
+    if (!cur.tod || (cur.flags & (0x100 | AnimPause)) || cur.parts.empty()) return r;
+    const float h = cur.ticksPerFrame ? float(cur.ticksPerFrame) : 256.0f;
+    const float k = std::max(0.0f, h - 1.0f - float(cur.countdown));  // ticks this frame has shown before this one
+    if (k == 0.0f && prev.tod == cur.tod) {  // the tick that applied it: the rest of the move from prev (same clip)
+        const AnimState f = blendPose(prev, cur, (h - 1.0f + a) / h);
+        for (size_t i = 0; i < r.parts.size(); ++i)
+            if (!(cur.parts[i].flags & 0x400)) r.parts[i] = f.parts[i];
+        return r;
+    }
+    // Only while the clip really counts this frame down (the last tick showed it one count higher): a clip held without
+    // ticking (stalled countdown, ARCA01 entities 87 / 88 / 257) would otherwise saw-tooth toward its next frame each tick.
+    if (prev.tod != cur.tod || prev.frame != cur.frame || prev.countdown != cur.countdown + 1) return r;
+    AnimState next = cur;  // the frame the next step applies (animTick's countdown-0 branch, without side effects)
+    if (cur.frame == cur.last) {
+        if (!(cur.flags & AnimOnce) && cur.tod->frames()) applyTodFrame(next, *cur.tod, 0);
+    } else if (cur.skip) {
+        for (uint32_t s = 0; uint32_t(cur.frame) + cur.skip < cur.last && s < cur.skip && cur.next + s < cur.tod->frames(); ++s)
+            applyTodFrame(next, *cur.tod, cur.next + s);
+    } else if (cur.next < cur.tod->frames()) {
+        applyTodFrame(next, *cur.tod, cur.next);
+    }
+    const float t = (k - 1.0f + a) / h;
+    for (size_t i = 0; i < r.parts.size() && i < next.parts.size(); ++i) {
+        const TodPart &c = cur.parts[i], &n = next.parts[i];
+        // Same part, same object and visibility in both frames (TB erases deleted parts: positions can shift).
+        if (!(c.flags & 0x400) && c.id == n.id && c.object == n.object && c.parent == n.parent && !((c.flags ^ n.flags) & 0x8006))
+            r.parts[i] = blendPart(c, n, t);
+    }
+    return r;
 }
 
 std::vector<std::array<float, 3>> poseSlots(const ActorModel& model, const AnimState& st) {

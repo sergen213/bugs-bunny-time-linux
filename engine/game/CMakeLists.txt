@@ -10,7 +10,13 @@ add_library(bb_game STATIC
   src/lit_hud.cpp
   src/lit_save.cpp
   src/tb_collision.cpp
+  src/tb_mover.cpp
+  src/tb_shapes.cpp
+  src/tb_sweep.cpp
   src/tb_world.cpp
+  src/tb_fx.cpp
+  src/tb_shadow.cpp
+  src/tb_steer.cpp
   src/tb_entities.cpp
   src/tb_hud.cpp
   src/tb_menu.cpp
@@ -18,6 +24,8 @@ add_library(bb_game STATIC
   src/sfx.cpp
 )
 target_include_directories(bb_game PUBLIC include)
+# The exe's collision arithmetic wraps at 32 bits (imul / add), as these ports do.
+set_source_files_properties(src/tb_sweep.cpp src/tb_mover.cpp PROPERTIES COMPILE_OPTIONS -fwrapv)
 target_link_libraries(bb_game PUBLIC bb_core bb_audio)
 
 add_executable(test_game tests/test_game.cpp)
@@ -32,6 +40,13 @@ target_link_libraries(test_tb PRIVATE bb_game)
 target_compile_options(test_tb PRIVATE -UNDEBUG)
 add_test(NAME game.tb COMMAND test_tb)
 set_tests_properties(game.tb PROPERTIES TIMEOUT 600)
+
+add_executable(test_tb_speech tests/test_tb_speech.cpp)
+target_link_libraries(test_tb_speech PRIVATE bb_game)
+target_compile_options(test_tb_speech PRIVATE -UNDEBUG)
+# Real GRANNY (BBTIME_DATA): Granny's speech clip / start / skip vs the Wine oracle; 77 = skipped.
+add_test(NAME game.tb_speech COMMAND test_tb_speech)
+set_tests_properties(game.tb_speech PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_lit_save tests/test_lit_save.cpp)
 target_link_libraries(test_lit_save PRIVATE bb_game)

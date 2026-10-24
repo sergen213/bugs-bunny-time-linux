@@ -44,12 +44,21 @@ struct Mesh {
     // LiT PC blended layer 2 (0x7bd970: Bugs 0x44ca11, ground shadows 0x44bde9): drawn after bugs.exe's sorted blended
     // pass, unsorted with alpha test (flush 0x4124b0, RUNTIME_REFERENCE §29).
     bool late = false;
+    // TB OT layer 0 (sky domes, 0x465710: layer 0x4d2730 - 1 = 0): drawn first, then the depth buffer is cleared
+    // before the world (0x422eb0: list 0, glClear(DEPTH), list 1), so it is behind every other mesh at any distance.
+    bool background = false;
+    // Background layer far clip: 64000 for a dome whose entity flags (tag 0x16 @4, +0xc) have 0x2000000, else 0 =
+    // the level's far distance like the world (0x465710 -> 0x406840 / 0x409840).
+    float farClip = 0.0f;
+    // Original Fidelity per-object fog end (LiT 0x40cc80 D of the actor's far value, start at 75 %); 0 = the scene's.
+    float fogEnd = 0.0f;
 };
 
 // LiT zone/portal visibility (MODELS.md §7, 0x44c270 / 0x40fe90). Engine-space corners.
 using Corner = std::array<float, 3>;
 struct ZonePortal {
     uint16_t to = 0;                       // portal record 0x10 @16: zone id it reveals
+    uint16_t toHi = 0;                     // @18: high half of the u32 0x40fe90 compares with the A17 queue
     std::array<Corner, 4> quad{};
 };
 struct WorldZone {
@@ -63,6 +72,7 @@ struct WorldZone {
 struct TextureAnim {
     uint32_t linkId = 0;
     std::vector<int32_t> frames;  // Scene::textures indices
+    std::vector<int32_t> records;  // LiT: Scene::textures index per sprite record (LitWorld::textureLinks picks one)
     uint32_t startFrame = 0;
     uint32_t holdTicks = 1;
     bool timingInferred = false;  // e.g. script-driven links cycled in order
@@ -142,6 +152,7 @@ struct SceneStats {
     uint32_t skippedActors = 0;    // placed multi-object entities without a TOD skeleton or flipbook actors: not drawn
     uint32_t skyDomes = 0;         // TB octree models in chunk 0x22 (sky domes, MODELS.md §10.1)
     uint32_t invalidPrims = 0;     // TB octree primitives rejected by CheckPrimValidity (not drawn)
+    uint32_t rejectedPrims = 0;    // TB octree primitives using a vertex beyond model x/y ±32000 (0x408990; not drawn)
     uint64_t worldFaces = 0;       // TB valid octree primitives (world + sky, all trees incl. the undrawn far LOD)
     uint64_t faces = 0, triangles = 0;
     // Faces whose id is neither a decoded texture nor a texture link: not drawn in either game (the original skips
@@ -163,6 +174,11 @@ struct Scene {
     std::vector<TextureAnim> textureAnims;
     bool placeholder = false;    // true when content is NOT decoded original data (incl. galleries)
     float colorScale = 1.0f;     // vertex rgb multiplier; LiT uses PS1 modulation texel*colour/128 -> 255/128
+    // Original draw distances. LiT: u = chunk 0x3b tag 0x3d s16 @0 / 4 (0x42e7a0 case '=' -> 0x4b38a0); every draw
+    // object's fog end is D = min(0xFFFF, 4·far + ((9·fogDist) / 2)·u) (0x40cc80, fog over its last 25 %), far = u for
+    // the world. TB: chunk 0x3a tag 0x3c u16 @2 (0x4d5980): the far clip of the world and entities (0x465710 ->
+    // 0x406840 -> 0x409840; the GL exe has no fog). 0 = not in the level.
+    uint16_t litFogUnit = 0, tbFarClip = 0;
     float pcTexGamma = 1.0f;     // PC GL texel curve c' = floor(256·(c/256)^g) (LiT 5/6), applied in Original Fidelity
     std::optional<std::array<float, 3>> spawn; // player start, engine space
     float spawnYaw = 0.0f;       // radians, engine Camera convention
@@ -183,6 +199,10 @@ struct Scene {
     std::vector<int32_t> hudSheet;
     std::map<uint16_t, std::vector<SpriteFrame>> sprites;  // LiT: every sprite-sequence asset id -> its frames
     std::vector<WorldZone> zones;  // LiT: index = zone id; empty = no zone/portal visibility (TB, galleries)
+    // TB water zones (trigger zones with flags +0xc 0x1000, 0x44f550): their surface rectangle (engine space, y = the
+    // surface the game measures depth from), set by the app from TbWorld::waterZoneTops. Enhanced water fills those
+    // holding the game's own water layers (Granny pond: only scattered additive patches lie on it).
+    std::vector<std::array<Corner, 4>> waterZones;
     SceneStats stats;
     std::vector<std::string> notes; // short human-readable status lines for overlays (gaps, research state)
 };

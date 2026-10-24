@@ -22,9 +22,10 @@ layout(push_constant) uniform P {
     uint samp;
     float texGamma;
 } pc;
-layout(location = 0) out vec2 vUv;
+layout(location = 0) centroid out vec2 vUv;
 layout(location = 1) out vec4 vCol;
 layout(location = 2) out float vDist;
+layout(location = 7) out float vHeight;  // world y (Enhanced ground haze)
 #ifdef LIT
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) out vec3 vNormal;
@@ -50,6 +51,7 @@ void main() {
     vUv = aUv;
     vCol = aCol;
     vDist = -dot(pc.viewZ, p);
+    vHeight = aPos.y;
     if ((pc.flags & 256u) != 0u) {
         // LiT Original Fidelity: bugs.exe draws pre-projected vertices under glOrtho(near 400, far 65536), so its depth
         // buffer holds eye depth interpolated linearly in screen space (RUNTIME_REFERENCE §29); coplanar layers of
@@ -58,6 +60,13 @@ void main() {
         vec4 r = vec4(pc.viewProj[0][2], pc.viewProj[1][2], pc.viewProj[2][2], pc.viewProj[3][2]);
         float a = dot(r.xyz, pc.viewZ.xyz), b = r.w - a * pc.viewZ.w, n = b / a, f = b / (1.0 + a);
         gl_Position.z = (vDist - n) / (f - n) * gl_Position.w;
+    }
+    if ((pc.flags & 512u) != 0u) {
+        // TB Original Fidelity background layer (sky domes): bblit2 0x408990 projects on the CPU for glOrtho(0, 65536)
+        // (0x422950): in front of the eye xy·H/d with depth d, at or behind it xy·2 with depth −200, which the ortho
+        // near plane clips linearly in screen space. clip xy / 200 = eye xy·2 / (H 400 / P00).
+        gl_Position = vDist > 0.0 ? vec4(gl_Position.xy / gl_Position.w, vDist / 65536.0, 1.0)
+                                  : vec4(gl_Position.xy / 200.0, -200.0 / 65536.0, 1.0);
     }
 #ifdef LIT
     vWorld = aPos;

@@ -12,6 +12,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_WINFONTS_H
 
 #include <algorithm>
 #include <cctype>
@@ -50,9 +51,16 @@ std::string lower(std::string s) {
 struct Font {
     FT_Face face = nullptr;
     int ascent = 0, cell = 0;  // tmAscent, tmHeight (GetTextExtentPoint32 cy)
+    int fonFirst = -1;         // .fon: dfFirstChar (FreeType's winfnt face has no charmap: glyph = code - first + 1)
 
     bool open(FT_Library lib, const fs::path& file, int lfHeight) {
         if (FT_New_Face(lib, file.c_str(), 0, &face)) return false;
+        if (!FT_IS_SCALABLE(face)) {  // a Windows .fon strike (the DC's stock System font): its own size
+            if (!face->num_fixed_sizes || FT_Select_Size(face, 0)) return close(), false;
+            ascent = int(face->size->metrics.ascender >> 6), cell = int(face->size->metrics.height >> 6);
+            if (FT_WinFNT_HeaderRec h; !face->charmap && !FT_Get_WinFNT_Header(face, &h)) fonFirst = h.first_char;
+            return true;
+        }
         const auto* os2 = static_cast<const TT_OS2*>(FT_Get_Sfnt_Table(face, FT_SFNT_OS2));
         const int asc = os2 ? os2->usWinAscent : face->ascender, desc = os2 ? os2->usWinDescent : -face->descender;
         const int ppem = lfHeight < 0 ? -lfHeight : lfHeight * face->units_per_EM / (asc + desc);  // < 0: em height (GDI)
@@ -62,18 +70,23 @@ struct Font {
         return true;
     }
     void close() { if (face) FT_Done_Face(face), face = nullptr; }
+    bool load(char c, FT_Int32 flags) const {  // false = no glyph
+        const unsigned u = uint8_t(c);
+        if (fonFirst < 0) return !FT_Load_Char(face, u, flags);
+        return int(u) >= fonFirst && !FT_Load_Glyph(face, u - unsigned(fonFirst) + 1, flags);
+    }
 
     int width(std::string_view s) const {
         int w = 0;
         for (const char c : s)
-            if (!FT_Load_Char(face, uint8_t(c), FT_LOAD_DEFAULT)) w += int((face->glyph->advance.x + 32) >> 6);
+            if (load(c, FT_LOAD_DEFAULT)) w += int((face->glyph->advance.x + 32) >> 6);
         return w;
     }
     // Pen at the cell's top-left (DrawText rect top), Latin-1 text (menu.men bytes).
     void draw(bb::Texture& t, int x, int y, std::string_view s, Rgb col) const {
         const int base = y + ascent;
         for (const char c : s) {
-            if (FT_Load_Char(face, uint8_t(c), FT_LOAD_DEFAULT | FT_LOAD_RENDER)) continue;
+            if (!load(c, FT_LOAD_DEFAULT | FT_LOAD_RENDER)) continue;
             const FT_GlyphSlot g = face->glyph;
             const FT_Bitmap& b = g->bitmap;
             for (unsigned r = 0; r < b.rows; ++r)
@@ -141,6 +154,22 @@ constexpr std::string_view kQuitCaption =
     "Time Busters ~ Bugs Bunny & Taz - Op avontuur door de tijd ~ ";
 constexpr std::string_view kQuitText = "Do you want to quit? ~ Veux-tu quitter ? ~ M\xf6" "chtest du abbrechen? ~ \xbf"
                                        "Deseas salir? ~ Vuoi uscire? ~ Voc\xea quer sair? ~ Wil je stoppen? ~ ";
+// Key capture status line (0x416590): string table 0x64f while a key waits (0x41b1f0), 0x671 when a joystick button
+// is pressed for a keyboard action.
+constexpr std::string_view kCapturePrompt =
+    "Set a keyboard Key or click Back to cancel ! ~ Choisis une touche du clavier ou clique sur Retour pour annuler. ~ "
+    "W\xe4hle eine Tastaturtaste oder klicke auf \"Zur\xfc" "ck\", um abzubrechen. ~ \xa1" "Configura una tecla del "
+    "teclado, o pulsa Back (atr\xe1s) para cancelar! ~ Scegli un tasto o clicca su Indietro per annullare! ~ Configure "
+    "uma tecla ou clique em Voltar para cancelar! ~ Kies een toets van het toetsenbord of klik op Terug om te annuleren! ~ ";
+constexpr std::string_view kJoyRefused =
+    "You can't assign a joystick button for this action, select a keyboard key or click Back to cancel ~ Tu ne peux pas "
+    "attribuer un bouton du joystick \xe0 cette action. Choisis une touche du clavier ou clique sur Retour pour annuler. ~ "
+    "Du kannst diese Aktion keiner Joystick-Taste zuordnen. W\xe4hle eine Tastaturtaste oder klicke auf \"Zur\xfc" "ck\", "
+    "um abzubrechen. ~ No puedes utilizar un bot\xf3n del joystick para realizar este movimiento. Selecciona una tecla "
+    "del teclado o haz clic en Back (atr\xe1s) para cancelar. ~ A quest'azione non puoi assegnare un tasto del joystick; "
+    "seleziona un tasto della tastiera o fai clic su Indietro per annullare. ~ Voc\xea n\xe3o pode designar um bot\xe3o "
+    "de joystick para essa a\xe7\xe3o, selecione uma tecla ou clique Voltar para cancelar ~ Aan deze actie kun je geen "
+    "joystick-knop toewijzen. Selecteer een toets van het toetsenbord of klik op Terug om te annuleren. ~ ";
 
 } // namespace
 
@@ -153,12 +182,16 @@ struct TbFront::Impl {
     std::map<std::string, bb::Texture> bmps;
     KeyMap* keys = nullptr;
     bool mute = false;
-    int page = 0, language = 0;  // registry language, 0 = English
+    int page = 0, language = 0;  // registry language (settings tb_language), 0 = English
     int hot = -1, hotRow = -1;   // hovered / focused item (0x6391b0) and list row (+0xf4)
     int listSel = -1, listTop = 0;  // list box +0xfc selection, +0xec first shown row
     std::vector<TbSaveSlot> slots;
     float music = 1.0f, sfx = 1.0f, contrast = 0.5f;  // slider +0xf0 (0..1)
     int capture = -1;  // key item waiting for its key (0x4d1dd4)
+    // Status line 0x416590: the '~' string shown in the bottom strip (empty = cleared), drawn in the DC's stock font
+    // (0x4d1ddc, Wine's System = vgasys.fon) in green (0x48b0e7..: 0, 255, 0).
+    std::string_view status;
+    Font sys;
     bool dirty = true;
     bb::Texture canvas;
     bb::AiffSound bong;
@@ -175,7 +208,7 @@ struct TbFront::Impl {
     bool demoLogged = false;
 
     ~Impl() {
-        big.close(), list.close(), ui.close(), uiIcon.close();
+        big.close(), list.close(), ui.close(), uiIcon.close(), sys.close();
         if (ft) FT_Done_FreeType(ft);
     }
 
@@ -368,6 +401,12 @@ struct TbFront::Impl {
         for (size_t i = 3; i < canvas.rgba.size(); i += 4) canvas.rgba[i] = 255;
         blit(bmp(menu.pages[page].backdropFor(language)), 0, 0);  // 0x419430: page bitmap at 0,0
         forPage([&](int i) { drawItem(i, i == hot); });
+        if (!status.empty()) {  // 0x416590: centred on x 320, its cell's bottom on the window's
+            TbMenuItem t;
+            t.texte = status;
+            const std::string s = t.text(language);
+            sys.draw(canvas, kW / 2 - sys.width(s) / 2, kH - sys.cell, s, Rgb{0, 255, 0});
+        }
         if (quitBox) drawQuit();
     }
 
@@ -423,7 +462,7 @@ struct TbFront::Impl {
             }
         }
     }
-    void askQuit(bool exitApp) { quitBox = true, quitExit = exitApp, quitFocus = 0, capture = -1, dirty = true; }
+    void askQuit(bool exitApp) { quitBox = true, quitExit = exitApp, quitFocus = 0, capture = -1, status = {}, dirty = true; }
     TbFrontAction quitAnswer(int k) {  // IDYES (6): state 0, the exe exits; IDNO: the menu stays
         quitBox = false, dirty = true;
         if (k != 0) return {};
@@ -471,15 +510,16 @@ struct TbFront::Impl {
 
     void showPage(int p) {  // Call(n) 0x41a860
         if (p < 0 || p >= TbMenu::kPages || menu.pages[p].backdrop.empty()) return;
-        page = p, hot = -1, hotRow = -1, capture = -1, dirty = true;
+        page = p, hot = -1, hotRow = -1, capture = -1, status = {}, dirty = true;
         if (p == 7) loadSlots(), listSel = -1, listTop = 0;
         // 0x419df0 draws the slider through 0x41adc0, which stores 0.25 + 1.75 v on every draw, v = 0x639c20 / 2 from
         // menu load (0x418bd0): showing the Video page turns 1.0 into 1.125 (R: peek 0x639c20, w8_capture.sh).
         if (p == 3) brightness = 0.25f + 1.75f * contrast, saveVideo();
     }
-    void saveVideo() {  // 0x41a6e0 writes config.pc on leaving the menu; bbtime: settings.ini at once
+    void saveVideo() {  // 0x41a6e0 writes config.pc and the registry language on leaving the menu; bbtime: settings.ini at once
         Settings st = loadSettings();
         st.width = resW, st.height = resH, st.tbRenderer = renderer, st.tbDetails = details, st.tbBrightness = brightness;
+        st.tbLanguage = language;
         if (const std::string err = saveSettings(st); !err.empty()) std::println(stderr, "bbtime: {}", err);
         dirty = true;
     }
@@ -561,7 +601,7 @@ struct TbFront::Impl {
         case TbItemType::Check:  // 0x41ab70: radio by family; non-changeable checks only run their Function
             if (int n = 0; enabled(it) && it.changeable) {
                 const std::string f = family(it, &n);
-                if (f == "LANGUAGE_") language = n, dirty = true;
+                if (f == "LANGUAGE_") language = n, saveVideo();
                 else if (f == "RENDERER_") renderer = n == 0 ? 2 : 1, saveVideo();
                 else if (f == "DETAILS_") details = n, saveVideo();
                 else if (f == "RESOLUTION_" && n < 5) {  // config.pc +0x10 -> the window size (Hor+ as before)
@@ -571,7 +611,7 @@ struct TbFront::Impl {
             }
             break;
         case TbItemType::Key:  // 0x41b1f0: wait for the key (keyboard pages; the gamepad layout is fixed here)
-            if (it.enabled && !it.keyId.empty() && !it.keyId.starts_with("Joy_")) capture = i, dirty = true;
+            if (it.enabled && !it.keyId.empty() && !it.keyId.starts_with("Joy_")) capture = i, status = kCapturePrompt, dirty = true;
             break;
         case TbItemType::ListBox:  // 0x41b120
             if (hotRow >= 0) listSel = hotRow, dirty = true;
@@ -668,7 +708,7 @@ std::string TbFront::open(const fs::path& tbRoot, const fs::path& saves, KeyMap 
     m.bong = loadWav(m.files["bong.wav"]);
     const Settings st = loadSettings();
     m.music = float(st.musicVolume) / 100.0f, m.sfx = float(st.sfxVolume) / 100.0f;
-    m.resW = st.width, m.resH = st.height, m.renderer = st.tbRenderer, m.details = st.tbDetails;
+    m.resW = st.width, m.resH = st.height, m.renderer = st.tbRenderer, m.details = st.tbDetails, m.language = st.tbLanguage;
     m.brightness = st.tbBrightness, m.contrast = st.tbBrightness * 0.5f;  // 0x418bd0: slider = 0x639c20 · 0.5
     // MessageBox font: Wine's Tahoma (what the oracle draws), else a common sans; the menu's own TTF as last resort.
     for (const fs::path& f : {fs::path("/usr/share/wine/fonts/tahoma.ttf"), fs::path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
@@ -678,12 +718,16 @@ std::string TbFront::open(const fs::path& tbRoot, const fs::path& saves, KeyMap 
         m.ui.close(), m.uiIcon.close();
         if (m.ui.open(m.ft, f, -11) && m.uiIcon.open(m.ft, f, -24)) break;
     }
+    // The status line's stock DC font: Wine's System (vgasys.fon, what the oracle draws; 16-px cell), else a sans.
+    for (const fs::path& f : {fs::path("/usr/share/wine/fonts/vgasys.fon"), fs::path("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+                              fs::path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), m.files["bradybun.ttf"]})
+        if (m.sys.close(), m.sys.open(m.ft, f, 16)) break;
     return {};
 }
 
 void TbFront::mouse(int x, int y) {
     d->mx = x, d->my = y;
-    if (d->capture < 0 && !d->quitBox) d->hover(x, y);
+    if (!d->quitBox) d->hover(x, y);  // WM_MOUSEMOVE also while a key waits (0x41b1f0 pumps messages)
 }
 TbFrontAction TbFront::click(bool mouse) {
     Impl& m = *d;
@@ -694,7 +738,11 @@ TbFrontAction TbFront::click(bool mouse) {
             if (q.btn[k].in(m.mx, m.my)) return m.quitAnswer(k);
         return {};
     }
-    return m.capture >= 0 ? TbFrontAction{} : m.activate(m.hot);
+    if (m.capture >= 0 && !mouse) {  // a joystick button for a keyboard action (0x41b1f0): refused, still waiting
+        m.status = kJoyRefused, m.dirty = true;
+        return {};
+    }
+    return m.activate(m.hot);  // the mouse keeps working while a key waits ("click Back to cancel")
 }
 void TbFront::nav(int dx, int dy) {
     if (!d->quitBox) d->nav(dx, dy);
@@ -707,7 +755,7 @@ void TbFront::input() { d->idleDue = SDL_GetTicks() + 30000, d->demoLogged = fal
 TbFrontAction TbFront::back() {
     Impl& m = *d;
     if (m.quitBox) return {};  // MB_YESNO has no cancel: Esc does nothing
-    if (m.capture >= 0) { m.capture = -1, m.dirty = true; return {}; }
+    if (m.capture >= 0) { m.capture = -1, m.status = {}, m.dirty = true; return {}; }
     if (m.page == 0) { m.askQuit(false); return {}; }  // bbtime's Esc on page 0 = the window's close (WM_CLOSE)
     int target = -1;  // the page's Back image (Call(n))
     m.forPage([&](int i) {
@@ -729,7 +777,7 @@ TbFrontAction TbFront::captureKey(SDL_Scancode sc) {
     }
     if (m.capture < 0) return {};
     const TbMenuItem& it = m.item(m.capture);
-    m.capture = -1, m.dirty = true;
+    m.capture = -1, m.status = {}, m.dirty = true;
     if (sc == SDL_SCANCODE_ESCAPE) return {};
     const uint16_t bit = padBit(it.keyId);
     auto& keys = m.keys[it.keyId.starts_with("P2_") ? 1 : 0].keys;
@@ -758,7 +806,7 @@ bb::Texture ttfText(const fs::path& ttf, std::string_view s, int lfHeight) {
         t.rgba.assign(size_t(t.width) * t.height * 4, 0);
         int x = 0;
         for (const char c : s) {
-            if (FT_Load_Char(f.face, uint8_t(c), FT_LOAD_DEFAULT | FT_LOAD_RENDER)) continue;
+            if (!f.load(c, FT_LOAD_DEFAULT | FT_LOAD_RENDER)) continue;
             const FT_GlyphSlot g = f.face->glyph;
             for (unsigned r = 0; r < g->bitmap.rows; ++r)
                 for (unsigned k = 0; k < g->bitmap.width; ++k) {

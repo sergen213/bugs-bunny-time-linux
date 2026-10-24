@@ -3,6 +3,7 @@
 #   send_keys.sh lit|tb STEP...
 #   STEP = KEYS@DUR   hold KEYS (xdotool keysyms joined by '+', e.g. Up+d) for DUR, then release
 #          _@DUR      wait
+#          +KEYS / -KEYS  press / release KEYS and leave them so (overlapping holds, e.g. L2+R2 held while ✕ taps)
 #   DUR  = N (ms) or Nt (N ticks of 1/30 s)
 # LiT keys (config.pc 0x46, RESEARCH.md §6): arrows move, d jump(X), f kick, s crouch, a look, e roll, r action,
 #   q/w camera R/L, Return start, Tab select.  TB: see RUNTIME_REFERENCE.md (config.pc 0x4C.. defaults).
@@ -17,6 +18,10 @@ wid=$(xdotool search --onlyvisible --class "steam_app_0|$EXE" | head -1)
 xdotool windowfocus --sync "$wid" 2>/dev/null || xdotool windowfocus "$wid"
 ms() { case $1 in *t) echo $(( ${1%t} * 1000 / 30 )) ;; *) echo "$1" ;; esac; }
 for step in "$@"; do
+  case $step in
+    +*) IFS=+ read -ra ks <<< "${step#+}"; xdotool keydown "${ks[@]}"; continue ;;
+    -*) IFS=+ read -ra ks <<< "${step#-}"; xdotool keyup "${ks[@]}"; continue ;;
+  esac
   keys=${step%@*}; d=$(ms "${step#*@}")
   sec=$(printf '%d.%03d' $((d / 1000)) $((d % 1000)))
   if [ "$keys" = _ ]; then sleep "$sec"; continue; fi

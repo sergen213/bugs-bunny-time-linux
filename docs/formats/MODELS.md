@@ -219,15 +219,17 @@ Invariant holds for 1486/1486 cell headers in LiT [DATA].
 faces: corners 0..7). Same reject test over the `n_faces*4` corners; invariant holds for 6782/6782 [DATA].
 Purpose beyond culling (collision?) is Research Required.
 
-`0x10` portal (20 bytes): u16 i0..i3 @8..14 (object-table indices), u16 `zone id` @16, u16 pad. The renderer
-accumulates the portal's clamped screen rectangle per zone id (`DAT_004b3460` table, ≤ `DAT_004b39dc` zones).
+`0x10` portal (20 bytes): u16 i0..i3 @8..14 (object-table indices), u16 `zone id` @16, u16 @18 (0 in the data; the
+walker compares the u32 @16 with the A17 queue). The renderer accumulates the portal's clamped screen rectangle per
+zone id (`DAT_004b3460` entries +4..+0x10, ≤ `DAT_004b39dc` zones); nothing reads those rects.
 **Zone/portal visibility (Implemented; LS01 Verified, GAMEPLAY_STATUS.md):** each world chunk 0x20 is one zone —
 tag 0x21 = zone id (zone object table `0x4b37a0[id]`, loader 0x42e7a0), tag 0x43 = walk depth limit (+0xb5; LiT data:
 200 zones 1, 6 zones 2). The portals of a zone's model name the zones visible through them. Frame order 0x44c270:
 camera pseudo-actor zone (FindZone of the eye) → player zone (skipped under a camera node, else it restarts the table)
 → breadth-first over the table; a portal adds its zone when not all 4 corners lie outside one frustum plane (near =
 view z ≤ 1, no bottom-edge test), flagged (bit 0, not walked, actors hidden) when the generation exceeds the walked
-zone's +0xb5. In all 79 LiT levels no portal lies inside a cell / hull record range, so cell culling never hides one
+zone's +0xb5 or when its zone is in the A17 message queue 0x4b2480 of the last tick (L04A1 zone 31). A rejected
+cell / hull has no visible effect (its polygons are outside that plane or fully fogged; RUNTIME_REFERENCE §33). In all 79 LiT levels no portal lies inside a cell / hull record range, so cell culling never hides one
 [DATA, 1527 portals].
 
 **Collision:** no collision-specific data has been identified in section 4. Hulls/portals are only used for
@@ -346,6 +348,17 @@ e.g. TRCA01 (0, −15500, 5), yaw 180°): `FUN_0044d6f0` builds the entity's oct
 s16 @2, PS1 y: VIQ02 −1750, VICA01 −5200, ARCA01 −7500, TRCA01 −10000) to its translation; tag `10` is never used.
 `bb::buildTbScene` builds domes in eye space into `Scene::skyMeshes`; the app draws them at the eye every frame.
 Consistent: ARCA01 oracle sky band (`local/shots/w12/sky/side_arca01_dome.png`, top-rows MAD 5.5 → 3.2).
+
+Dome placement inside that matrix (wave 13, Verified Against Original Behavior: oracle peeks
+`local/w13/sky/peek_{arca01,vicasg04,viq02,vir01}.txt`, side-by-sides `local/w13/sky/side_sky_*.png`):
+- **First draw item.** `0x465710` composes the matrix from the entity's first draw item (the first part of its class-1
+  skeleton after the class-0xb animation `0x44d6f0` plays at init), then draws the LOD item's model without the second
+  item's own offset. VICASG04 / VIR01 domes sit 6000 lower, AZCASG05 / AZQ01 are rotated by that part.
+- **View flags** (tag 0x39 @0, entity +0x6e): 0x20 = never put on the view list, so never drawn (VIR01's second dome).
+- **Far clip** (tag 0x16 @4, entity flags +0xc): 0x2000000 = far 64000, else the level's world clip (`Mesh::farClip`).
+- **Background layer.** Domes are draw layer 0 and `0x422eb0` clears depth before the world: behind everything at any
+  distance, no fog (`Mesh::background`). Original Fidelity VK projects them on the CPU like `0x408990` (glOrtho
+  0..65536); octree primitives with a vertex beyond model x/y ±32000 are dropped as `0x408990` / `0x41eee0` do.
 
 Invalid prims ([PV] fails → logged `CheckPrimValidity failed` and skipped): 48 in all data, dropped by the exporter.
 

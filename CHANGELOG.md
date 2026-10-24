@@ -3,7 +3,177 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
-## Unreleased
+## 0.12.0 — 2026-10-24 (Waves 12–14: TB sky domes, water/swimming, effects, entity classes, carrying/climbing, exact hand-ported TB mover; LiT render order, input, actors; BBLIT-Remaster-inspired Enhanced features)
+
+- Enhanced (ideas from BBLIT-Remaster, MIT, InLineR495; no code copied): poses interpolate between ticks (part
+  matrices by shortest-arc rotation, TOD frames glide over their hold so 15 Hz clips and the LS01 vortices no longer
+  step; non-player actor / entity roots too, teleports snap); right-stick LiT camera through the L2 / R2 rotation
+  (`stick_camera`, `camera_speed` 52, `camera_invert`); 4-tick LiT jump buffer (`jump_buffer`, taken by jump states
+  7/8/9/26/72/78, dropped on pause); HUD counters at wide-screen edges in levels (`hud_edges`); centroid UVs under
+  MSAA and a half-texel UV clamp on non-tiling translucent meshes. Attached actors follow their parent's interpolated
+  part, ground shadows glide with their owners (LiT and TB), a stalled clip no longer saw-tooths (ARCA01), LiT
+  teleports / camera cuts are shown at once (LS01 tick 22 used to smear 7000 units). Fog fades into the sky backdrop
+  instead of black (Vulkan; LiT's sky is the background layer in Enhanced); ground haze in L01A / L01B / L01D1 /
+  L01D2 (`haze`, Vulkan); the TITLE logo drawn at `title_logo` 85 % of its depth; a pushed stone drawn clear of
+  Bugs (`push_r` 50). `tools/re/motion_check.py` (BBTIME_MOTION trace) and `tools/re/verify_exe.py`. Settings in
+  settings.ini and the launcher (input / HUD options also in the in-game Options). Original Fidelity unchanged
+  (LS01, L01A, L03A, ARCA01 `--no-hud` pixel-identical to the wave 13 build).
+
+- TB mover: the collision code is now entirely our own C++ (`tb_gte.h`, `tb_shapes.cpp`, `tb_sweep.cpp`,
+  `tb_mover.cpp`; all 118 functions under 0x4450c0 plus the camera sweep): the software GTE and vector / matrix
+  helpers, every sphere / cylinder / capsule / box / segment primitive, the shape and polygon tests of the camera
+  sphere and the sphere / capsule / box / point movers, their passes, the response 0x443f40, the polygon gather, the
+  shape cache, the ledge / climb / overlap / hover passes and the mover. It runs on typed bodies of the entities and
+  a copy of the collision block; the Ghidra transcription (`tb_mover_exe.c`), its generator and the exe-address
+  arena are gone. `tools/re/tb_shapes_fuzz.py` runs random records through the exe (unicorn) and the port for every
+  primitive and test: all equal. Fixed on the way: a negative square root (0x4040b0) is 0x80000000 as on the x87.
+- TB: the entity pool is modelled per slot (0x460b00 / 0x4608c0): view / world entities 0..16, one slot per chunk 0x07 / 0x08 / 0x0a / 0x63 in file order, the HUD sheet holder (0x462430), spawns in the lowest free slot below the count; a destroyed entity frees its slot right after its own tick (0x460630), the others go in the next list walk (0x45eee0), which spares the entity after each one it destroys. GRANNY and ARCA01 slot tables equal the original's slot for slot; with the GRANNY pool cut the slam's template 80 now fails as in the original. Each applied anim frame resets the attach point (+0x84) and sets it with +0x7c before the frame's asset logic (0x468280), through the entity's scaled root and, for a hung entity, its parent's chain (0x44e560): GRANNY's coin placers skip frames without one, VICASG04's 131 (scale 1.25) grabs Bugs on the original's tick and his snowball flies from its hand. Oracle checks: GRANNY pool cut (whole capture from the level start) and VICASG04 grab / throw (whole capture) are trace-equal.
+- TB: a state entry that restarts the clip clears the anim's last-frame / restarted bits (0x44d990), so a hit's logic runs as the original: ARQ01's boss hit now knocks Bugs back on the same tick. A player out of the game while the partner plays is no longer ticked or drawn (0x45eee0): a drowned Bugs stays down instead of re-entering 394. Entities keep their tag 0x1b / 0x1c box until their first tick selects the tag-0x61 box record (0x450440): the mover pushes a player out of an unticked entity, and Taz out of Bugs at the ARQ01 start, as the original. Oracle checks ARQ01 (whole capture), VIQ01 (whole capture), TRQ02 inside-309 push, GRANNY slam with the pool cut, VICASG04 pick-up / carry are trace-equal.
+- TB: the level-load camera placement targets the last focus-flagged record, which is template 181 in VIQ01, GRANNY, TRCA01 and 20 more levels (view starts at the origin; the first follow camera after an intro now matches the original); the view list refines a cutting sphere only once the entity has a model instance (entities at the view edge listed on the original's tick). Oracle checks added: Taz's gum float (S[0x67] vertical move, TRQ02) and the TRQ02 309 lift are trace-equal.
+- TB oracle checks (`game.tb` checks, RUNNER=wine captures in `local/wine/compare/w13/checks/`): camera shake S 41 (slam landing, anim 75) and S 49 (underground lift, ARQ01 boss drop), the flagsA 0x8000 glide states 66 / 67 and VIQ01 entity 226, V 0x800000 water-surface snap of splash template 88 are trace-equal.
+- TB: spawn yaw (tag 0x11) is kept raw as the exe does; camera nodes use the exe's integer matrix chain (the look was ±1 off) and flags10 0x20 nodes set the follow camera's restored pose.
+- TB pole climb: a state with flagsA 0x100 grabs a pole (flags0 0x10000: GRANNY 19 / 115, AZCASG05 236) it touches
+  ahead (0x456fb0), the climb tick keeps the climber on the pole's radius (side speed circles it, +0x136 faces it),
+  0x44f690 stops climbing at the top and the mover's ground / wall contact lets go at the bottom; +0x1a0 (R 0x42) now
+  round-trips through the mover image (0x4434c0's ledge probe bits). Trace-equal with two GRANNY oracle runs
+  (`game.tb` climb: grab, ↑, top, ← / →, R1, ↓ to the bottom).
+- TB focus: GD+0xA4 is GAME_DATA (logic reads it: GRANNY's camera director 338), the focus pointer DAT_004d236c moves
+  in the next tick's view-list pass and the camera follows it a tick later (R1 on the pole: camera and the
+  eye-facing pole now match the oracle). The entity pool limit also counts the template and system slots.
+- TB follow / look camera: the sphere sweep is the exe's 0x440360 (up to 11 passes over the gathered polygons and
+  the shapes of nearby entities solid to the camera, push-outs, slides along up to 8 kept normals) instead of an
+  approximate swept sphere (`TbCollision::sweep` / `gather` removed). After the look view is released the eye and
+  body now match the original tick for tick (class 30 check compares them throughout; the oracle presses and
+  releases L2 one tick before R2); the GRANNY shade chase ends on the oracle's camera (eye (6201, −3258, 6399)). The
+  homing jump is checked in `game.tb`: TRBOSS02's cannon spawn launches at Bugs and flies as the oracle's rows
+  1587–1595 (position, velocity, yaw).
+- TB: a state re-entered with a restarted clip re-applies frame 0's attach packet (0x468280), so the look view's
+  class 30 shot (state 237 re-entered every tick by block 4's event 149) spawns as in the original; the look view +
+  class 30 check runs in the normal `game.tb`. Homing jumps (state flagsB 0x100000, 0x44d990: apex over the target's
+  middle, flight ticks, |d| / ticks, flagsC 0x100 lead), face-the-target (flagsA 0x4000), back-to-contact (flagsB
+  0x4000), the jump's detach and pitched impulses are ported. Shadow rays that hit an entity shape take its normal
+  (rayHit returns the 0x4463e0 shape normals; TRCA01 sphere oracle). The GRANNY shade check is rand / state synced:
+  Taz's idle fidget (block 15 roll) now matches the original tick for tick.
+- TB blob shadows (0x464480 / 0x464090) are drawn in GL and Vulkan: each listed entity with a shadow id (tag 0x45,
+  U 17) gets its shadow entity's role-12 model on the floor 2250 below (or its platform), turned onto the floor
+  normal, x / z under the hips, shrunk with height, shifted 5 down / 9 away in view space. GRANNY's shade floors
+  (surface flag 0x80) darken Bugs and Taz to half brightness, 2 steps per tick. Trace-equal with the original
+  (hooked 0x464090, `local/wine/compare/w13/shadow`, `game.tb` shadows). `BBTIME_TB_START` also places Taz.
+- TB brightness vs the original: no renderer change; the earlier 1.12× gap came from `settings.ini`
+  `tb_brightness = 1.125` (the Video page sets it, as in the exe) against the oracle's 1.0 (RUNTIME_REFERENCE §35).
+- TB throw: □ while carrying a flags0 0x800 item (state 160, flagsA 0x40) throws it; the 0x450650 clamp pulls it
+  back from behind a wall. Trace-equal with the original (Granny, item 267 made throwable, 420 ticks incl. the
+  landing on Bugs' head, `game.tb` throw). The camera sweep 0x440360 now caches the shapes of nearby entities
+  (0x448ce0) as the exe does; players' +0x24 0x800 follows their state's flagsB 0x1000. Class 30 (0x44d1f0, the
+  look-view shot, template 151) is ported but not yet oracle-checked.
+- TB carrying (0x453de0): Bugs / Taz pick up carriables (state flagsB 2 probe 0x44e7d0 and carriable contacts raise
+  +0x20 0x200000; △ grab block hangs the item on the hand part; put-down / throw release block with the 0x450650 wall
+  clamp and the nested release 0x44e6d0; V 0x200 with 0x20000000 clamps too). Trace-equal with the original (Granny
+  item 267, 481 ticks, `game.tb` carry). Also: the per-tick +0x20 head clear, flagsA 0x8000 vertical move, V 0x800000
+  (snap to a water zone's surface, keep-world attach with 0x40000), the entity pool limit on spawns, S 74 on the
+  camera-script flags; 0x4463e0 queries take entity masks / no self and return the shortened ray.
+- TB logic ops: every R / S / U item of the 58 levels now has its exe handler (`game.tb` opsScan, 123 537 items). S 119
+  (pause menu Quit Game) quits to the front end, the save slot 0x48840c is known to the world (R 0x52), camera shake
+  (S 41 / S 49, 0x439650) moves the look point (no oracle trace yet), and L2 + R2 opens the look view: the focused
+  character is hidden and HUD sprite 29 is the cross-hair (with the ability cheat), from the oracle's view eye
+  (`local/wine/compare/w13/tb/side_look_mode.png`). Proven to have no effect on PC and
+  so not drawn: the draw bias (S 127, a PS1 ordering-table value no PC draw path reads), the near / entity draw
+  distances (S 109 / S 117) at the high detail level, pad rumble (0x40fc30 reports no force feedback), the actor
+  line-of-sight W mode (no level uses it) and spawn ids 82 / 83 / 185 / 252 / 284 (no such template in their levels).
+- TB fades and S 50 flashes multiply the frame per channel as the original does (every colour × flash colour ·
+  dark / 2²⁴, a near-black tinted blink): a red flash leaves green and blue at 0 (oracle
+  `local/wine/tbintro/w13_flash_red.sh`, `local/wine/compare/w13/tb/side_flash_red.png`). Both renderers gained a
+  frame-multiply 2D draw.
+- TB classes 2 / 4 / 5 / 18 / 21 / 33 / 40 (texture-link writer, sprite, pushable block, seesaw, swinging platform,
+  hung entity, VIBOSS01 plank) and the 0x453de0 ride / push blocks equal the Wine oracle row for row (`game.tb` classes).
+- TB class-0 entities draw their static model: ARCA01's three wall discs and the wall around them were missing
+  (`local/wine/compare/w13/tb/side_arca01_freecam.png`); it is the only class-0 entity with a model in the 58 levels.
+- TB speech plays: a state with mode 0x80 (Granny's welcome, her dialog, Daffy in RETRY) or logic action 62 starts clip
+  `Datas/SPEECH/<language>/Speech<n>.xa` on its own stream at the music volume; the level music stops while it speaks
+  and restarts from its start after (0x42a030 / 0x4291e0). Without a sound device or file the exe's timer ends it.
+  `ctest -R game.tb_speech` checks Granny's clip against the Wine oracle.
+- Install manifests (`bbimport`) escape path bytes that are not well-formed UTF-8 as `\u00XX`, so the JSON stays valid.
+- Launcher: after a hand-off from a pre-0.10.1 launcher, the user's AppImage is found by its AppImage magic as the FUSE
+  child of the launcher's process chain, so renamed AppImages are refreshed too. Replacing a glTF model also takes the
+  external files a `.glb` names.
+- Tools: `export_level.py` walks TB levels with `tb_sec1`'s tag tables instead of a byte pattern; `tb_world.py` refuses
+  a world chunk with a non-identity rotation (none exist: `--check`).
+- TB cheat codes (0x40fbc0 / 0x43bce0): typing RULETHEEARTH arms the pad sequences ○○○○ + three of □ △ ✕; ○○○○□□□ unlocks the pause menu's level select (template 0x1d state 312, oracle `local/wine/tbintro/w13_levelselect.sh`: Down + ✕ loads level 7), the others give clocks 999, abilities, health / lives / partner revival, and GD+0xd2..0xdd.
+- TB language (settings.ini `tb_language`, the front end's Language page, GD+0x93): each level's language section (EN 6, FR 5, DE..NL 7..11) and its entry of the speech and text tables.
+- TB pause-menu key names follow the live key maps (captured keys included).
+- TB free camera (F1 / `--camera`): the view list and portal walk cull from the free camera, so the ARCA01 palms it sees are drawn (`local/wine/compare/w13/tb/side_arca01_freecam.png`).
+- TB actor faces bound to a texture link animate like the world's linked faces.
+- TB CameraTrackPath pool (steering flagsB 0x100, U 20): slots taken and freed as the exe; an entity without one ends its tick.
+- TB 0x453de0 tail clears +0x20 / +0x24 / +0x28 with the exe's masks; sky domes rotate their first part inside the entity yaw.
+- LiT language (settings.ini `lit_language` = config.pc +0x08, G[0x10]): the level text block and the speech section / bank of that language (sections 6, 5, 7, 8, 9, 10), and the speech clips themselves from `speeches/Speech0N.xa` (clip table 0x45c340, played on the music stream; the track restarts after).
+- LiT gun shots (type 31 spawned by an f3 0x20 hand event, 1930s levels) fly along the gun's hand matrix instead of aiming at Bugs; f3 4 / 2 hand spawns add the part's yaw / pitch; hand spawns take the actor's rotation.
+- LiT respawn point 0x4b2460 is no longer reset at a level load: 29 levels never set it, and keep the previous level's (0 after start-up).
+- LiT arc-jump targets are looked up in collision-list order (L03A, L03C share ids); clips with no asset return 0x400 then finished as the exe.
+- LiT stick steering while attached (riding a platform, on a rope, carried) follows the exe's +0xc4 branch: no lean, always camera-relative, the turn goes to his local yaw and his heading comes from the coordinate chain (L01A seesaw ride with Left / Right trace-equal, `testSeesawSteerL01a`).
+- LiT camera nodes are found as 0x44c4b0 does (drawn actors only, flag 0x200 only for the camera actor, camera yaw / distance updated), start after the first tick, and stop every actor timer while a non-camera node holds the view (L02A1 intro trace-equal, `testCameraNodeTimersL02a1`).
+- LiT A17 zone messages: a queued zone (L04A1 zone 31) is flagged in the portal walk, so it is neither drawn nor walked, as in the original (`testZoneQueueL04a1`, `render.test_zones`); actors in a flagged zone stay visible only with flags8 0x10000.
+- LiT respawn point carried into the next level checked against the original (L01A → L02C2); Bugs' spawn yaw keeps the raw level value.
+- TB camera script points ('_' op 0x15): 0x439700's scripted branch now places the camera at the eye (B+0x48, flag 0x400) and look (B+0x58, 0x800) points, easing by 1/4 with 0x20; 0x4000 / 0x8000 make them the restored pose, and the one-shot bits 0x10000 / 8 drop them after one tick. The camera track-path ops are proven inert on PC: no level has a path recorder (flags1 0x40), and `TbWorld::load` flags one if it appears.
+- TB Controls page: the key-capture prompt line had garbled glyphs, because FreeType's .fon face has no charmap and glyph = code − first + 1. It now matches the Wine oracle pixel for pixel (952/952 green pixels; `local/w13/tb/front/side_capture_jump.png`).
+- TB idle fidget test now replays trace G on GRANNY, the level it was recorded on. That level's role-40 asset 144 has 6 frames (oracle peek), so state 23 holds 10 ticks; the test now runs through tick 900 (23 → 24 → 25 → 8 → 26/27/28).
+- TB pause menu "Quit to Granwich" → YES: test against the oracle (`local/wine/tbintro/w13_quit_granwich.sh`: GD+0 = 4 and restart on the same tick).
+- LiT carrying vs the original: pick-up links the actor without placing it (its own update puts it at the hand the next tick), and Bugs at rest with no contact probes (0, −50, 100) in his frame (0x433380: 0x4b3c00, flags14 0x40000, the actor's 0x8000). L01a crate 234 pick-up / carry / put-down / respawn is trace-equal to the Wine oracle for counters 105-1285 (`testCarryL01a`).
+- LiT trigger 0x2000 on Bugs (0x437510): the misaligned "move" at move-list head + first move id is read from the exe's in-memory move list (`LitWorld::moveImage`, layout read under Wine in LB02); it clears his clip and state id unless that byte has 0x40 and its u16 equals his anim.
+- LiT camera reset (0x431160) clears the cut-scene lock G[0x36]: leaving L02A1 mid-intro no longer carries permanent letterbox bars into L02A2 (oracle: 31 at the exit, 0 at L02A2's first counter; `testExitL02a1`).
+- LiT ground shadows: 0x44b4f0's first pass puts a shadow onto the top plane of a platform (flags8 8 / flagsC 0x2000, class 2) between the caster's feet and the ground (L01A seesaw shadows equal the oracle's 0x4efac0 records); actors riding a platform take its tilt; each shadow quad uses its owner's far value (0x44cb90).
+- LiT window keys as bugs.exe: F2 sound on/off, F3 music on/off (volume kept, sounds paused / the track restarted), F4 quit (to the collection menu, as A128). bbtime's own keys moved: F6 fidelity, F7 diagnostics overlay, F8 fog (F5 free-fly unchanged).
+- TB world zones and view flag 1 (0x45eee0 @0x45f5d2): chunk-0x20 zone models (tag 0x21 slot, octree root box, portal list at model +0xc) are parsed; each tick the world entity takes the zone of the camera body (FindZone 0x460520, else the focus's) and the focus its own; the render point rebuilds the visible-zone table 0x4d56a0 with the portal walk 0x465710 / 0x406840 (640×480 float projection, y up; ARBOSS01 tables equal the Wine oracle within 2 px). Entities with view flag 1 tick only when their zone byte (tag 0x1f, spawns take the spawner's, children their parent's) is listed, and outside the camera's zone only when their GTE screen box meets that zone's portal rectangle: ARCA01's zone-2 directors no longer tick (capture B). Culled flags0-0x1000 entities release their model instance (anim restarts, LOD 0), and the app draws listed entities only when in view (+0x24 & 4, 0x465130).
+- TB mover glue: attached entities hang on their parent part's coordinate (+0xe8) with a local +0xfc, as the shape cache composes them; the view list's corner test chains the parent part too.
+- TB classes 9 / 39 (first-tick model setup, 0x44d6f0 / 0x450e00) and 10 (0x450df0: write-only global, no effect) leave the unsupported list.
+- TB pause pauses the sound like the exe: while S[9] = 1 the music stream stops in place (0x429180) and every playing effect buffer stops in place (0x42b5c0); on resume the music goes on where it stopped and copy 0 of each stopped sound plays on, as do looping sounds (0x42b680). Music changes made while paused wait for the resume (0x407460). Start on either pad record opens the pause, as in 0x4014c0.
+- TB pad layer transcribes 0x461100 / 0x460f80: the remap words of preset GD+0x95 / +0x96 (0x460d80 at every level load, table 0x4ceb14) apply to □ ○ △ ✕ L1 L2 R1 R2, not on the digital branch while paused; the joystick axis goes through DirectInput's −127..128 range with dead zone 2000 (0x40ecd0), sets the d-pad bits past 0x10 / 200 (0x40e710), and otherwise scales by the exe's 0x4d..0xb1 dead zone (trunc((b − 0x4d)·128/78)).
+- TB front end Controls pages: waiting for a key shows the exe's green status line ("Set a keyboard Key or click Back to cancel !", string 0x64f, 0x416590) in the stock DC font at the bottom; a gamepad button shows string 0x671 and keeps waiting; the mouse keeps working, so Back cancels.
+- TB demo playback is proven absent on PC: it needs level 0 (TITLE) or 2 (LANGUAGE), which the PC disc lacks and no level change targets; the exe has no record / playback switch. The 8 levels that still carry PS1 demo streams are listed by game.tb.
+- LiT Bugs carries actors (0x43a880 +0x6c): pick-up move flagsA 0x20 (last contact 0x4b3c00, big flags8-0x2000 actors re-probed with 0x433380), put down flagsA 0x40 / throw flagsB 0x40000 (0x433500 mask 0x20100 + wall trace of the release point), the carried-box wall clamp and the tail box variants (longer z1 / the carried box with flagsB 0x2000), rule held-actor mask +0x1c and the +0x0c carried-state command, hand hits with the carried actor, releases on death / float / grab; carried children hang on his packet-10 part chain. New type 34 held item (0x446990). Pushable blocks (0x445a60): box scaled at the first call, the 0x432fe0 solid-overlap trigger, their own 0x433500 push, free mode 4, trigger list +0xfc, push sounds (0x4467cd), zone triggers. Bugs' body attack uses 0x432fe0, 0x433380 walks the collision list with the full rotation; 0x433500's corner-in-quad pass is compiled out in the exe (proven, the stand-in removed). LS01 releases sound 0x4a on Bugs' clip ends (0x43ea74 / 0x43eb31); LiT sound entries with flag 0x100 add the emitter's first-part translation (0x41f620). 0x437b90 unlinks Bugs from his parent and keeps the running clip.
+- TB anim logic lists run on the tick that counts the frame hold down to 0 (0x469770 @0x469a41), not on the frame step. The swim and jump traces now replay the oracle's held pad word (GD+0xa; the old rows carried the pressed edge): swim 899/899 and jump 479/479 rows equal the oracle.
+- TB view list honours the level's list sizes (chunk 0x3a tag 0x3d @0xc view, @0x20 collision; 0x45eee0): an overflowing view list ends the pass.
+- game.tb guard test replays capture B's per-tick seed (like the F9 Taz spin) and checks each 401 variant against the capture that shows it; the F9 run starts Taz at the oracle's health 4.
+- LiT pad remap presets 1–3 (0x448fa0, table 0x4ae1f0) applied at every level start from G[0x11]; settings.ini `lit_pad_preset`, Options "LiT controller". Paused, the pad is not remapped and has no ✕/□/L1 press window, as in the exe. Verified against the Wine oracle's remap words and held words.
+- LiT pause menu Video and Controls pages work: resolution list, fog distance, display and renderer (A106–A108, A111–A118) with the exe's Apply rules (windowed modes step below the desktop size), key capture with swapping (C94) and joystick button capture (C95). Changes go to settings.ini (`bind.*`, `lit_joy_buttons`, `width` / `height` / `fullscreen`, `lit_fog_distance`, `lit_renderer`) and resize the window like the exe's display re-init; the fog distance feeds the Original Fidelity draw distance. The gamepad follows the joystick button map.
+- LiT music volume uses the exe's DirectSound attenuation ((v − 100) dB) instead of a linear gain, and below 50 the zone music no longer changes; the pause menu's volume changes are saved.
+- LiT demo playback of a level's demo stream (chunk 0x47; no PC level has one) and the exe's `/r:` / `/p:` pad tape as `--record FILE` / `--playback FILE` (same file format as bugs.exe writes).
+- The exe's "controller removed" pause is dead code on PC (PadGetState always reports a pad) and stays unported.
+- LiT texture links follow the world (alias table 0x4e5e80 written by type-2 / type-20 actors, 0x438830 / 0x445500): LS01's time-machine lights and vortex line up with the original counter for counter (`testLinksLs01`: rand seed and 13 links equal every counter 3–3001).
+- LiT TraceGround 0x434cd0 transcribed exactly (cell / sub-cell walk with the 16-entry history) instead of the sub-cell approximation.
+- LiT player box top +0x52 starts at the entity's tag 0x1c / 0x42 value instead of −400.
+- TB particles are simulated and drawn (tb_fx.cpp): emitter slots 0x4d6ae0 with every S 118 field (0x452060), emission 0x452ab0 (V 0x80200000), update and draw 0x453350 / 0x452e80 (sprites, water-surface rings, gouraud lines, re-birth on the surface), S 138 slot clear, actor touch 0x447ee0 and R 0x48. Granny pond splash: `game.tb` fx replays 433 oracle particle states, all equal (local/wine/compare/w13/fx); emission rand use checked against the oracle seed (emitcheck.txt). Drawn in GL and VK; side-by-side local/wine/compare/w13/fx/side/side_granny_splash.png.
+- TB weather streaks (S 110, 0x451370 / 0x451200: VIR01, VICASG03/04) and '^' effect spawns (bits 1, 2 with 0x2000, 8; the other bits occur in no level).
+- TB rig swaps (V 0x80020000, 0x469320; TRCA01) and the distance-LOD rig swap (0x45eee0 view flag 0x400, `lodTick`).
+- TB sky domes are a background layer as in bblit2 (`0x465710` layer 0, `0x422eb0` depth clear before the world): behind
+  everything at any distance, own far clip (64000 with entity flag 0x2000000 `Mesh::farClip`, else the level's), no
+  fog; Enhanced water reflects and fades into the dome. A dome whose view flags (tag 0x39 @0) have 0x20 is never
+  listed and never drawn (VIR01's second dome no longer covers the sky). Original Fidelity VK draws domes with the
+  exe's CPU projection (`0x408990`, glOrtho 0..65536). Octree primitives with a vertex beyond model x/y ±32000 are
+  dropped as `0x408990` / `0x41eee0` do. Each dome sits where the exe draws it: at its first draw item's coordinate
+  (`0x465710` composes the matrix from item 1, then draws the LOD item's model without item 2's own offset), i.e. the
+  first part of its class-1 skeleton after the class-0xb animation the init `0x44d6f0` plays — VICASG04 / VIR01 domes
+  6000 lower (the peach peaks / big mountains now sit on the horizon as in the oracle), AZCASG05 / AZQ01 rotated
+  (oracle peeks `local/w13/sky/peek_*.txt`, side-by-sides `local/w13/sky/side_sky_*.png`).
+- Enhanced water fills TB water zones (the exe's 0x1000 trigger zones, `0x44f550`) that hold the level's own water
+  layers, at the surface the game measures depth from: the Granny pond (only scattered additive patches in the data)
+  is now stylised water, and Bugs swimming in it leaves a wake (`local/shots/w13/side_granny_wake.png`).
+- Translucent meshes are sorted per polygon by mean eye depth (`0x413440`) in GL and VK.
+- Original Fidelity draw distances from the exe: LiT per-object fog end `0x44cb90` / `0x40cc80`; TB clips at the
+  world's far slice (chunk 0x3a tag 0x3c @2; the exe culls world octree nodes there and draws models to 32000, bbtime
+  clips every pixel at it).
+- LiT ground shadows use the exe's view-space offset (`0x44bb50`: 5 down, 9 away) instead of a 24-unit pull
+  (bugs.exe's view keeps PS1 y down: live view matrix `0x4efb00` row 1 (3, 2558, −70)).
+
+- TB: Bugs dives when □ is pressed in water. The move vector now goes through the exe's yaw · roll · pitch matrix
+  (`0x453de0`), so he swims down along his pitch to the pond floor as in the original (Granny pond oracle
+  `local/wine/compare/w13/tb/swim_sfx`). The whole steering block of `0x453de0` is transcribed into
+  `tb_steer.cpp`: wander, face/flee pitch, sidestep, hover, lean/flight/roll steering, camera-capped turns, face
+  camera, pitch level-out and roll reset.
+- TB swim sounds match the original: entry and dive splash (id 7) and jump-out (id 19) start on the same ticks at
+  levels 100/100. The SFX config volume now defaults to the exe's GD+0x97 = 0x80 (was 127). New `game.tb` checks
+  `swim` / `jump`.
+- TB logic `T` conditions 5–13 (`0x4cd8e4`): surface flags of the last floor (+0x144), state flags, box index,
+  link id and camera path node. The Credits level shows its three HUD sprites (`0x4622d0`).
 
 - LiT Original Fidelity draws blended faces the way bugs.exe's GL renderer does (`0x4124b0`): they write depth, are
   sorted per triangle back to front, Bugs' and shadow faces come last, and depth is the exe's screen-linear eye

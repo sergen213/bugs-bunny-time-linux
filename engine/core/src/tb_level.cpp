@@ -1,4 +1,5 @@
 #include "bb/tb_level.h"
+#include "bb/tb_actor.h"
 #include "bb/tim.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <format>
 #include <map>
 #include <numbers>
+#include <ranges>
 #include <set>
 #include <tuple>
 
@@ -117,7 +119,7 @@ struct Builder {
     std::vector<Vec3> verts;  // current leaf / object table, transformed
 
     // Face texture id -> texture index (>= 0), texture link (-2 - anim index), or -1 = alias 0. The original resolves
-    // ids through the alias table DAT_004d038c and skips prims whose alias is 0 (TEXTURE_GAP.md §1); counted here.
+    // ids through the alias table 0x4d038c and skips prims whose alias is 0 (TEXTURE_GAP.md §1); counted here.
     int32_t resolve(uint32_t id) {
         if (auto it = tex.find(id); it != tex.end()) return it->second;
         if (auto it = links.find(id); it != links.end()) {
@@ -226,9 +228,13 @@ struct Builder {
             const uint16_t nv = in.u16(node + 0x10), np = in.u16(node + 0x12);
             in.need(node + 0x14, size_t(nv) * 8 + size_t(np) * 28);
             b.verts.resize(nv);
+            // GL vertex transform 0x408990 rejects a vertex whose model x or y lies outside ±32000 (marker
+            // 3.4e38), and 0x41eee0 then drops every polygon using it (VIR01 / VICASG04 sky domes, r up to 32299).
+            std::vector<bool> rejected(nv);
             for (size_t i = 0; i < nv; ++i) {
                 const size_t q = node + 0x14 + i * 8;
                 b.verts[i] = xf.apply(in.s16(q), in.s16(q + 2), in.s16(q + 4));
+                rejected[i] = std::abs(in.s16(q)) > 32000 || std::abs(in.s16(q + 2)) > 32000;
             }
             const uint32_t sortGroup = b.nextGroup++;
             for (size_t i = 0; i < np; ++i) {
@@ -248,11 +254,13 @@ struct Builder {
                     uv[0] = e, uv[1] = e + 4, uv[2] = e + 8, uv[3] = e + 10, tpage = e + 6;
                 }
                 ++b.s.stats.worldFaces;
-                if (draw) b.prim(in, r, n, idx, b1 & 0x40 ? nullptr : uv, tpage, group, sortGroup, gname);
+                const bool reject = std::ranges::any_of(std::span(idx, size_t(n)), [&](uint32_t k) { return k < nv && rejected[k]; });
+                if (draw && !reject) b.prim(in, r, n, idx, b1 & 0x40 ? nullptr : uv, tpage, group, sortGroup, gname);
                 else {
                     b.resolve(in.u16(r + 2) & 0xfff);  // counted like drawn faces (TEXTURE_GAP.md counts all trees)
                     b.checkIndices(idx, n, gname, r);
-                    ++b.lodFaces;
+                    if (draw) ++b.s.stats.rejectedPrims;
+                    else ++b.lodFaces;
                 }
             }
         };
@@ -407,6 +415,8 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
     // runtime, so pcTexGamma stays 1; the CLUT colours get the brightness pass below (tbAdjustColor).
     s.colorScale = 255.0f / 128.0f;
     Builder b{s, {}, {}, {}, {}, 0, false, 0, {}};
+    for (const TbChunk& ch : script.chunks)  // far clip 0x4d5980: chunk 0x3a tag 0x3c u16 @2
+        if (const auto p = ch.tag(0x3c); ch.type == 0x3a && p.size() >= 4) s.tbFarClip = le16(p, 2);
 
     std::vector<std::string> texErrors;
     for (const TbChunk& ch : script.chunks) {
@@ -439,10 +449,13 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
     struct Sprite { uint16_t cls; std::vector<uint32_t> ids; };
     std::vector<Asset> models;
     std::map<uint16_t, size_t> assetModel;
+    std::map<uint16_t, std::pair<uint16_t, std::span<const uint8_t>>> tods;  // asset id -> class, tag 0x25 TOD
     std::map<uint16_t, Sprite> sprites;
     for (const TbChunk& ch : script.chunks) {
         if (ch.type != 0x22) continue;
         const auto id = ch.tag(0x27);
+        if (const auto tod = ch.tag(0x25); !tod.empty() && !id.empty())
+            tods[le16(id, 2)] = {le16(id, 0), region(section(ch.section), tod, ch.section)};
         if (const auto seq = ch.tag(0x3f); !seq.empty() && !id.empty()) {
             const In in{region(section(ch.section), seq, ch.section), "sprite sequence"};
             const size_t ph = in.u32(4), nd = in.u16(ph + 2);
@@ -451,6 +464,21 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
                 if (in.u8(ph + 0xc + 16 * i + 3) != 0x64)
                     throw FormatError(std::format("sprite sequence record {} at 0x{:x}: type is not 0x64", i, ph + 0xc + 16 * i));
                 sp.ids.push_back(in.u16(ph + 0xc + 16 * i + 10) & 0xfff);
+                if (sp.cls != 0x17) continue;
+                // Effect sprites (particles 0x453350): the whole texture; record flags @2 & 8 = semi-transparent with
+                // the tpage ABR @6 bits 5-6 (0x41c660 draws it with that ABR), else colour-keyed.
+                SpriteFrame f;
+                const auto tx = b.tex.find(sp.ids.back());
+                f.texture = tx == b.tex.end() ? -1 : tx->second;
+                if (in.u8(ph + 0xc + 16 * i + 2) & 8) {
+                    constexpr Blend kAbr[4] = {Blend::Alpha, Blend::Additive, Blend::Subtract, Blend::Additive};
+                    constexpr uint8_t kAlpha[4] = {128, 255, 255, 64};
+                    const uint32_t abr = (in.u16(ph + 0xc + 16 * i + 6) >> 5) & 3;
+                    f.blend = f.pcBlend = kAbr[abr], f.alpha = f.pcAlpha = kAlpha[abr];
+                } else {
+                    f.blend = f.pcBlend = Blend::AlphaTest;
+                }
+                s.sprites[le16(id, 2)].push_back(f);
             }
         }
         const auto mdl = ch.tag(0x24);
@@ -481,8 +509,8 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
     // Frames: type 20 (tag 0x13) = looping flipbook FUN_00453d00 over the first listed asset of class 0x17; start
     // frame u16 +0x68, hold byte +0x6c, both from tag 0x41 (the only writer on link entities in the data); the frame
     // advances when the hold counter runs out, i.e. every hold+1 ticks, never when hold = 0; wraps after the last
-    // record. Type 2 (script graph) and others: the latest kind-0x100 asset before tag 0x0b, frame order and timing
-    // driven by the logic VM — cycled in record order here, 2 ticks per frame (Inferred).
+    // record. Type 2 (0x4599e0, state driven) and others: the latest kind-0x100 asset before tag 0x0b; a running
+    // world writes the type-2 alias (TbWorld::textureLinks), records maps it to a texture.
     uint32_t linkFrameErrors = 0;
     for (const TbChunk& ch : script.chunks) {
         if (ch.type != 0x07 && ch.type != 0x08 && ch.type != 0x0a && ch.type != 0x63) continue;
@@ -517,8 +545,13 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
                 an.startFrame = le16(p, 0) % an.frames.size();
                 an.holdTicks = p[4] ? p[4] + 1u : UINT32_MAX;
             } else {
-                an.holdTicks = 2;
+                an.holdTicks = 2;  // without a running world (viewer): cycled in record order, 2 ticks per frame (Inferred)
                 an.timingInferred = true;
+            }
+            if (type == 2) {  // TbWorld::textureLinks holds the 0x465c80 alias = texture id: records maps it (12 bits)
+                an.records.assign(0x1000, -1);
+                for (const auto& [id, ix] : b.tex)
+                    if (id < 0x1000) an.records[id] = ix;
             }
             if (auto [it, fresh] = b.links.try_emplace(an.linkId, int32_t(s.textureAnims.size())); fresh) s.textureAnims.push_back(std::move(an));
             else s.textureAnims[size_t(it->second)] = std::move(an);  // several writers: the last entity wins (Inferred)
@@ -573,13 +606,60 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
         if (model->octree) {
             // The class-9 draw 0x465710 overwrites the entity position with the view eye every frame (tag 0x10 is
             // never used) and lifts the matrix by +0x76 (tag 0x39 s16 @2, PS1 y): built here in eye space,
-            // drawn at the eye (Scene::skyMeshes).
+            // drawn at the eye (Scene::skyMeshes). View flags +0x6e (tag 0x39 @0) 0x20: the view list 0x45eee0
+            // never lists the entity, so it is never drawn (VIR01's second dome, lift 5000).
+            // 0x465710 composes the matrix (0x405820) from the coordinate of the entity's FIRST draw item and draws
+            // the model of the later LOD item without that item's own coordinate, so the dome sits at the first
+            // part's offset. The parts: the class-1 skeleton's frame 0, then the class-0xb animation the init
+            // 0x44d6f0 plays (0x469770, class 0xb). VICASG04 / VIR01: part 1 (no object) at (0, 6000, 0), part 2
+            // (the dome) at (0, -6000, 0) under it, so the exe draws the dome 6000 lower than its rig places it
+            // (oracle peeks local/w13/sky/peek_*.txt; ARCA01 / VIQ02 have no offset).
             model->placed = true;
             const auto lift = ch.tag(0x39);
             xf.t[0] = xf.t[2] = 0.0f;
             xf.t[1] = lift.size() >= 4 ? float(int16_t(le16(lift, 2))) : 0.0f;
+            AnimState st;
+            for (const int cls : {1, 0xb})
+                for (const TbTag& t : ch.tags)
+                    if (const auto a = t.id == 0x0f ? tods.find(le16(t.data, 0)) : tods.end(); a != tods.end() && a->second.first == cls) {
+                        const Tod tod = parseTbTod(a->second.second);
+                        applyTbFrame(st, tod, 0);
+                        if (tod.frames() > 1)  // VIQ02's class-0xb animation has 2 frames (VICASG04 / VIR01 / ARCA01: 1)
+                            s.notes.push_back(std::format("sky dome at 0x{:x}: {}-frame class-{} animation, frame 0 only", ch.offset, tod.frames(), cls));
+                        break;
+                    }
+            std::array<float, 9> partM{1, 0, 0, 0, 1, 0, 0, 0, 1};
+            if (!st.parts.empty()) {
+                const TodPart& p0 = st.parts.front();
+                partM = p0.m;
+                const float x = float(p0.trans[0]), y = float(p0.trans[1]), z = float(p0.trans[2]);
+                xf.t[0] += xf.cy * x + xf.sy * z, xf.t[1] += y, xf.t[2] += -xf.sy * x + xf.cy * z;
+            }
             const size_t first = s.meshes.size();
             b.octree(model->model, xf, std::format("sky{}", ch.offset));
+            // The first part's rotation (AZCASG05 / AZQ01 domes) inside the entity yaw: p = R_e R_p v + t, PS1 axes
+            // (engine (x, -y, -z)); the built vertices hold R_e v + t, so R_e R_p R_e^T is applied about t.
+            if (partM != std::array<float, 9>{1, 0, 0, 0, 1, 0, 0, 0, 1})
+                for (Mesh& m : s.meshes | std::views::drop(first))
+                    for (Vertex& v : m.vertices) {
+                        const float qx = v.pos[0] - xf.t[0], qy = -v.pos[1] - xf.t[1], qz = -v.pos[2] - xf.t[2];
+                        const float ux = xf.cy * qx - xf.sy * qz, uz = xf.sy * qx + xf.cy * qz;  // R_e^T
+                        const float rx = partM[0] * ux + partM[1] * qy + partM[2] * uz;
+                        const float ry = partM[3] * ux + partM[4] * qy + partM[5] * uz;
+                        const float rz = partM[6] * ux + partM[7] * qy + partM[8] * uz;
+                        v.pos[0] = xf.cy * rx + xf.sy * rz + xf.t[0];
+                        v.pos[1] = -(ry + xf.t[1]);
+                        v.pos[2] = -(-xf.sy * rx + xf.cy * rz + xf.t[2]);
+                    }
+            if (lift.size() >= 2 && (le16(lift, 0) & 0x20)) {  // decoded (validated, counted in worldFaces), not drawn
+                for (const Mesh& m : s.meshes | std::views::drop(first)) s.stats.triangles -= m.indices.size() / 3;
+                s.meshes.resize(first);
+                continue;
+            }
+            // Far clip 64000 with entity flags (tag 0x16 @4, +0xc) 0x2000000, else the level's (Mesh::farClip).
+            const auto fl = ch.tag(0x16);
+            const float farClip = fl.size() >= 8 && (le32(fl, 4) & 0x2000000) ? 64000.0f : 0.0f;
+            for (Mesh& m : s.meshes | std::views::drop(first)) m.background = true, m.farClip = farClip;
             std::ranges::move(s.meshes.begin() + ptrdiff_t(first), s.meshes.end(), std::back_inserter(s.skyMeshes));
             s.meshes.resize(first);
             continue;
@@ -604,6 +684,7 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
                                   s.stats.worldModels, s.stats.skyDomes, unplaced, s.stats.props, s.stats.skippedActors));
     if (!players.empty()) s.notes.push_back("Players (identity Inferred): " + players);
     if (s.stats.invalidPrims) s.notes.push_back(std::format("{} primitives fail CheckPrimValidity: skipped as in the game", s.stats.invalidPrims));
+    if (s.stats.rejectedPrims) s.notes.push_back(std::format("{} primitives use a vertex beyond model x/y ±32000: skipped as in the game (0x408990)", s.stats.rejectedPrims));
     if (b.lodFaces) s.notes.push_back(std::format("{} far-LOD faces (octree tree C, DETAILS < 2 only) decoded, not drawn", b.lodFaces));
     if (!s.textureAnims.empty())
         s.notes.push_back(std::format("{} texture links (animated, TEXTURE_GAP.md) drive {} faces{}", s.textureAnims.size(),

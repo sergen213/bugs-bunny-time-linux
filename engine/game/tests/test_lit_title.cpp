@@ -52,13 +52,15 @@ int main() {
     LitWorld w = LitWorld::load(bze, &scene);
     w.level = 0;
     w.loadUpdate();
+    w.tick({});
+    litFrontEnd(w, dir);  // the exe's first level draw (camera nodes, 0x44c4b0) follows the counter-3 tick
     // Oracle: the camera node of the actor at (0, 146, 0) holds eye (1, 146, 0), look (1, 146, 1000), flags 0x3xx.
     assert(w.cam.eye.x == 1 && w.cam.eye.y == 146 && w.cam.eye.z == 0);
     assert(w.cam.target.x == 1 && w.cam.target.y == 146 && w.cam.target.z == 1000);
     assert((w.cam.flags & 0x300) == 0x300);
 
     bool prompt = false;
-    for (int t = 0; t < 230; ++t) {
+    for (int t = 1; t < 230; ++t) {
         PadInput in;
         if (t >= 200 && t < 203) in.buttons = PadStart;  // Enter (C79 mask 0x80) once "PRESS ENTER" shows
         w.tick(in);

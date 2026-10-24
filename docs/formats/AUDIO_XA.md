@@ -92,7 +92,8 @@ Runtime rules (O; `bb::game::LitWorld::musicTick`, `ctest -R game.sfx` `testMusi
   10 then 11; elsewhere the track loops).
 * Pause / help (S[12] 1 or 3): 0x41d5c0 stops the DirectSound buffer keeping its position, 0x41d5e0 resumes.
 * The config music volume `DAT_009ca854` (0–100, ±5 steps) below 50 disables music; the buffer volume is
-  (v − 100) · 100 hundredths of a dB. bbtime keeps its own `music_volume` slider (not ported).
+  (v − 100) · 100 hundredths of a dB. bbtime: settings.ini `music_volume` = this value, LiT music gain
+  10^((v − 100) / 20) (`litMusicGain`), and `LitWorld::musicTick` changes nothing below 50.
 
 Wine oracle (Proton-GE, `AUDIO=1` into a PulseAudio null sink; `local/wine/litmusic/capture.sh`, `trace.csv`,
 `fds.log`): `/b04` L01A holds `track/TRACK2.xa` open (`DAT_004abf94` = 2, playing); a poked level change to 7 (L01D1)
@@ -204,8 +205,9 @@ positional starts match `sfxLevels` exactly (both pan sides, 0/0 beyond 4096: e.
 100/100, and every frequency equals `sfxRateLit(44100, note)` of the first table entry's program: notes 70/71/78/80/82
 → 24750/23361/15592/13891/12375 Hz (speech 53 uses the language bank's program). Asserted in `game.sfx`.
 
-Not ported: LiT 0x4467cd push sound (global 0x4b2160), 0x43ea74/0x43eb31 releases of 0x4a in level 3, emitter
-part offsets (flag 0x100), 2-player views (the view byte always matches).
+Ported in wave 13: LiT 0x4467cd block push sound (loop bit 0x4b39d0 & 1, id global 0x4b2160), 0x43ea74/0x43eb31 releases
+of 0x4a in level 3 (LS01), emitter part offset (flag 0x100: 0x41f620 adds the first part's coordinate-param translation
++0x84). Not ported: 2-player views (the view byte always matches).
 
 ## TB `70R4N.MP4`, CD audio
 

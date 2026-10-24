@@ -134,6 +134,27 @@ bool LitWorld::cond(const LogicItem& it, LitActor* self) {
         if (it.cond == 92) return linked && m[2] == A;
         return m[0] == 0 ? m[2] != A : !linked && m[2] == A;  // (sic: an unmet link compares equal)
     }
+    case 94: case 95: {  // 0x42bad0 / 0x42c140: capture a key / joystick button for the action of menu item B's value
+        // Item value -> >D / >J slot (keyNames order): C94 config kbdMap 8 9 10 11 6 7 4 5, C95 joyMap 0 1 2 3 4 5 7 6.
+        static constexpr size_t kKbd[8] = {2, 1, 3, 0, 4, 6, 7, 5}, kJoy[8] = {2, 1, 3, 0, 4, 6, 5, 7};
+        const int32_t v = menu[B % menu.size()][2];
+        if (it.cond == 94) {
+            if (key_ == 0 || v < 0 || v > 7) return false;
+            const size_t n = kKbd[v];
+            for (size_t j = 0; j < 8; ++j)  // the key's other slot takes the replaced key (swap)
+                if (j != n && keyCodes[j] == key_) keyCodes[j] = keyCodes[n], keyNames[j] = keyNames[n];
+            keyCodes[n] = key_, keyNames[n] = dikName(key_);
+            configChanged |= 1;
+            return true;
+        }
+        if (joyButton_ == 0xff || v < 0 || v > 7) return false;  // 0xfe (none held) is stored as well
+        const size_t n = kJoy[v];
+        for (size_t j = 0; j < 8; ++j)
+            if (j != n && joyButtons[j] == joyButton_) joyButtons[j] = joyButtons[n];
+        joyButtons[n] = joyButton_;
+        configChanged |= 2;
+        return true;
+    }
     case 96: return (keys_ & 2) != 0;  // 0x42c670: Esc held (0x4b18d0 bit 1)
     case 97: return helpRequest_;      // 0x42c680: F1 help request pending
     case 98: return joystick == (A != 0);  // 0x42c690: config use-joystick (selects >D vs >J hint scripts)
@@ -177,7 +198,7 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     case 14: gy &= uint8_t(X); return;
     case 15: if (X) sy = uint8_t(rand_() % X); return;
     case 16: if (X) gy = uint8_t(rand_() % X); return;
-    case 17: return;                                         // message queue 0x4b2480: no reader among the ported opcodes
+    case 17: if (zoneMessages.size() < 8) zoneMessages.push_back(X); return;  // zone message queue 0x4b2480
     case 18: sy = uint8_t(X); return;
     case 19: gy = uint8_t(X); return;
     case 20: sy = S[X & 0xff]; return;
@@ -349,10 +370,67 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
     }
     case 120: menuLock = 1; return;
     case 121: menuLock = 0; return;
-    case 122: volume34 = volume34 < 0x5f ? volume34 + 5 : 0; return;  // config +0x34 (WriteConfig: app settings)
-    case 123: volume34 = volume34 < 0x33 ? 100 : volume34 - 5; return;
-    case 124: volume30 = volume30 < 100 ? volume30 + 10 : 0; return;  // config +0x30
-    case 125: volume30 = volume30 < 1 ? 100 : volume30 - 10; return;
+    case 122: volume34 = volume34 < 0x5f ? volume34 + 5 : 0; configChanged |= 4; return;  // config +0x34, WriteConfig
+    case 123: volume34 = volume34 < 0x33 ? 100 : volume34 - 5; configChanged |= 4; return;
+    case 124: volume30 = volume30 < 100 ? volume30 + 10 : 0; configChanged |= 4; return;  // config +0x30
+    case 125: volume30 = volume30 < 1 ? 100 : volume30 - 10; configChanged |= 4; return;
+    case 106: case 107: case 108: case 111: case 112: case 113: case 114: case 115: case 116: case 117: case 118: {
+        // Video page (0x42dcd0..0x42e050; no bound check on item Y in the exe). Mode list 0x7c62a0 = the fullscreen /
+        // windowed table 0x467410 / 0x467470 (the same 8 {w, h}; 0x4674d0 belongs to config +0x0c = 2, never in bbtime),
+        // entry i usable when the display offers it (modeValid, 0x409990).
+        static constexpr int32_t kModes[8][2] = {{0, 0}, {320, 240}, {512, 384}, {640, 480}, {800, 600}, {1024, 768}, {0, 0}, {0, 0}};
+        auto valid = [&](int32_t i) { return i >= 0 && i < 8 && modeValid[size_t(i)]; };
+        auto mode = [&](int32_t i, int c) { return i >= 0 && i < 8 ? kModes[i][c] : 0; };
+        int32_t& v = menu[it.y % menu.size()][2];
+        switch (it.act) {
+        case 106: {  // step down to the previous usable mode (none: unchanged)
+            const int32_t was = v;
+            if (was > 0) {
+                int32_t i;
+                v = was - 1;
+                do { i = v; if (valid(i)) break; v = i - 1; } while (i > -1);
+                if (v < 0) v = was;
+            }
+            return;
+        }
+        case 107: {  // step up; windowed (A116 choice 0) also stops on a mode at least the desktop size
+            const int32_t was = v;
+            if (was < 7) {
+                int32_t i;
+                v = was + 1;
+                do { i = v; if (valid(i) || (!videoSel_.full && (deskW <= mode(i, 0) || deskH <= mode(i, 1)))) break; v = i + 1; } while (i < 8);
+                if (v > 7) v = was;
+            }
+            return;
+        }
+        case 108:  // the configured resolution's index (unchanged when not listed)
+            for (int32_t i = 0; i < 8; ++i)
+                if (kModes[i][0] == video.width && kModes[i][1] == video.height) { v = i; break; }
+            return;
+        case 111: v = video.fullscreen ? 1 : 0; return;
+        case 112: v = video.fogDist; return;
+        case 113: v = video.renderer == 2 ? 0 : video.renderer == 0 ? 1 : video.renderer == 1 ? 2 : v; return;  // 0x4ac094
+        case 114: videoSel_.w = mode(v, 0), videoSel_.h = mode(v, 1); return;
+        case 115: videoSel_.fog = v; return;
+        case 116: videoSel_.full = uint8_t(v); return;  // config +0x0c != 2: the item's low byte
+        case 117: videoSel_.rend = v; return;
+        default: {  // A118: apply. Windowed: step down while the mode covers the desktop; WriteConfig, 0x45f2b0 = 0x13
+            if (!videoSel_.full)
+                while (deskW <= videoSel_.w && deskH <= videoSel_.h) {
+                    int32_t i = v;
+                    v = i - 1;
+                    while (i > -1) { i = v; if (valid(i)) break; v = i - 1; }
+                    videoSel_.w = mode(v, 0), videoSel_.h = mode(v, 1);
+                }
+            video.fullscreen = videoSel_.full, video.fogDist = videoSel_.fog;
+            video.width = videoSel_.w, video.height = videoSel_.h;
+            if (videoSel_.rend == 2) videoSel_.rend = video.renderer;  // (sic) config +0x0c == 0
+            video.renderer = videoSel_.rend == 0 ? 2 : videoSel_.rend == 1 ? 0 : videoSel_.rend == 2 ? 1 : video.renderer;
+            configChanged |= 8;
+            return;
+        }
+        }
+    }
     case 59:  // 0x42d2c0 camera shake: speed X·11, amplitude / duration Y (phase restarts unless already shaking)
         if (shakeAmp_ == 0) shakePhase_ = 0;
         shakeSpeed_ = int16_t(X * 0xb), shakeAmp_ = int16_t(it.y);
@@ -368,7 +446,8 @@ void LitWorld::act(const LogicItem& it, LitActor* self) {
         return;
     case 85: camTarget_ = self ? int32_t(self - actors.data()) : -1; return;  // 0x42d840: camera follows self next tick
     case 128: quitRequest = true; return;  // 0x42e350: 0x45f2b0 = 0x14, the "Do you really want to quit?" dialog
-    default: skip();  // A44 0x28, A106-A108 / A111-A118 video modes
+    case 44: p.shadowBias = int16_t(X); return;  // 0x42d0a0: player +0x28 = X (LitWorld::Shadow::sortBias)
+    default: skip();
     }
 }
 

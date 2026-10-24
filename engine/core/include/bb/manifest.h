@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bb {
@@ -43,5 +44,7 @@ struct Manifest {
 // Walks `root` read-only. Never throws for per-file problems; they land in ManifestFile::error.
 Manifest scanInstall(const std::filesystem::path& root);
 std::string manifestJson(const Manifest& m);
+// The quoted JSON string manifestJson writes for a path / name (bytes outside well-formed UTF-8 -> \\u00XX).
+std::string jsonQuote(std::string_view s);
 
 } // namespace bb

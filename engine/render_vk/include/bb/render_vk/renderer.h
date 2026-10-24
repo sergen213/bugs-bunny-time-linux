@@ -71,6 +71,9 @@ public:
     void setActorMeshes(std::span<const Mesh> meshes, size_t shadowCasters = SIZE_MAX);
     // 30 Hz simulation tick selecting the current frame of Scene::textureAnims (Mesh::textureAnim).
     void setTextureTick(uint32_t tick) { texTick_ = tick; }
+    // LiT texture links of this frame (LitWorld::textureLinks): Scene::textures index per Scene::textureAnims entry,
+    // -1 = that link's tick clock. Empty = every link on the clock (TB, scene viewer).
+    void setTextureLinks(std::vector<int32_t> tex) { linkTex_ = std::move(tex); }
     // LiT zone/portal visibility (bb/render/zones.h), as the GL renderer: only the rasterised passes skip hidden
     // zones; the shadow map and the ray-tracing BLAS keep every zone.
     void setZoneView(const render::ZoneView& v) { zoneView_ = v; }
@@ -87,6 +90,8 @@ public:
     void drawScene(const Camera& cam, const Settings& s);
     void drawImage(uint32_t image, float x, float y, float w, float h, bool smooth, const uint8_t rgba[4] = nullptr);
     void drawRect(float x, float y, float w, float h, const uint8_t rgba[4]);
+    // Multiplies the frame under the rect by rgb (DST_COLOR · src): TB fades / flashes, which scale every glColor.
+    void multiplyRect(float x, float y, float w, float h, const uint8_t rgb[4]);
     void drawText(float x, float y, int scale, std::string_view text, const uint8_t rgba[4]);
     static constexpr int kGlyph = 8;
 
@@ -122,8 +127,10 @@ private:
     // a sloped navy stream bed, stylised water where it lies (never a fill plane); tint: packUnorm4x8 of the colour the
     // original draws the water in (texture mean x vertex colour x scene scale), the stylised water's hue and brightness
     // late / tris: Mesh::late and triCentroids (bb/render/pc_order.h) for bugs.exe's blended order (LiT Original Fidelity)
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen, bed, surf, slope; uint32_t tint; bool late = false; std::vector<glm::vec3> tris; };
-    struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; };
+    // unitUv: every UV in [0, 1] (no tiling)
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided, actor, caster, receiver; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; int32_t textureAnim; uint32_t material; bool reactive; int16_t zone; bool water, sheen, bed, surf, slope; uint32_t tint; bool late = false, background = false; float farClip = 0.0f, fogEnd = 0.0f; std::vector<glm::vec3> tris; bool unitUv = false; };
+    VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;  // init: D32 float, else X8_D24
+    struct UiDraw { VkBuffer buf; VkDeviceSize off; uint32_t count; bool multiply; };
     struct RtGeo { uint64_t vtx, idx; uint32_t first; int32_t base; uint32_t tex, pad; }; // scene.frag Geo
     struct TexAnim { std::vector<uint32_t> frames; uint32_t start, hold; }; // frames as bindless slots
     struct TexSrc { uint32_t w, h; const uint8_t* rgba; };
@@ -147,6 +154,7 @@ private:
     void waterTargets(VkExtent2D ext);
     bool waterWaves(const Camera& cam, glm::vec4& field);
     void waterCopy(VkImage color, VkImage depth, bool depthResolved);
+    void copyColor(VkImage color, VkImage dst);
     void updateFsr(const Settings& s);
     void fsrResolve(const Settings& s);
     void destroyFsrTargets();
@@ -176,7 +184,7 @@ private:
     void presentJob(const PresentJob& j);
     bool showImage(Frame& f, int k, const Image& src);
     std::pair<VkBuffer, VkDeviceSize> streamWrite(const void* data, VkDeviceSize size);
-    void flush2D();
+    void flush2D(bool multiply = false);
     void quad2D(uint32_t tex, uint32_t sampler, float x, float y, float w, float h,
                 float u0, float v0, float u1, float v1, const uint8_t rgba[4]);
     void freeScene();
@@ -207,7 +215,7 @@ private:
     VkDescriptorSet set_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipe3D_[2][4]{}; // [msaa][Opaque+AlphaTest, Alpha, Additive, Subtract]
-    VkPipeline pipe2D_[2]{};
+    VkPipeline pipe2D_[2]{}, pipe2DMul_[2]{}; // [msaa]: alpha blend, frame multiply
     // Enhanced lighting: [kind: unlit, shadow map, ray queries][motion vectors][msaa][blend]. mv = 0: scene_lit.vert +
     // scene_map/rt.frag (unlit = pipe3D_); mv = 1 (FSR, no MSAA): scene_mv.vert + scene_mv/map_mv/rt_mv.frag with a
     // second colour attachment for motion vectors.
@@ -262,6 +270,7 @@ private:
     std::vector<GpuMesh> meshes_;       // scene meshes, then actor meshes (actor = true)
     std::vector<TexAnim> texAnims_;
     uint32_t texTick_ = 0;
+    std::vector<int32_t> linkTex_;
     std::vector<WorldZone> zones_;  // Scene::zones of the uploaded scene
     render::ZoneView zoneView_;
     std::vector<render::ZoneEntry> zoneTable_;
@@ -327,6 +336,8 @@ private:
     bool waterOn_ = false;  // this drawScene draws the Enhanced water
     uint32_t waterColorSlot_ = kNoWater, waterDepthSlot_ = kNoWater, waveSlot_ = kNoWater, waterNormalSlot_ = kNoWater;
     VkExtent2D waterExtent_{};
+    // Enhanced fog fades into the backdrop (BBLIT-Remaster): the background layer alone, copied before the world draws.
+    uint32_t backdropSlot_ = kNoWater;
     static constexpr uint32_t kNoWater = UINT32_MAX;
     size_t seaFill_ = SIZE_MAX;  // meshes_ index of the open-water fill plane (uploadScene), SIZE_MAX = none
 

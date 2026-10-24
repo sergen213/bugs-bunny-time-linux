@@ -164,7 +164,9 @@ flags `+0x20`, state id `[+0x17c]+6`; `GD = *(0x639b30)`; camera view 0 block `0
 | digital stick GD+0x14/0x15 | Right / Up 127, Left / Down −128 (also diagonals) | peek while `send_keys` held each arrow (w12) | **Verified** |
 | turn step +0x18c (0x453de0 LAB_00455b16) | yaw 920 → 912, 906, 901, 897, 894 … under ↑ in the water; the steering trace E | `water.csv`, `tbplay/E_switch_turn_L2.csv` | **Verified** (a remainder whose quarter is 0 is applied whole, +0x18c = −1) |
 | first tick after a poke into open air | grounded Bugs (+0x20 0x102) poked 500 up: vy 160 at once, +0x20 0 (0x100 at-rest bit cleared by the mover) | `water.csv` counter 1645 | **Verified** (0x443f40 only runs with collision candidates) |
-| class-9 sky dome (0x465710) | drawn at the view eye (DAT_004d5124..) with matrix ty += +0x76 (tag 0x39 @2: VIQ02 −1750, VICA01 −5200, ARCA01 −7500, TRCA01 −10000, VIQ01 0); tag 0x10 position overwritten every draw, tag 0x11 rotation kept | decompile (static; no runtime peek) | **Inferred** (code) |
+| class-9 sky dome (0x465710) | drawn at the view eye (DAT_004d5124..) with matrix ty += +0x76 (tag 0x39 @2: VIQ02 −1750, VICA01 −5200, ARCA01 −7500, TRCA01 −10000, VIQ01 0); tag 0x10 position overwritten every draw, tag 0x11 rotation kept |  decompile; wave 13 peeks (RUNNER=wine, `local/w13/sky/domepeek.py`, `peek_*.txt`: list 0x4d4fd0, +0x31 9, +0xa4, +0xe4 → +0xec scale / rot / trans, draw items +0x9c with coordinates [2] → parent [0x12]) | **Verified** (eye + lift: ARCA01 root T y = eye − 7497) |
+| dome placement: first draw item's coordinate (0x465710 → 0x405820(item[2]), then the 0x2000000 walk to the LOD item whose model 0x406840 draws) | VICASG04 / VIR01: item 1 (+6 8, no model) local T (0, 6000, 0), world = eye + (0, 6000, 0); item 2 (+6 4, the dome model) local (0, −6000, 0) under item 1, its own coordinate never composed. The two parts come from the class-1 skeleton (frame 0: 0x800 / 0xc00 create parts 1 and 2) and the class-0xb animation 0x44d6f0 plays at init (0x469770 class 0xb: packet 0xd00 flag 1 packed trans (0, ±6000, 0)); ARCA01 / VIQ02 items at (0, 0, 0) | `peek_{vicasg04,vir01,arca01,viq02}.txt`; side-by-sides at the oracle camera `local/w13/sky/side_sky_{vicasg04,vir01,arca01,viq02}.png` | **Verified** (tb_level.cpp: dome offset = first part after skeleton frame 0 + class-0xb frame 0; VICASG04's peach peaks drop to the horizon, MAD 23.8 → 20.7, rest = actors / dialog state) |
+| dome view flags / far clip / background layer (0x465710, 0x45eee0, 0x422eb0) | tag 0x39 @0 → +0x6e: 0x20 = never listed by the view list (VIR01 dome 329, lift 5000, +0x6e 0x60: +0xa4 never written, all zero); tag 0x16 @4 → +0xc 0x2000000 = 64000 far clip (every dome peeked has it); layer DAT_004d2730 − 1 = 0 drawn first, then glClear(DEPTH) | peeks above; decompile | **Verified** (VIR01) / Implemented (`Mesh::background`, `Mesh::farClip`) |
 
 ## 5. Projection, fog, texturing
 
@@ -284,8 +286,11 @@ SRC_ALPHA / ONE_MINUS_SRC_ALPHA (`0x4ac028/0x4ac02c` = 0x302/0x303 at runtime de
 not a PS1 subtractive one; Original Fidelity uses this in both backends (Enhanced keeps the PS1 subtract; until wave
 10b bbtime kept the grey texel rgb, §27). Side-by-side `compare/side_lit_L01A_shadow_{gl,vk}.png` (original `orig_lit_L01A_shadow.png`
 after the walk-in, bbtime `--autoplay '-*90'` tick 90): MAD 1.58 / 1.58, gain 0.99/0.99/0.98; the soft blob under
-Bugs' feet matches in place and size. Not ported: the first 0x44b4f0 pass (projection onto a non-ridden class-2
-actor below), the zone darkening 0x44cb90 tint, ordering-table depth (bbtime pulls the quad 24 u toward the eye).
+Bugs' feet matches in place and size. Wave 13: the first 0x44b4f0 pass (projection onto the top plane of a non-ridden
+class-2 platform below; L01A seesaw drop, `local/w13/lit/shadow/o_seesaw_drop.txt`: the 0x4efac0 records (20180, −2710,
+7070) 2048, (21050, −2229, 7910) 2612 rot (0, 2104, 0), (20990, −1600, 9005) 3616 equal bbtime's, `testSeesawL01a`) and
+0x44cb90 (the quad drawn with its owner's far value) are ported. Not ported: ordering-table depth (bbtime pulls the quad
+24 u toward the eye).
 
 ## 8. Other captures (for LiTWorld / TBPlay)
 
@@ -524,7 +529,7 @@ takes the same tokens (at counter C + 2). `cmp_actor.py` diffs position / yaw / 
 | ball thrown back (pokes 601: P100 = (5244, −1104, 1812), Y100 = 3738, A100 \| 0x1000 → state 200 hop at 98, flagsB 0x300000) | hop, bounce (171), rest and boarding pillar 57, 98's later pillar jumps; the ball's flags14 0x1000 clears at the anim loop wrap (611); the hop lands short of 98 (attach: §23) | `o_L04B3_attach.csv`, `t_L04B3_attach.txt` | **Verified** to 1079 (§23) |
 | L03C1 carried Bugs flags14 | 0 while carried (counter 5 on): 0x43a880's tail clears 0x200 when +0x70 is set | `w9lit4/o_L03C1.csv` | **Verified** |
 | CC4D spawn template 214 | anim event (actor 213, anim 163 f2 2) names template 214, absent from CC4D; 0x448d40 returns 0 and every 0x4393e0 spawn site checks it: the original spawns nothing either (bbtime: same) | `bugs_all.c` 0x448d40 | Verified (static) |
-| A44 (player +0x28) | +0x28 feeds only the shadow draw's sort bias (0x44bb50 → 0x411b10 float 0x621600 ×4, added to the max z of each translucent triangle at 0x415aa7): draw order of Bugs' shadow among blended faces, no gameplay | disassembly | Not ported (no visible effect in bbtime's shadow pass) |
+| A44 (player +0x28) | +0x28 feeds only the shadow draw's sort bias (0x44bb50 → 0x411b10 float 0x621600 ×4, added to the max z of each translucent triangle at 0x415aa7): draw order of Bugs' shadow among blended faces, no gameplay | disassembly | Stored (`Player::shadowBias` → `LitWorld::Shadow::sortBias`). Shadows go to blended layer 2 (0x44bde9), which 0x4124b0 draws unsorted (§29), so the key changes no draw order (Inferred from §29; bbtime: same) |
 
 
 ## 23. LiT spawn push, hand points, Bugs' merged push, attach on contact (wave 9; Proton-GE, `local/wine/compare/w9lit7/`)
@@ -641,5 +646,204 @@ drawn). glDepthMask is never called: every pass writes depth.
 | claim | runtime | evidence | verdict |
 |---|---|---|---|
 | blended faces write depth, per-polygon back-to-front order, screen-linear eye depth | bbtime (LiT Original Fidelity, GL + VK, `bb/render/pc_order.h`): untextured blended first, layer 1 sorted per triangle by centroid eye z, `Mesh::late` (Bugs, shadows) last, all depth-writing, alpha test > 0 except the sorted pass; vertex shaders write depth = eye depth linear in screen space (GL `uLinearZ`, VK push flag 256). LS01: the light sprites' dark bars under the time machine appear; the floor's coplanar layers (actor tex 338 opaque, 363 / 296 additive at y 290 / 320) occlude along clean polygon edges instead of z-fighting stair steps | `w12/lit/side_ls01_{683,1063}_vk.png` (MAD 3.75 / 4.01; 0.11.0 4.22 / 4.49 `side_ls01_*_before.png`), crops `side_ls01_{683,1063}_under_zoom.png`, GL `side_ls01_seat_gl.png`; mean brightness within 0.2–0.6 of the oracle (0.11.0: +0.8–2.0) | **Verified** |
-| LS01 vortex spikes, light sprite positions | random per tick (rand), not phase-matched | same images | Consistent |
+| LS01 vortex spikes, light sprite positions (wave 13, rand hook `local/w13/lit/rand/rand_hook.s` at 0x450810, alias table capture `alias.py`) | the only rand() caller in LS01 is 0x4455e0's probability gate of type-2 actor 333 (2 draws a tick until one passes; bbtime's stream was already equal); the flashing lights are texture links 231–442 written by type-2 / type-20 actors into 0x4e5e80 (bbtime used a clock); the vortex is TOD-animated and deterministic (shots taken under SIGSTOP lag a tick) | `ls01_a.pkl.gz`, `ls01_alias.pkl.gz`; `local/wine/compare/w13/lit/side_ls01_{683,1063}.png` (MAD 1.32 / 1.31; w12 at 1063: 4.01), `crop_ls01_683.png` | **Verified** (`testLinksLs01`: seed + 13 aliases every counter 3–3001) |
 | simplifications | quads split into triangles sort separately (exe: 4-vertex mean); layer per mesh (exe: per texture id, last writer); layer 2–4 blended triangles drawn (exe drops them); ABR-2-used textures' opaque faces stay in the opaque pass | static only | Not ported (no visible case found) |
+
+## 30. LiT pad remap, demo / tape, pause-menu Video and Controls pages, music volume (wave 13; Proton-GE `/b04`, `local/w13/litin/`)
+
+Key input under Xvfb reaches DirectInput only after a click into the client area (`xdotool mousemove --window W 320
+240 click 1`): without it `0x9ca8c0` stays zero while Esc / F4 still arrive as window messages.
+
+| claim | runtime | evidence | verdict |
+|---|---|---|---|
+| remap presets 0x4ae1f0 via G[0x11] at level init (0x448fa0 from 0x4474b0) | GD+0x51 poked 1 / 2 / 3 and 0 + level reload (0x4b39bc = 1): GD+0x2e..+0x3c = `128 4 32 64 8 1 16 2` / `4 8 16 128 32 1 64 2` / `32 8 128 16 1 2 4 64` / identity; holding f s a d e q r w (□ ○ △ ✕ L1 L2 R1 R2) gives GD+0x0c = the preset word, GD+0x10 = the physical bit | `remap.txt` | **Verified** (`testPad`) |
+| pad-removed pause (report type ∉ {0x41, 0x73} → Start after 4 passes) | `0x402fe0` (PadGetState) is `mov eax, 6; ret`, so 0x449080 never clears the type; 0x403010 writes 0x41 / 0x73 every pass; peek `0x4b31c1` = 0x73 throughout | bytes `b8 06 00 00 00 c3`, peeks | **Proven absent on PC** (not ported) |
+| demo stream chunk 0x47 tag 0x48 (G[0x0f]) | no PC LiT BZE has chunk 0x47 (269 files); the PS1's DEMO* levels are not on the PC disc | `game` sweep asserts `LitWorld::demo` empty | absent data; reader + 0x4491c0 playback branch ported (`testPad`) |
+| `/r:FILE` record, `/p:FILE` playback (0x408f70, 0x4491c0, 0x409520 / 0x4095a0) | `/b04 /r:rec1.dat`, F4 → Yes: `Datas/bin/rec1.dat` 8432 B = 4216 passes × `ff ff` (report bytes 2 / 3, no DirectInput keys reached the exe in that run); 0x4b1d04 = 1, 0x4b1d0c counting by 2 | `local/wine/lit/Datas/bin/rec1.dat` | **Verified** (format); bbtime `--record` / `--playback` |
+| Video page A106–A118 | desktop 800×600, window 640×480: resolution Right Right → item 5 (1024×768: windowed stops on a mode ≥ the desktop), fog Left → Normal, Apply → config 640×480 windowed, fog 1, 0x4b3e60.. = 640 480 1 0 0, 0x45f2b0 back to 1 after the re-init | `o_options.png`, `o_video_*.png`, `o_after_apply.png` | **Verified** (`testMenuConfig`) |
+| Controls / Keyboard C94 | Look ← g: kbdMap slot 8 = 0x22; Crouch ← d: slot 9 = 0x20 and Jump (slot 10) takes Crouch's 0x1f | `o_keyboard.png`, `o_kcap*.png` | **Verified** (`testMenuConfig`) |
+| music volume 0x9ca854 | 0x41d5f0 SetVolume((v − 100)·100) hundredths of a dB; below 50 0x41d900 / 0x41d630 / 0x41edb0 change nothing | static | Implemented (`litMusicGain`, `LitWorld::musicTick`) |
+
+## 31. TB effects (wave 13; system Wine `RUNNER=wine`, `local/wine/compare/w13/fx/`)
+
+Ported in `engine/game/src/tb_fx.cpp`: particle emitters 0x4d6ae0 (20 slots over a shared pool of 120 particles;
+fields 0x452060 from logic S 118, emission 0x452ab0 from V 0x80200000, update + draw 0x453350 / 0x452e80 once per tick
+after the entities and the camera, slot clear 0x4529d0 from S 138, actor touch 0x447ee0 → +0x28 0x4000 / R 0x48),
+weather streaks 0x451370 (S 110), and the model / rig swaps 0x469320 (V 0x80020000, distance LOD of 0x45eee0).
+
+| check | original (R) | evidence | verdict |
+|---|---|---|---|
+| particle update | Bugs dropped into the Granny pond: splash slot 6 (12 drops, gravity 195, drag 275) re-born in slot 4 (rings), ring slot 5, director sparkles 13; every sampled slot record and particle list per tick (`fx.sh granny`, `fx_capture.py`) | `granny.pkl.gz` → `engine/game/tests/tb_fx_granny.inc`, `ctest game.tb` `fx` (field for field) | **Verified** |
+| emission rand() | 2 per particle (direction), +1 with slot flags 0x80, +1 without 0x800 | `emitcheck.txt` (seed fit, max dot error 0.00108) | **Verified** |
+| draw | splash and rings at the oracle's screen spots | `side/side_granny_splash.png`, `granny*_*.png`, `arca_*.png` | **Consistent** |
+| weather (VICASG04 snow) | drops in a 1500 × 1024 × 1500 box 1200 ahead of the eye, wind minus look-at motion, gouraud streaks 0x808080 → 0xefefff | `local/w13/sky/side_vicasg04_cam.png` | **Consistent** (size, density) |
+
+## 32. TB cheat codes and the level select (wave 13; `RUNNER=wine`, `local/wine/tbintro/w13_levelselect.sh`)
+
+0x40fbc0 (every input poll) matches the held DirectInput keys against "RULETHEEARTH" (table 0x48871c) and arms
+0x4d095c for the session; 0x43bce0 (0x45eee0 tail) then steps 11 sequences (table 0x4ce8e8) on each new raw P1 word
+GD+0xe: ○○○○ then □□□ (0: GD+0x8c 1, GD+0xab 0xff), □□△ (1: GD+0x58 999), □△□ (2: GD+0xa2 4, +0xad 0xfd, +0xae
+0xff), □△△ (3: health, lives ≥ 3, downed partner revived at the focus), △□□ (4: GD+0xd2..0xdd 1); 5..10 set nothing.
+GD+0x8c & 1 adds the pause menu's eighth entry (template 0x1d block 465: text 0x21 instead of 0x24, Up wraps to 7),
+whose event 200 enters state 312: the level list (text 0x66), cursor S[0x21] 1..0x32, ✕ = V 0x1000 with the level.
+
+| check | original (R) | evidence | verdict |
+|---|---|---|---|
+| arming | 0x4d095c 1 after typing, GD+0x8c 1 after ○○○○□□□ | script output | **Verified** (`game.tb` `levelSelect`) |
+| page | level list, S[0x21] 1, Down → 2 | `w13_ls_page.png`, `w13_ls_page2.png` | **Verified** |
+| pick | ✕: GD+0 7, 0x4d593a 1, S[9] 2 on one tick | `w13_ls_trace.csv` | **Verified** |
+
+## 33. LiT attached steering, camera nodes, zone messages, checkpoint carry (wave 13; Proton-GE, `local/wine/compare/w13lit/steer/`)
+
+Throwaway pollers there: `poke_trace.py` (w9lit3's per-tick trace + stick GD+0x12/0x14, camera yaw 0x4b39fe, local yaw
++0x19e, lean +0xe0), `drive.sh` (trace + keys at a counter), `zq.py` (one zone / queue snapshot).
+
+| claim | runtime | evidence | verdict |
+|---|---|---|---|
+| stick steering while riding (0x43a880, +0xc4 set) | L01A `/b04`, Bugs poked to (20150, −2780, 7205) at 151, Left held from 173, Right after he walks off: on boarding +0x19e = −1024 (his +0xde 0 − the seesaw's 1024); turning goes to +0x19e (−673, −413 … 283), lean stays 0, the target is stick + camera yaw always (flagsA 0x8000 ignored), +0xde = atan2 of (0, 0, 1000) through the chain (local yaw, then the seesaw's RotMatrix incl. roll); he walks off its end at 203 | `o_steer.csv` | **Verified** (`testSeesawSteerL01a`: position, yaw, state, local yaw every sample 167–275) |
+| same branch on ropes / carried | the branch keys on +0xc4 only (rope root, platform +0x7c, carrier hand +0x68); carried Bugs reaches a flagsA-2 move only on the drop tick (state 7 move 10) in the oracle tests | decompile; `test_game` probe | Implemented (rope / carried); the rope and carry traces stay equal |
+| camera-node pass = 0x44c4b0 (full frames) | clears 0x300; per drawn actor (+4 & 2, type ≠ 7, box not all 0) a part with flags 0x40, no 0x20, not a mesh (0x11 unless hidden 0x8000): actor flags18 \|= 0x1000, 0x200 if flagsC 0x100, 0x44c070 eye / look / 0x100 / yaw 0x4b3e1a = 0x4b3e2c / distance 0x4b3da8, flagsC 0x10000000 also 0x4b3928 / 0x4b3954 / 0x4b3964 / 0x4b3974. Skipped frames run 0x40a530 (no visibility / box test, hidden parts excluded); bbtime draws every frame | decompile | Ported |
+| timers under a camera node | L02A1 `/b09` intro: 0x4b3940 = 0x142 counters 3–265, 0x42 at 267, 0x40 at 269; Bugs' +0x22 = 2 throughout, then 3, 4 … 19 at 301; active type-14 timers the same. 0x447d40 counts +0x22 only if 0x100 is clear, 0x200 set, type 0x20 or flags18 0x1000 | `o_nodes_L02A1.csv` | **Verified** (`testCameraNodeTimersL02a1`) |
+| first node pass after the counter-3 tick | at counter 3 the oracle already has camera flag 2 and Bugs' timer 2: the load update (counter 1) and the counter-3 tick run without a node (the loading screen is drawn, not the level) | `o_nodes_L02A1.csv` | **Verified** (`loadUpdate` has no node pass; title test asserts after one tick) |
+| A17 zone messages | L04A1 `/b29`: queue 0x4b39de = 1, 0x4b2480 = {31} at every sample (counters 107–2051, Bugs in zone 30); start view table `30 31*` (31 flagged: its portal's u32 +0x10 is queued), eight later views `30` | `zq_L04A1.txt` | **Verified** (`testZoneQueueL04a1`, `render.test_zones` re-walks all nine cameras) |
+| flagged entry vs actor visibility | 0x447d40: an actor whose zone's first table entry is flagged is hidden unless its flags8 has 0x10000; not listed: hidden | decompile | Ported |
+| cell / hull culling (0x40fe90 types 0 / 4 / 8 / 0xc) | a rejected hull lies wholly outside one frustum plane (x / y screen edges, near −200 inside GL near 400, far −D beyond which everything is fogged to the black clear colour), and 0x40efb0 divides by z + 1 behind the eye (0x45c308 / 0x45c30c), so its polygons would be clipped or invisible anyway; no portal lies inside a hull's record range | decompile, level.cpp scan | Proven without visible effect |
+| portal screen rects | 0x40fe90 writes the table entries +4..+0x10 (min / max x / y), nothing reads them | decompile (only writer / reader 0x40fe90) | Proven dead |
+| respawn point across a level change | L01A sets 0x4b2460 = (23700, −640, 9655), 0x4b246c = 4096 by counter 105; GD+0 poked 18 with 0x4b39bc = 1 loads L02C2 (Bugs at 8970, −640, 3950): 0x4b2460 / 0x4b246c keep L01A's values at every sample | `ckpt.txt` | **Verified** (`testCheckpointCarry`; the app carries them, `carryCheckpoint`) |
+| spawn yaw | Bugs' +0xde at counter 0 = 4096 (L01A tag 0x11 raw), stored as such into 0x4b246c | `o_seesaw_L01A.csv`, `ckpt.txt` | **Verified** (raw tag value, no wrap) |
+| hand events / gun shots (LitFinal) | f3 4 / 2 add the hand part's rot y / x to the spawn (0x4393e0; no PC event uses them, 167-BZE scan); hand spawns copy +0xdc; f3 0x20 type-31 shots 130 / 131 / 225 (L04A1–A3, L04B1/B2, L04C3, L04D2, L05A5; type 14 in l04e / L04E2) keep the hand matrix (MulMatrix 0x408490) and 0x446d10 moves along it | decompile, BZE scan | Ported (no oracle capture of a shot) |
+| TOD-less clips (LitFinal) | a clip without an asset returns 0x400 on its start tick, then 0x200 (held) as 0x4393e0 / 0x438970; no role-7 model asset at all dereferences null in the exe | decompile | Ported; crash path documented |
+| live-list order (LitFinal) | 0x440120's arc-jump target = the first matching entity in the collision list 0x4b39ac (L03A id 715 ×4, L03C id 53 ×2) | decompile | Ported |
+| language and speech (LitFinal) | config.pc +0x08 → G[0x10] each frame (0x4076f0); level speech section per language 6, 5, 7, 8, 9, 10, tags 0x4c / 0x4d (speech) and 0x4a (text) take that language's offset pair; clip table 0x45c340 (6 rows, each summing to its Speech0N.xa size, Speech00.xa 36102560 B); played only at music volume ≥ 50 (0x41e2b0) | decompile, L01a section dump | Ported (settings.ini `lit_language`); the PC disc ships languages 0, 1, 3 |
+
+## 34. TB speech (wave 13; system Wine `RUNNER=wine`, `local/wine/tbintro/w13_speech*.sh`)
+
+| item | exe | evidence | status |
+|---|---|---|---|
+| request by state | 0x469770: on a state's anim start with mode & 0xb and mode & 0x80, clip `0x63b73c` = anim + 0x9a (u8); a clip ≠ the last started (`0x4cca40`) stops the player (0x42b740) and sets S[0x22] (`0x4d24c2`) 2; the same clip only once S[0x22] is 0 | GRANNY: entity 297 state 394 (anim 360) → clip 2, oracle counters: ✕ closes "Welcome to Granwich!" at 329, S[0x22] 2 at 411, 4 at 413, ✕ at 1899 stops it (S[0x22] 0, clip 0, last −1) — Speech2.xa is 61 s; RETRY Daffy state 348 (anim 417) → clip 59 at 35, 4 at 37, ends at 403 (`w13_speech_trace.csv`). Counter c = tick (c − 1) / 2 after a load: every class-14 entity's +0x82 is 0 at counter 1 and 2 at counter 3 (`w13_retry82.{sh,py,csv}`), so the first entity tick runs at counter 1; Daffy (slot 22) leaves state 3 at counter 33 = tick 16 (+0x82 16 > 15) and asks at tick 17, Granny at tick 205 — both equal in bbtime | **Verified Against Original Behavior** (`game.tb_speech`, `game.tb`) |
+| request by logic | action 62 (0x431ba0): X > 1 → clip X − 0x66, S[0x22] 8; X 1 → S[0x22] 1 (holds silent); X 0 → stop at once; both restore GD+0x98 from the load copy 0x63af80 | GRANNY's dialog blocks use X 418..422 (clips 60..64) and 0 (✕ skips) | Implemented |
+| player 0x42a030 (start of every tick) | audio (`0x4d1f8c`): 8 → stop the music stream, 2; 2 → open `..\speech\%.2d\speech%d.xa` (GD+0x93, clip), play, 4 (open failure: the timed path); 4 → 0 when 0x40d9b0 reports the stream played out; 0 → stop, last −1. No audio: 2 → timer (table 0x481678 × 1000 / 44100 ms; 6000 for every clip), 4 → 0 when it ran out | decompile; oracle rows above | Tested |
+| music while speaking | PlayMusic 0x4291e0 closes the music stream (0x40d3e0) while S[0x22] ≠ 0; afterwards 0x40d440 on the reset stream returns 0 and the track is reopened from its start | decompile | Implemented (app: no track while S[0x22] ≠ 0, then the level track restarts) |
+| volume / pause | 0x40d440 sets every stream's volume from GD+0x98 (music volume); the pause (0x429180) stops only the music stream | decompile | Implemented (speech on the music player at the music volume, never paused) |
+| files | `Datas/SPEECH/<NN>/Speech<n>.xa`, mono IMA ADPCM, 44100 Hz (AUDIO_XA.md); this disc has languages 00–04 and 06, clips 0–66 | data | Implemented (`bbtime::tbSpeechFile`) |
+
+## 35. TB front-end quit, save slot, draw bias and distances, flashes, shake, look view (wave 13; decompile, `RUNNER=wine` `local/wine/tbintro/w13_flash.sh`)
+
+| item | exe | bbtime | status |
+|---|---|---|---|
+| quit to the front end | S 119 0x432cc0 (the pause menu's Quit Game, template 0x1d in every level, and Credits): state 0x4d03d0 = 11, the streams stopped (0x429ce0); the main loop returns to the menu | `TbWorld::quitToMenu`; app: stop voices, leave the level, open the TB front end (smoke: pause → 5 × Down → ✕ → YES, `local/shots/w13/tb_quit_game_frontend.png`) | Tested |
+| save slot | DAT_0048840c: −1 for a new game, the loaded record's slot otherwise; R 0x52 = slot ≥ 0 | `TbWorld::saveSlot`, set by the app at every level entry and after a save | Implemented |
+| draw bias | +0x33 = tag 0x38 @0 + 0x10 (S 127 sets it) is written into the draw context's s16 +10 by 0x465130 / 0x465710 (0x8000 for sky domes), 0x464480 (−6) and 0x464b20 (+0x80); no PC draw path reads it (0x469aa0, 0x464820 / 0x464b00 / 0x464b20, the sprite draws 0x41c660 / 0x41db70, 0x406840, 0x406cd0 / 0x406d90 read the context's +4 / +6 / +0x10 / +0xe only): a PS1 ordering-table leftover | `TbActor::drawBias` kept by the world, not drawn | **Proven no effect on PC** |
+| draw distances | context +0x10 = near 0x4d5954, +0xe = far 0x4d5980, +0x1a = 0x4d237a (chunk 0x3a tag 0x3c @0 / @2 / @10; S 109 / S 117 change near / +0x1a), each × projection / 400, capped at far. 0x406840 draws the world's tree A to near, tree C from near to far, tree B to far, with 0x409840 setting near = far at DETAILS 2 (config.pc +0x18; the oracle's is 2), where tree C is not even built (0x404f40); models draw with 0x409840(32000, 32000) (0x406d90). +0x1a has no reader | `TbWorld::nearClip`, `viewDist2` kept; Original Fidelity clips at `Scene::tbFarClip` (per pixel, actors included) | near / +0x1a **Proven no effect** at DETAILS 2; far Implemented |
+| flash colour | 0x465130 runs 0x464ef0 (light colour 0x4883e0..e8 × (0x1000 − dark) / 0x1000) then 0x464c30, which with mode 0x40 sets the light colour to S 50's rgb (0x4d23c4 / 0x4d26ad / 0x4d26ac, set per channel by S 50 0x4319b0) · dark / 2²⁴; every glColor (world, sky, models, text) is multiplied by it, so a flash is a near-black blink tinted by its colour. While the fade mode is 0, 0x464ef0 clears the three colour bytes every frame: poke the mode first (`w13_flash.sh` poked the colour first, so only blue survived and its "white" flash was blue). Oracle `local/wine/tbintro/w13_flash_red.sh`: ARCA01 fly-over, held flash dark 0x800, colour (255, 0, 0): light (0.0311, 0, 0), frame mean R 2.10, G 0, B 0 at counter 921–925 | `fadeOverlay()` returns the per-channel multiplier (flash rgb · dark · 255 / 2²⁴, else (0x1000 − dark) >> 4) and the app multiplies the frame by it (`Renderer::multiplyRect`, DST_COLOR · src, GL and VK): at the oracle's camera and tick 450 R 2.37 (VK) / 2.37 (GL), G 0, B 0 (`local/wine/compare/w13/tb/side_flash_red.png` ×20, raw `side_flash_red_raw.png`; bbtime's frame is ~1.12× brighter in general, as in the look-view pair); `BBTIME_TB_FADE` holds a fade for such checks | **Verified** (per channel) |
+| camera shake | 0x439650 at the end of 0x439700: look x += sin(phase) · amp >> 11, phase += speed (X · 11), amp − 3 per tick once phase ≥ 0x800; S 41 / S 49 start it | `TbWorld::camShake` → `cam.look` | Implemented (no oracle trace yet) |
+| look view | 0x4d4fd4 & 2 (L2 + R2): first-person view; 0x465130 skips +0x24 & 4, which hides the focus; HUD sprite 29 is the cross-hair with GD+0xa2 & 4 | `lookMode()`; the app skips +0x24 & 4 for the players too. Oracle `local/wine/compare/w13/tb/look/run.sh` (ARCA01 after the ✕ skip, GD+0xa2 \|= 4, L2 + R2 = d + f): look on at counter 663 (Bugs +0x24 0x8800 → 0x8004, 0x4d4fd4 2), turn 0x4d9a9a −40 per tick while ← is held; per-tick Bugs / view block / 0x4d9a98 / 0x4d4fd4 in `look.pkl.gz`. bbtime gives the same view eye (−4366, −530, −7833) and look point, the player hidden and the cross-hair: `local/wine/compare/w13/tb/side_look_mode.png` (MAD 8.8; an NPC by the stairs differs by the run's timing) | **Verified** (view, hidden focus, cross-hair; no per-tick trace check yet) |
+| frame brightness (Original Fidelity) | the light colour 0x4883e0..e8 is set to 1.0 by the GL renderer hook 0x4258e0 (pointer 0x4d0338) and otherwise only scaled by a fade / flash; with no fade every glColor is the vertex colour (world, models, sky, text) and the CLUT texels carry config.pc +0xe0 (§16). The oracle prefix's config.pc +0xe0 is 1.0; showing the Video page turns it into 1.125 in the exe and in bbtime (§16), and a `settings.ini` saved that way (`tb_brightness = 1.125`) made bbtime 1.12× brighter than the oracle (look view gain 0.89, red flash 2.37 vs 2.10). Oracle `local/wine/compare/w13/bright/run.sh` (`/bze:ARCA01` after ✕, `/bze:VIQ02`, `/bze:GRANNY`; camera, counter, `o_*.png`, `o_*.txt`), bbtime with `XDG_CONFIG_HOME` holding `tb_brightness = 1` at the oracle cameras: least-squares gain orig / bbtime above the text box (rows 70–330) VK 1.008 1.009 1.007 / 0.984 0.993 0.984 / 0.995 1.003 1.004, GL 1.008 1.008 1.006 / 0.982 0.988 0.978 / 0.995 1.002 1.004 (ARCA01 / VIQ02 / GRANNY); the look-view pair at tick 432 1.000 1.002 1.002 (MAD 8.79 → 2.57) in VK and GL (`side_{ARCA01,VIQ02,GRANNY,look}_{vk,gl}.png`, `side_look_vk_old1125.png`) | no change: compare with the oracle's `tb_brightness` | **Verified Against Original Behavior** |
+| blob shadows / floor shade | 0x465130 lists drawn entities with +0x36 (tag 0x45, U 17) ≠ 0 and a model instance (≤ 40) and steps +0x124 2 per frame toward +0x125 while +0x28 & 0x1000 (else down by 2), drawing the entity at (32 − v) / 32 (0x488400). 0x464480 (after the particles) skips +0x24 & 0x40, takes the shadow entity's first role-12 link's model and draws it scaled ((ey − gy)·2 + 0x1000, ≥ 0x800) on x / z, matrix TR y / z += 5 / 9. 0x464090: x / z = world origin of the instance's head coordinate (the hips, TOD part 1); on a flags1 0x200000 parent y = ey with its angles; grounded (+0x20 & 2, !(+0x28 & 2), +0x108) y = ey − 4 with +0x108's normal; else a ray 0x8ca down from ey − 100 (query 0x105, flags1 0x200000 shapes), no hit = no shadow; rot (−atan2(nz, \|nxy\|), yaw, 0x800 − atan2(nx, ny)), y kept ≥ ey. flags10 0x200 (only GRANNY's players): floor surface flag 0x80 sets +0x125 0x10 / +0x28 0x1000 on it and its children (+0x1c & 0x1000 runs its program), else clears; others clear +0x28 0x1000. 0x450ed0's flags10 0x400 shade is in no level | `tb_shadow.cpp` (`TbWorld::shadows`, `TbActor::shade`), app `tbShade` and blob draw (GL + VK). Oracle `local/wine/compare/w13/shadow/run.sh` (code-cave hook on 0x464090's tail: `hook.s`, `capture.py`; `rootpeek.py` read the head coordinate). `game.tb` shadows: ARCA01's 7 listed shadows equal (players / guard x / z depend on the idle frame), GRANNY's poke onto the shade floor equal for 31 ticks (Bugs: shade 0 → 16, target, placement; Taz until its fidget starts). `side_{ARCA01_vk,ARCA01_gl,GRANNY_shade_vk}.png` (MAD 6.0 / 6.0 / 1.6). An entity-shape ray hit keeps a flat normal (rayHit exposes no shape normal) | **Verified Against Original Behavior** |
+| pad rumble | S 39 / 40 / 42 / 43 / 48 / 130 / 131 / 134 drive force feedback 0x460e10, but 0x40fc30 returns 0, so the state is zeroed every poll and the actuator call is empty | not ported | **Proven absent on PC** |
+
+## 36. TB classes, riding and pushing, S / R / U coverage (wave 13; `RUNNER=wine`, `local/wine/compare/w13/classes/`)
+
+| item | exe | evidence | status |
+|---|---|---|---|
+| class 0 static model | 0x450890: first tick builds the model instance; with the first asset's static flag it draws the mesh under the entity matrix (0x44e5d0) and never animates | ARCA01 wall-disc panel (chunk 0x1584d: one model + rig + anim 0xd7, links 312–314) was posed only from animation parts, so it and the scene prop it replaced were both missing; `local/wine/compare/w13/tb/side_arca01_freecam.png` (MAD 7.6). It is the only class-0 entity with a model in the 58 levels (5474 entities and every spawn template scanned, 120 ticks each), so the rule draws nothing else | **Verified** (side-by-side) |
+| class 2 texture-link writer | 0x4599e0 via 0x465dc0 / 0x465c80 | `arca01_links.pkl.gz`: 181 rows, GD+0xd8 / 0xd9 / 0xda pokes switch each link 344 → 343; drawn: the wall discs turn gold in both at the fly-over's tick-1220 camera (`local/wine/tbintro/w13_links.sh`, `local/wine/compare/w13/tb/side_arca01_links.png`, MAD 8.8 / 7.6; that run's alias words ([0x4d038c] + 0x270, links 312 / 313 / 314) go 344 → 343 at counters 145 / 147 / 145 for the sequential pokes d8, d9, da (the last landing a tick later), the order bbtime's mapping gives: d8 → 312, d9 → 314, da → 313, each switching the next tick) | **Verified** (`game.tb` classes, 0 mismatches; side-by-side) |
+| classes 4 / 5 / 18 / 21 / 33 / 40 | 0x453b40 sprite, 0x4516e0 block, 0x44f7b0 modes 1 / 0x10 / 0x1000, 0x459b10 hung | `viq02_c4`, `azcasg02_push`, `vicasg04_seesaw`, `arcasg03_c33`, `viboss01_c40` (301 rows, `/skip_intro /b26`) | **Verified** (`game.tb` classes, 0 mismatches each) |
+| ride / push | 0x453de0 ride (mount +0x90 / +0x13c, rider turn +0x12a) and push (+0x24 0x10, +0x58) blocks | `arca02_ride` 228 rows, `azcasg02_pushpoke` 151 rows | **Verified** |
+| actor line of sight | W sub-mode 0x82000000 (0x4463e0 actor pass) | no W item of the 58 levels uses it (`game.tb` lineOfSightUnused) | **Proven absent** |
+| S / R / U coverage | every handler of the tables | `game.tb` opsScan runs all 123 537 R / S / U items of the 58 levels: none unsupported | Tested |
+| spawn ids 82 / 83 / 185 / 252 / 284 | 0x460b00 returns 0 for an id not in the level's chunk-0x08 list | no template with those ids in their levels | **Proven absent** (as the exe: nothing spawns) |
+
+
+### 35.y Wave 13 pole climb, focus pointer, pool (TbCarry5; `local/wine/compare/w13/climb/` run.sh / run_b.sh, RUNNER=wine)
+
+| item | finding | evidence | status |
+|---|---|---|---|
+| pole grab 0x456fb0 | contact with flags0 0x10000, own state flagsA 0x100, players only airborne (+0x20 0x80420), no parent; offset ahead ((atan2 − 0x400 − yaw) & 0xfff < 0x800), dy in (pole +0x6a − own +0x6a, pole +0x62): hang on the pole root at Ry(−yaw)·offset, +0x136 = atan2 − 0x800, move / velocity 0, +0x20 0x200; carried 0x2800 children let go | GRANNY pole 19: grab at counter 1825 / 1793, local (15, 710, 158) | **Verified** (`game.tb` climb) |
+| climb tick (0x453de0 @0x45644a) + 0x44f690 | flagsA 0x200 with a parent: +0x1a0 = 0xc; heading = atan2(local x, z) + side·dt·0x80 / pole +0x68, local x / z on radius +0x68 + 10, +0x136 = heading + 0x800; pole limits: own +0x6a + local y < pole +0x6a → +0x1a0 &= ~4 (and a rising flagsA 0x800 state stops), past pole +0x62 → let go; after the mover +0x20 6 on a 0x10004 parent lets go | up to local y 374 (+0x1a0 8), circles 116 / 117, down 99 to the ground (counter 1885) | **Verified** |
+| R1 pump / rope branch | +0x166 written only here, read nowhere in bblit2.exe; no class-8 entity and no non-pole climbable parent in any PC level | decompile grep, level scan | **Proven absent** |
+| focus pointer | DAT_004d236c set by the view-list pass from GD+0xa4 & 4; R1 toggles GD+0xa4 after the pass, so the pointer moves next tick and 0x4d5028 (camera) one tick later; logic reads GD+0xa4 (director 338 `R 0x19` 0x4c & 4) | oracle eye at 2015 / 2017 (climb A) | **Verified** |
+| entity pool | slots = instances + one per chunk 0x08 + 17 (0x460a40, 0x462030); min level slack 24 (TRQ02, VICA01); peak live spawns in 6000-tick sims ≤ 17 | ARCA01 oracle 338 used vs ours 344 at load (5 gdBit removals + director 264 on tick 1) | Implemented (not reached) |
+
+### 35.z Wave 13 oracle checks: shake, glide, water snap (TbChecks; `local/wine/compare/w13/checks/` run.sh, RUNNER=wine; `game.tb` checks)
+
+| item | finding | evidence | status |
+|---|---|---|---|
+| S 41 source | anim asset logic (chunk 0x22) of anim 75 = Bugs' slam landing 121 (also anims 146 S 41 50 / 25, 224 S 49 150 / 50); runs after the camera: the phase starts the next tick | A GRANNY slam: speed 330, amp 20, offset sin(phase)·amp >> 11 on look x | **Verified** (403 rows, 13 shaking) |
+| S 49 player (130 / 131) | dig spot entity 260 sets +0x24 0x400 within 200; slam → 124 / 126 underground; under a flags0 0x10000000 block (contact, T 3) 131 / 130, ✕: S 49 100 / 30 → amp 26 by the look distance, block pushed up | B ARCA01 | **Verified** (283 rows) |
+| S 49 boss | ARQ01 234 drops (364) on Bugs below it, lands (375): amp 40 | C ARQ01 counters 987–2021 | **Verified** (419 rows) |
+| flagsA 0x8000 | Bugs 66 (vert −19) / 67 (vert +20, GD+0xad 2) glide; VIQ01 226 (333, vert 0): +0x20 0x80000 | A; D 40 steps of 226 | **Verified** (S-form vert of Taz 250–253 not traced: needs a 148 gum item; open) |
+| V 0x800000 | templates 74 / 88 / 89 / 245 / 299 / 396 (water splashes): Bugs falling into a pond (394) spawns 88, its y set to the zone surface −1673 | D VIQ01 | **Verified** (76 rows) |
+| spawn yaw | tag 0x11 stored raw (0x1000 stays 0x1000; Bugs VIQ01 2067) | D | **Verified** (fixed) |
+| camera node 0x464820 | integer GsGetLw (RotMatrix / ScaleMatrix / CompMatrix) and ApplyMatrixLV for the look: the float chain was ±1 off; flags10 0x20 also sets the restored pose | VIQ01 / ARQ01 intro look | **Verified** (fixed) |
+| Taz ignoring input (TRCA01 / TRQ02) | not a bug: the TRCA01 fly-over holds control until ✕ skips it, accepted from counter 181 (oracle: 177 no, 187 yes; bbtime the same); TRQ02's walk-in (545) refuses R1. App: ✕ at 120, R1, ↑ moves Taz (`local/shots/w13/checks/side_trca01_taz.png`) | `/tmp` probe + oracle TRCA01 trace | **Verified** |
+| Taz gum float (S[0x67] vert) | □ into gum machine 307 spawns gum 148, △ on it: 147 → 161 → 245..248 → 250 → 252 / 251 / 253 (vert 0x4067), 249 → 50 | E TRQ02 (Taz), 1078 rows | **Verified** |
+| TRQ02 309 lift | Taz beside 309: event 350 → 394 → 395 / 396 (flagsA 0x80000800, vert 5) up to −2277 → 514, 308 hangs on it | F TRQ02, 719 rows | **Verified** |
+| load placement target | 0x4347c0 tag 0x16: every record (instance or template) with flags0 0x4000000 and flags1 0x400 becomes DAT_004d236c; template 181 (a Bugs copy) after Bugs' instance (VIQ01, GRANNY, TRCA01, 20 more) makes the placement (0x4395d0) target pos 0 / yaw 0: eye (0, −h, −100), the first follow tick comes in from there (vel (0, −221705, 0), flags 0x290) | `first.py` VIQ01 /b24 vs ARCA01 /b28 (eye at Bugs) | **Verified** (`TbWorld::loadAtOrigin`) |
+| view-list sphere refinement | the box refinement of a cutting sphere needs the model instance +0x9c (built by the first anim tick, freed by a release) or +0x24 0x8000; before that the sphere alone lists it (VIQ01 226 listed at 515, not 517) | D VIQ01, 676 rows incl. the view from the level start | **Verified** (`TbActor::modelInst`) |
+| capture reads | the counter 0x4d2708 moves at the tick start: `cap.py` / `first.py` re-read the player, seed and view until stable (a mid-tick seed broke rand replays) | E, F | Tooling |
+| state entry clears +0x14e | 0x44d990 restarting a clip keeps only +0x14e 0x4000 (and the hit path's +0x14c 0: &= 0xcfff), so blocks run before the next anim tick see neither 0x2000 (last frame) nor 0x1000: ARQ01 boss 226's hit (+0x5e 0 → transition 3 → 377) runs 377's logic at once, its W mode 8 is false → N 0x79 → 189 jumps before the mover (1187, a tick "early" before) | C ARQ01 | **Verified** (fixed: `dispatch` clears `animLast`, +0x14e 0x3000) |
+| partner out of the game | GD+0xa2 & 3: the partner's view-list slot stays −1 (0x45eee0 local_7d0[1]): not ticked, not drawn. A drowned / killed Bugs with Taz in stays in 8 (+0x82 frozen); before, ours kept ticking (394 re-entered, mover ground bit) | C ARQ01 1489–2021, D VIQ01 1577–2023 | **Verified** (fixed) |
+| load box until the first tick | an entity keeps its tag 0x1b / 0x1c box (and radius) until a first tick selects tag-0x61 record +0x123 (0x450440(a, 0): classes 0, 5, 14, 33 only); the mover's sphere (0x4490a0: flags0 0x40000 box, 1 capsule, else sphere; unticked +0x24 0x8000 → angles, not +0xa4) is built from it. TRQ02 309 unticked: (−548, 0, −199)..(194, −519, 347) r 371 pushes a Taz poked inside by (−163, +171, −146); ARQ01 Taz starts inside Bugs' load box: pushed to (−14284, 600, −898) on the first tick | H TRQ02 (`--shapes`: oracle record type 1, centre, r 371), G ARQ01 (`early.py`), C | **Verified** (fixed: no box from tag 0x61 at load) |
+| 0x44e6d0 nested release | VICASG04: Bugs carrying snowball 241 (from spawner 231; the level's text boxes lock the pad until ✕) beside 131: 131's grab hangs Bugs on its hand and Bugs' 0x8000 program (event 0x97 → 240) lets the snowball go (V 0x200) through that chain, so the throw (241) releases Bugs without children. A thrown entity with children needs a carried item that carries; none found | J VICASG04 (`game.tb`, whole capture, 1020 rows) | Verified: the grab waits for 131's frame with an attach point (frame 4, counter 1277) and its +0x7c goes through 131's 1.25 scale |
+| pool limit (0x6c-dword slots, 0x460b00) | `--pool`: slot count 0x4d270e cut to the first free slot before GRANNY's slam, capture from the level start (whole history replayed): our slot table equals the exe's at the cut (258 of 305, first free 20), the slam's template 80 fails in both (made without the cut: `i0_granny_nocut`); trace-equal over 1200 rows. The earlier accounting gap (260 vs 258, 3 extra 420s) was the model: the 18 class 0 / 6 / 7 slots are view / world / 15 system / HUD holder, and the extra 420s came from spawns on frames without an attach point (see the entity-pool and attach-point notes below) | I GRANNY, P (GRANNY 61, ARCA01 201) | Verified |
+| capture gaps | a row the reader missed (Wine stall) is replayed with the next row's pad | I | Tooling |
+
+
+**Entity pool (w13 TbPool; `k_granny_spawns`, `l_arca01_spawns` spawnlog.py, `i_granny` cap.py --pool with the slot table).** 0x4d2704 slots (+4 bit 0 free), count 0x4d270e. Slots 0 view (0x460a40), 1 world + 2..16 (0x462030), then one per chunk 0x07 / 0x08 / 0x0a / 0x63 in file order (templates keep theirs), the HUD holder template 0x1f (0x462430, on the first world-entity tick). 0x460b00 takes the lowest free slot below the count. 0x460630 destroys an entity flagged +0x20 0x2000 right after its own turn (slot reusable later in the pass); 0x45eee0 destroys the other flagged ones in list order but continues with the next entity unchecked, so the one after each destroyed entity dies a pass later (GRANNY 371). Text 24 respawns into the two lowest free slots alternately. `game.tb` checks P: GRANNY counter 61 and ARCA01 201 equal slot for slot; I: the cut equals the exe's table and template 80 fails.
+
+**Attach point (0x468280).** Every applied frame clears +0x84; a packet 0xa00 sets it and +0x7c, the part origin carried one coordinate at a time (0x403400, s16 steps) through the entity's root: the record matrix with its +0xec scale, or, hung, its record (+0x136, +0x13c) and the parent's chain (0x44e560). The asset logic of that frame reads the new point (GRANNY placers 39 / 71 spawn 420 / 173 only on frames with a 0xa00 packet). VICASG04 131 (scale 1.25) grabs on frame 4's point (counter 1277); Bugs' 0x8000 program releases the snowball through Bugs hung on 131's hand. Capture J trace-equal to its end.
+### 35.x Wave 13 carry / throw / class 30 / homing / shape normals (TbCarry, TbCarry2, TbCarry3)
+| Item | Finding | Evidence |
+|---|---|---|
+| Carry / throw | grab blocks of 0x453de0, release 0x44e6d0 (nested children: unreached, §35.z), clamp 0x450650, rayHit actor pass 0x4463e0 | `game.tb` carry 481 rows, throw 420 rows, checks J (VICASG04 grab / throw, whole capture) |
+| Attach point +0x84 | cleared by every state entry (0x44d990) and set by frame packet 0xa00 (0x468280); a re-entered state whose clip restarts re-applies frame 0 | class 30: state 237 re-entered each tick by block 4 → event 149 |
+| Class 30 (0x44d1f0) | template 151 from Bugs' 237 '^' (mode 0x2802) at the look point; flies, removed on a wall hit; slot freed at the tick end | `game.tb` look view + class 30, 270 rows, eye / body included after the release (the oracle's L2 goes down one tick before R2 and up one tick before it: view +0xe4 ±0x5000 on those ticks) |
+| Idle fidget | block 15: last frame shown, +0x82 > 30, rand & 0xffff > 0x55f0 | `game.tb` GRANNY shade 50 ticks, `w13/shadow/run.sh` (Taz 20 → 21 sync, seed per tick) |
+| Shape normals | 0x4463e0 query +0x10: polygon n; sphere/capsule inside: -delta (-push) · 0x4000/len; surface hit: test normal; box: normal through rec +0x60; shadow 0x464090 tilts by it, surface none | `w13/shapen/run.sh`, `game.tb` sphere shadow 11 ticks |
+| Homing jump | flagsB 0x100000: target = selector +0x16; top = box +0x6a/2 + y; h = vert (or top − vert − y below it); vy = −10 − ((√((h·0x800+0x100)/10) − 16)·10 >> 5); n = ((√(((vy−5)² + (top−y)·20)·256) >> 4) − (vy−5))/10 − 1; vz = |d|/n along the yaw to the target | `w13/homing/trboss02.pkl.gz`; `game.tb` homing: TRBOSS02's own cannon-255 spawn (Bugs held at (1532, 0, −811)) enters 496 and matches rows 1587–1595 (yaw 1459, vel (2064, −1968, −1648), positions) |
+| flagsA 0x4000 / flagsB 0x4000 at a jump | face the selector target (flagsC 0x100 lead) / yaw = contact yaw + 0x800; the jump detaches (0x44d870) | decompile 0x44d990 |
+| Camera sphere sweep 0x440360 | follow work = scratch + 0x15c, look view + 0x10c; head: 0x446ea0 polygons and 0x448ce0 shapes within \|m\| + r; ≤ 11 passes: shapes solid to the camera (record 0x400 none; owner flags10 & 0x4000008, or flags0 0x4000000 unless the focus DAT_004d236c or DAT_004d2714 ≠ 0; 0x44c840 / 0x44c9b0 / 0x44cb50), push 0x443bf0 once \|+0x74\|² > 25, polygons (surface 0x32 none, 0x44bfd0); a contact slides the rest off the normal (Q14), best distance < 100 keeps it (≤ 8) and follows the crease with an earlier one, a rest against m stops | `game.tb` class 30 eye / body after the release, GRANNY shade chase → oracle eye (6201, −3258, 6399) look (5034, −2908, 6552) (`w13/shadow/o_GRANNY_shade.txt`) |
+
+## 37. BBLIT-Remaster findings (LiT bugs.exe 1.6; from BBLIT-Remaster, MIT, InLineR495; `tools/re/verify_exe.py`)
+
+Byte-checked on this project's disc by `tools/re/verify_exe.py` (all 27 hook-site signatures and the 1.6 version
+qword 0x45ca00 = 0x3fe5555555555555 match; our .text CRC32 is 0xc1d00325, BBLIT's reference 0xecffb7c9: another 1.6
+build with the same layout at these sites). TB bblit2.exe .text CRC32 0xd87e2a8f (the Ghidra export's build).
+
+1. Projection: room emitter 0x40fa90, d(z) = z + 1 for z >= 0 else -z, H = [0x4efb30] (400); x_c = x_ndc·d,
+   y_c = y_ndc·d, w_c = -z. Camera matrix C Q12 at 0x4efae0, -eye at 0x4efb20, eye / target 0x4b38c0 / 0x4b38cc,
+   part GTE matrix 0x4e5e60.
+2. Vertex pool 0x734de0..0x7bd960 (35000 × 16 B), cursor 0x623654. Writers: room 0x40fa90 (slot 0x4b1aa4), part
+   0x411350 (0x7c9618), billboard 0x40a6c0 (0x7c624c), text 0x40b130 (0x7c6250), overlays 0x40b980 / 0x40be10
+   (0x4b1a5c / 60), bars 0x40c5e0 (0x4b1a64), HUD bar 0x40c850 (0x4b1a68).
+3. Actor on-screen cull: 0x4481c7 / 0x4481d1 (actor) and 0x4484b7 / 0x4484bd (part) compare projected x with ±0x100
+   under the unsqueezed matrix 0x52fce0. Part pool 0x4b2240 / capacity 0x4b2244, stride 0xb8; exhaustion spins.
+4. 41st shadow: 0x44c981 jge -> 0x44cb77 `jmp $` (eb fe, a hang); 0x44c9ae is the normal no-shadow path.
+5. Portal test bounds 0x621610 (-w/2, read 0x410bbe), 0x621614 (+w/2, 0x410b62), 0x62161c (h/2, 0x410c15);
+   per-polygon vertical tests read 0x4efb4e at 0x410070, 0x4100ba, 0x411c7d.
+6. Backface 0x40fdc0 gets [v0, v1, v2, v3, nverts, 0]; quads zigzag, second half (v1, v3, v2); face list 0x621608,
+   vertex pool pointer 0x623688 (s16 indices, 16-byte entries).
+7. Fog writer 0x40cc80 also keeps float D at 0x4efb44 / 0x4efb68; 0x4b1ab0 is its call cache; level u 0x4b38a0,
+   config fogDist 0x9ca83c. BBLIT's 200000 cap is its own.
+8. No-fog (far 0x3fff) at 0x44cb90 is conjunctive: +0xc & 0x2000000 and (type 9 or +0xc & 0x20000000)
+   (`main.cpp litFar`).
+9. ABR variants: GL ids at 0x52fd74 + 48·id + 4·abr, max id 0x4b1c90; lookup 0x41493a, conversion 0x420d90 (gamma
+   1.2 and offset; alpha maxima ABR 0 α·2, 1 α·4/3, 3 α·4; ABR 2 colour unchanged).
+10. STP: converted alpha > 0.52 / 0.76 / 0.26 (ABR 0 / 1 / 3) marks opaque texels; PS1 0x0000 = no coverage, 0x8000 =
+    opaque black (halves the backdrop under ABR 0); PC ABR 2 near-black textures (shadow 133) use dst·(1-α). The PC
+    data lacks the STP bits of textures the port added (wave 14: LS01 tex 373 all-STP on PS1, black-only on PC).
+11. TITLE depths (view z): logo -2160..-2120 (entity 20, def 36), machine -2546..-1746 (carrot to -2062), menu panel
+    -2000, Bugs -1289..-1201, copyright plate -871.
+12. Pushable stone (type 5): collision holds Bugs 170 from its centre on one side, 240 on the other (~65 sink, PS1
+    too). BBLIT's 50 radius / 120 cap are mod choices (`push_r`).
+13. Input: pad pointer 0x4b18d8 -> buffer 0x4b31c0; joyMap 0x9ca85c; extra Esc 0x4b18d0 bit 2; pause 0x4b226c;
+    no-input 0x4b3e48; transition 0x4b39bc; camera yaw / step 0x4b3e1a / 0x4b3e10, manual-step site 0x4323ce honours
+    the lock bh & 0x80 of 0x4b3940. Jump states 7, 8, 9, 26, 72, 78.
+14. Counters: builds 0x4b18fc, skips 0x4b18f8, skip flag 0x4b1d00, primitives 0x4e5e40, arena 0x4e5e44 / cursor
+    0x4efb8c, sort count 0x604130 (capacity 2000), BZE base / size / limit 0x4b2364 / 0x4b38a4 / 0x4b372c.
+15. Video menu: Apply slot 0x4ac8b8 -> 0x42e050, WriteConfig 0x409a10; W / H / fullscreen / renderer 0x9ca830 / 34 /
+    38 / 24; pending values 0x4b3e60..0x4b3e70; renderer selection 0x4ac094; reinit 0x45f2b0.
+16. Vortices: full-ring fits give outer +140..165° and inner -80..-97° a tick; others step ~24° / ~48° with ×6 skips.
+    Lerping world vertices collapses a vortex to ~35 % radius; interpolate part rotations (bbtime: no collapse,
+    `tools/re/motion_check.py` min rms ratio ≥ 0.997).

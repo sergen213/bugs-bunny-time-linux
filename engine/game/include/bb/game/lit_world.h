@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -96,6 +97,7 @@ struct ActorDef {
     uint16_t idleAnim = 0;                          // ActorInstance::anim: looped by behaviours without script animation
     uint16_t sprite = 0, spriteFrames = 0;          // first listed class-8 asset (Scene::sprites) and its record count
     int16_t spriteW = 0, spriteH = 0;               // record 0 texel size: type-4 box / billboard size (2w x 2h)
+    int32_t link = -1;                              // tag 0x0b: texture link id (+0x170) written by flags8 0x20 actors
     std::vector<PlayerState> states;
     std::vector<ActorStep> steps;
     std::vector<ActorItem> items;
@@ -131,10 +133,12 @@ struct Player : Mover {
     uint16_t anim = 0;             // +0x158 current animation id (0 = restart the move's animation)
     int32_t lastMove = 0;          // +0x1b4 (OR of this tick's world delta)
     uint8_t frameSkip = 0;         // +0x149
+    int16_t shadowBias = 0;        // +0x28 (A44): sort bias of its shadow among the blended faces (0x44bb50 -> 0x411b10)
     int32_t platform = -1;         // +0x70 actor ridden (LitWorld::actors index)
     int32_t carrier = -1;          // actor carrying Bugs (its +0x6c, item flag 0x20000000): Bugs follows it
     int16_t carrierPart = -1;      // the carrier's hand part (+0x68) as of the attach, offset `local` (+0x1a4..) under it; -1 root
     uint16_t contact = 0;          // +0x34 entity id of the last actor touched / hit
+    int32_t rider = -1;            // +0x6c actor carried at his hand part (pick-up move flagsA 0x20 / anim event f2 1)
     // Hanging on a type-8 rope (0x43a310 grab): +0x70 = the rope, +0xc0 -> local coordinate +0x18c whose super is the
     // rope's root +0x7c; world position = rope matrix · local trans (+0x1a4..+0x1ac), local yaw +0x19e.
     int32_t rope = -1;
@@ -183,6 +187,7 @@ struct LitActor : Mover {
     V3 local;
     int16_t localYaw = 0;
     int16_t matYaw = 0;            // local yaw in the coordinate matrix +0x80: rebuilt after the world yaw is read (one tick behind)
+    Mat mat;                       // +0x80 rotation kept while flagsC 0x20 (an f3 0x20 hand spawn, 0x4393e0; type 31 flies along it)
     bool visible = true;           // +4 bit 2 (cleared when culled)
     bool far = false;              // hidden only by the +0x3e distance (+0x3c & 0x42): Enhanced still draws it
     bool active = false;           // linked into the active list this tick
@@ -261,8 +266,10 @@ struct Camera {
 class LitWorld {
 public:
     // Throws FormatError if the level has no player entity or no chunk 0x36 heightfield. scene (optional,
-    // buildLitScene of the same BZE) supplies the TOD actor models: without it animations never end.
-    static LitWorld load(const BzeFile& bze, const Scene* scene = nullptr);
+    // buildLitScene of the same BZE) supplies the TOD actor models: without it animations never end. language =
+    // config.pc +0x08 / G[0x10] (0..5, larger = 0 as 0x42e7a0): its text block and speech section / bank.
+    static LitWorld load(const BzeFile& bze, const Scene* scene = nullptr, uint8_t language = 0);
+    uint8_t language = 0;  // G[0x10] the level was loaded with (speech file Speech0N.xa, clip table row)
     // Exe level table 0x4ad380 (16-B entries, BZE path): level id -> file stem ("L01B"); empty if out of range.
     static std::string levelName(int id);
 
@@ -275,7 +282,15 @@ public:
     // 2t + 3): the HUD actor shows every counter in the load pass and runs again in the counter-3 tick (Wine: the
     // elements fly out from counter 121 = after the 60-tick hold counted from counter 1). Then 0x41d900 opens the
     // zone's track (Wine: it plays over the rest of the loading screen until the fade in stops it).
-    void loadUpdate() { cameraTick(); actorsTick(); cameraNodes(); hudTick(); hudTick(); musicTick(); }
+    // Also the level init's 0x448fa0 (pad remap words from preset G[0x11]) and the demo flag G[0x0f] (chunk 0x47).
+    // No camera-node pass: the loading screen is drawn instead, so the first level draw follows the counter-3 tick
+    // (Wine: L02A1's intro node shows from counter 3 with Bugs' timer at 2 and camera flag 2 set).
+    void loadUpdate() {
+        padPreset(pad, G[0x11]);
+        G[0x0f] = demo.empty() ? 0 : 1;
+        demoAt_ = 0;
+        cameraTick(); actorsTick(); hudTick(); hudTick(); musicTick();
+    }
     const ActorModel* playerModel() const { return model_; }
     // Drawing an actor attached at a parent's part (0x44c170 / GsGetLws: the child coordinate's super is that part's):
     // the part's world matrix (rotation and scale through the parent's part chain and root, PS1 axes, row major, 1.0 =
@@ -283,10 +298,16 @@ public:
     // at a part of an actor (root / Bugs' hand: the yaw-only frame of followParent). A zero-scale part hides the child
     // (LS01 clock-gate digits under the parents' anim 270, RUNTIME_REFERENCE §28).
     std::optional<std::array<float, 9>> parentFrame(const LitActor& a) const;
+    // The origin of a's parent part as partPoint gives it, under `pose` for the parent's (Enhanced pose interpolation:
+    // attached actors follow the parent's drawn part). nullopt when a hangs at no part.
+    std::optional<V3> parentPoint(const LitActor& a, const AnimState& pose) const;
 
     Heightfield hf;
     std::vector<PlayerState> states;
     std::vector<PlayerMove> moves;
+    // The exe's move list as laid out in memory: 28-byte nodes in file order, {next pointer (runtime, kept 0), tag
+    // 0x34's 24 bytes with the link at +6} (runtime: LB02, nodes 28 apart). 0x437510 on Bugs reads it misaligned.
+    std::vector<uint8_t> moveImage;
     std::vector<PlayerRule> rules;
     std::vector<Trigger> triggers;
     std::vector<ActorDef> defs;      // every entity chunk (live + templates); actors index into it
@@ -294,16 +315,30 @@ public:
     Player p;
     Camera cam;
     int16_t camZone = -1;            // 0x4b39b4 +0x26: FindZone of the eye (0x4318f0), kept while the eye is in none
-    // Visible-zone table 0x4b3460 of the last rendered frame (its unflagged zone ids; app: Renderer::zoneTable). Actor
-    // flag +0x3c & 1 needs its zone listed. nullopt = not rendered (tests): every zone after the first tick.
-    std::optional<std::vector<int16_t>> zoneTable;
+    // Visible-zone table 0x4b3460 of the last rendered frame: per zone its first entry (id, flagged; app:
+    // Renderer::zoneTable). Actor flag +0x3c & 1 needs its zone listed, unflagged unless the actor has flags8 0x10000
+    // (0x447d40). nullopt = not rendered (tests): every zone after the first tick.
+    std::optional<std::vector<std::pair<int16_t, bool>>> zoneTable;
+    // A17 (0x42cba0) zone message queue 0x4b2480 (count 0x4b39de, ≤ 8): cleared by 0x447d40 before the behaviours;
+    // the next draw's portal walk flags a portal whose zone is queued (render::ZoneView::messages).
+    std::vector<uint16_t> zoneMessages;
     Pad pad;
+    // Enhanced jump buffer (BBLIT-Remaster, docs/ROADMAP.md "Enhanced"; 0 = off, the exe): a jump pressed up to this
+    // many ticks before Bugs lands is replayed into the pad words (pressed / held) on his first grounded tick, until a
+    // jump state (0x17c 7, 8, 9, 26, 72, 78) takes it; pausing drops it. The app sets it every tick.
+    uint8_t jumpBuffer = 0;
+    uint8_t jumpLeft = 0;   // ticks the buffered press stays valid (jumpBuffer + 1 at the press)
+    bool jumpWasHeld = false;  // physical jump button held last tick (edge detection)
     std::array<uint8_t, 256> G{}, S{};
     uint32_t ticks = 0;
+    // Texture link alias table 0x4e5e80 (0x438830): link id -> sprite record last written by its flags8 0x20 actor
+    // (type 2 / flipbook actors from 0x438970 with the frame shown before the advance, type 20 from 0x445500).
+    // Absent = not written yet; the value stays when the writer is not updated or is freed.
+    std::map<uint16_t, uint16_t> textureLinks;
     // Actor on-screen test (+0x3c & 0x20, 0x447d40): projected half-width at H = 400. The exe's 0x100 = the 4:3 PS1
     // reference; the app widens it to its render FOV (wide Enhanced FOV / Hor+) so actors at the screen edges stay drawn.
     double viewHalfX = 0x100;
-    int nextLevel = -1;              // level change request (GD+0 / DAT_004b39bc = 1), LitWorld::levelName id
+    int nextLevel = -1;              // level change request (GD+0 / 0x4b39bc = 1), LitWorld::levelName id
     // Sound voices (sfx.h): requests during the tick, one mixer pass after the behaviours (0x41edb0); the app drains
     // sfx.cmds. Replays of the audio-less Wine oracle set sfx.device = false (runtime: its 24 voices never free, all
     // busy by counter 1739, so chance sounds stop consuming rand).
@@ -346,6 +381,27 @@ public:
     std::array<std::array<int32_t, 4>, 21> menu{};
     uint8_t menuLock = 0;
     int32_t volume30 = 100, volume34 = 100;
+    // Window keys (WndProc 0x40e490, any screen): F2 (VK 0x71) sound / F3 (0x72) music on-off. On: the volume is kept
+    // in 0x9ca7d0 / 0x9ca7d4, set 0, playing sounds paused in place (0x41f450) / the stream stopped (0x41d5c0). Off:
+    // the kept volume back (100 if it is below 1), sounds resumed (0x41f510) / the current track restarted (0x41d5e0).
+    // No config write (the pause menu's sound page shows the new values).
+    void soundKey();
+    void musicKey();
+    // The speech clip playing now (A81 speech status S[0x17] 4, volume +0x34 >= 50): bytes [offset, offset + size) of
+    // speeches/Speech0<language>.xa, played on the music stream (1 byte = 1 stereo frame, 44100 Hz).
+    struct SpeechClip { uint64_t offset = 0, size = 0; };
+    std::optional<SpeechClip> speechClip() const;
+    int32_t volume30Kept = 0, volume34Kept = 0;
+    // Pause menu Video page (A106-A118): config.pc +0x10 / +0x14 resolution, +0x18 fullscreen, +0x1c fog distance
+    // (0x40cc80: D = b + (9·fogDist / 2)·u), +0x04 renderer (2 3-D card, 0 / 1 without; bbtime always draws with its
+    // own renderer). modeValid[i] = the display offers mode i of the 8-entry list (0x409990), deskW / deskH =
+    // GetSystemMetrics 0x7c95e4 / 0x7c95e0: the app fills them.
+    struct Video { int32_t width = 640, height = 480, fullscreen = 0, fogDist = 2, renderer = 2; } video;
+    std::array<bool, 8> modeValid{};
+    int32_t deskW = 0, deskH = 0;
+    // The exe's WriteConfig 0x409a10 calls since the app last cleared it: 1 keys (C94), 2 joystick buttons (C95),
+    // 4 volumes (A122-A125), 8 Video "Apply" (A118, then 0x45f2b0 = 0x13 re-creates the display).
+    uint8_t configChanged = 0;
     void musicTick();
     // Overlay font tables (lit_overlay.cpp): 0x4ae3a8 byte -> 1-based glyph (Scene::overlayFont), 0x4ae4a8 pen advance.
     static uint8_t fontGlyph(uint8_t c);
@@ -374,10 +430,14 @@ public:
     int goldenCarrots() const { return G[7] | G[0xfc] << 8; }
     int32_t groundY() const { return p.groundBase + p.hoff; }
     const V3& checkpoint() const { return checkpoint_; }  // 0x4b2460 respawn point
+    int32_t checkpointYaw() const { return checkpointYaw_; }  // 0x4b246c
+    // The respawn point the previous level left (globals of the exe, not reset by a level load).
+    void carryCheckpoint(const V3& at, int32_t yaw) { checkpoint_ = at, checkpointYaw_ = yaw; }
 
     // Ground shadow of one drawn actor (0x44bb50): Scene::templateModels[entity] posed at Trans(pos) * RotMatrix(rot) *
     // Scale(scale, 0x1000, scale), PS1 axes.
-    struct Shadow { uint16_t entity = 0; V3 pos; std::array<int16_t, 3> rot{}; int32_t scale = 0x1000; };
+    // owner: the actor casting it (actors index, -1 Bugs); 0x44cb90 draws the quad with the owner's far value.
+    struct Shadow { uint16_t entity = 0; V3 pos; std::array<int16_t, 3> rot{}; int32_t scale = 0x1000; int16_t sortBias = 0; int32_t owner = -1; };
     // This tick's shadows (0x44c4b0 registration, max 40): Bugs unless first person, then drawn actors with tag 0x46.
     std::vector<Shadow> shadows() const;
     int32_t shadowMaxY = 0x7fff;     // 0x4b2378: shadow y clamp (chunk 0x3b tag 0x3c s16, A88, A91)
@@ -388,22 +448,31 @@ public:
     // Spawns template entity `entityId` (0x448d40) at pos/yaw; returns the actors index or -1.
     int spawn(uint16_t entityId, const V3& pos, int16_t yaw);
 
-    // Overlay text scripts (chunk 0x49 tag 0x4a, one block per language in section 3; English loaded): u16 offset
+    // Overlay text scripts (chunk 0x49 tag 0x4a, one block per language in section 3; the load language's): u16 offset
     // table, NUL-terminated '>'-command text (GAMEPLAY.md §7.6). Empty = level without overlays.
     std::vector<uint8_t> overlayText;
     std::vector<OverlayGlyph> glyphs;  // this tick's overlay text (0x4b373c, cleared at the start of actorsTick)
     // >D / >J key names (config.pc maps, original defaults): keyNames[n] = keyboard key of >D n (config kbdMap entries
     // 11 kick □, 9 crouch ○, 8 look △, 10 jump ✕, 6 roll L1, 5 camera R2, 7 action R1, 4 camera L2, named as the exe's
     // DIK table); joyButtons[n] = joyMap byte of >J n ("BUTTON%i"); joystick = config+0x38 use-joystick (C98, >DJ).
+    // keyCodes[n] = the DirectInput scan code of >D n (0 = a bbtime key outside the exe's table; keyNames as given).
     std::array<std::string, 8> keyNames{"F", "S", "A", "D", "E", "W", "R", "Q"};
+    std::array<uint8_t, 8> keyCodes{33, 31, 30, 32, 18, 17, 19, 16};
     std::array<uint8_t, 8> joyButtons{3, 1, 0, 2, 4, 6, 5, 7};
     bool joystick = false;
+    static std::string dikName(uint8_t code);  // 0x402250: DIK name table 0x45e030 ("" when not listed)
+    // Demo stream of the level (chunk 0x47 tag 0x48, section 3 {u32 offset, u32 size}): 4 u16 pad words per tick.
+    // No PC LiT BZE carries one (the PS1's DEMO* levels are not on the PC disc).
+    std::vector<uint16_t> demo;
     // 0x44e310: spawns a type-32 overlay actor (template 68) running script `script` (resume: continue `a`'s paused
     // script instead); returns the script's status nibble (>P digits; 4 for an unpaused >W0), 0 if nothing ran.
     uint32_t overlay(uint16_t script, LitActor* resume = nullptr);
 
 private:
     uint8_t keys_ = 0;               // 0x4b18d0 extra keys this tick: bit 1 Esc (C96)
+    uint8_t key_ = 0, joyButton_ = 0xff;  // this tick's key / joystick button capture (PadInput::key / joyButton)
+    size_t demoAt_ = 0;              // 0x4b249c: words of `demo` read so far
+    struct { int32_t w = 0, h = 0, fog = 0, rend = 0; uint8_t full = 0; } videoSel_;  // 0x4b3e60..0x4b3e70 (A114-A117)
     void cameraNodes();              // 0x40a1f0 / 0x40a530: a TOD camera node (part flags 0x40) sets the view
     const ActorModel* model_ = nullptr;
     const Scene* scene_ = nullptr;
@@ -412,7 +481,9 @@ private:
     V3 levelEye_;  // chunk 0x3b tag 0x2b
     // Emitter handle (sfx.h): Bugs 1, actor i -> i + 2.
     int32_t emitter(const LitActor* a) const { return a ? int32_t(a - actors.data()) + 2 : 1; }
-    uint8_t loopSounds_ = 0;  // 0x4b39d0: 8 glide sound on, 0x10 dig sound on
+    uint8_t loopSounds_ = 0;  // 0x4b39d0: 1 a block push sound on, 8 glide sound on, 0x10 dig sound on
+    uint16_t pushSound_ = 0;  // 0x4b2160: the sound id (+0x1e) of the last block that moved
+    int32_t pickup_ = -1;     // 0x4b3c00: the last contact touched outside a pick-up move (actors index)
     std::vector<AnimFx> playerFx_;   // the player's animation sound / logic events
 
     // Player-behaviour globals (§3).
@@ -442,11 +513,13 @@ private:
     int ropeClimb(int32_t v);
     V3 ropeWorld() const;
     V3 platformWorld() const;                    // riding: platform matrix · p.local
+    int16_t attachedHeading(int32_t len) const;  // +0xc4 chain heading of (0, 0, len) (rope / platform)
     // 0x434230: any box corner / centre of the rider m (rotation rot, box) over platform pl's box.
     bool overPlatform(const LitActor& pl, const Mover& m, std::array<int16_t, 3> rot, const std::array<int16_t, 6>& box) const;
     void dropRope();
     void rope(size_t i);  // lit_actors.cpp: behaviour 0x43efc0
     int16_t playerInflate_ = 0;      // player +0x20 (tag 0x38) box inflation
+    int16_t playerBoxTop_ = 0;       // player +0x52 from tag 0x1c / 0x42 (y), kept until a TOD packet 9 sets it
     bool handHitsPlayer(const V3& h) const;
     // 0x433500's face push of mover m (inflation, radius, box) against actor o; top = o's box top − m's y in o's frame.
     bool boxPush(const Mover& m, int32_t mInflate, int32_t mRadius, const std::array<int16_t, 6>& mBox, const LitActor& o,
@@ -465,6 +538,12 @@ private:
     void playerTick();
     int playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz);  // 0x433500 contact actor, -1 none
     void playerAttacks(const PlayerMove& mv);
+    void dropCarried();  // Bugs' +0x6c back to a root coordinate where it is (flags14 0x800 -> 0x1000)
+    // 0x432fe0: the first collision actor of `mask` whose box (its full rotation, grown by its inflation) holds s's
+    // position with the heights overlapping s's box; skips s (si), s's parent sp / carried sr and o's parent = s.
+    int overlapActor(const Mover& s, int32_t si, int32_t sp, int32_t sr, const std::array<int16_t, 6>& box, uint32_t mask) const;
+    // 0x433380: the first collision actor of `mask` without `exclude` (not si) whose box holds point q.
+    int pointHit(const V3& q, uint32_t mask, uint32_t exclude, int32_t si) const;
     void moveActor(Mover& m, V3& delta, Ground& r, int16_t boxTop);
     void arcTick(Mover& m);
     void cameraReset();
@@ -498,11 +577,13 @@ private:
     void director(size_t i);
     void cameraDirector(size_t i);
     void spriteEffect(size_t i);  // behaviour 4 (0x4452a0)
+    void heldItem(size_t i);      // behaviour 34 (0x446990): an attached actor running its own states, freed when let go
     bool runItem(size_t i, const ActorItem& it, bool gated);  // item gates + condition; true = fires
     int findActor(uint16_t entityId) const;
     void startScript(LitActor& a, uint16_t stateId);
     // Attached actors (0x440120 coordinate chain): parent frame (origin, yaw), attach / follow / detach.
     static constexpr int32_t kParentBugs = -2;
+    std::optional<V3> partPoint(int32_t parent, int16_t part, const V3& q) const;  // q at the parent's part `part`, nullopt: root / none
     V3 frameWorld(int32_t parent, int16_t part, const V3& local, int16_t* yaw = nullptr) const;  // a point of the parent coordinate (part -1: root)
     int16_t attachPart(int32_t parent, bool hand) const;  // the parent's hand part (+0x68) to hang on now, -1 = root
     int16_t coordYaw(const LitActor& c) const;  // heading of c's coordinate matrix walked from its current local rot
@@ -521,6 +602,7 @@ private:
     uint8_t musicTrack_ = 0;         // 0x4b39d4 the zone entry's track (0 at load / outside every entry's zone)
     int musicEntry_ = -1;            // 0x54efc4 current entry (index into musicZones)
     int32_t musicZone_ = 0xffff;     // 0x4b3b76 zone the entry was picked for (0xffff at level init)
+    uint8_t musicStopped_ = 0;       // the track F3 stopped (0x4abf94, kept by 0x41d5c0)
     bool helpRequest_ = false;       // 0x4b1a2c F1 help request (consumed by tick step 7)
     bool pauseRequest_ = false;      // 0x4b1908 Esc pause request (consumed by tick step 7)
 

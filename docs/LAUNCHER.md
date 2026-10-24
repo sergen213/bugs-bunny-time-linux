@@ -43,9 +43,14 @@ out-of-range values are skipped with a `line N:` warning and the default stays. 
 | `water` | `enhanced` \| `cartoon` \| `original` (`enhanced`) | Vulkan + Enhanced stylised interactive water (refraction, shore foam, reflections, waves); `cartoon` = the same toon-shaded; `original` = the games' own water layers |
 | `upscaling` | `off` \| `fsr_quality` \| `fsr_balanced` \| `fsr_performance` \| `native_aa` (`off`) | Vulkan + Enhanced AMD FSR 3.1.4 (render scale 1/1.5, 1/1.7, 1/2, 1); replaces MSAA while on |
 | `frame_generation` | boolean (`false`) | Vulkan + Enhanced FSR frame generation (one interpolated frame per rendered frame; with `upscaling = off` it runs FSR native AA) |
-| `music_volume`, `sfx_volume` | 0–100 (100) | audio |
+| `music_volume`, `sfx_volume` | 0–100 (100) | audio; LiT: config.pc +0x34 / +0x30 (music at (v − 100) dB, below 50 no new music) |
+| `lit_pad_preset` | 0–3 (0) | LiT pad remap preset G[0x11] (bbtime Options "LiT controller") |
+| `lit_fog_distance`, `lit_renderer` | 0–2 (2), 0–2 (2) | LiT pause menu Video page: fog distance (draw distance), renderer choice (kept and shown only) |
+| `lit_language` | 0–5 (0) | LiT config.pc +0x08 language (G[0x10]): level text and speech banks, `speeches/Speech0N.xa`, loading screens `<name>_N.bze`; the PC disc ships 0, 1 and 3 |
+| `lit_joy_buttons` | 8 × 0–254 (`3,1,0,2,4,6,5,7`) | LiT joyMap: gamepad button of kick, crouch, look, jump, roll, camera right, action, camera left (pause menu Controls / Joystick) |
 | `tb_brightness` | 0.25–2 (1) | TB texture brightness = `config.pc` +0xe0 of the TB Video page (`bb::tbAdjustColor`) |
 | `tb_renderer`, `tb_details` | 1–2 (2), 0–2 (2) | TB Video page renderer / detail choice, kept and shown only |
+| `tb_language` | 0–6 (0) | TB registry `language` (EN FR DE ES IT PT NL): the front end's Language page and a new game's GD+0x93, which picks each level's language section (speech bank, in-game texts) and the speech files `SPEECH/<NN>/Speech<n>.xa`; this disc has 00–04 and 06 |
 | `bind.<action>` | comma-separated SDL key names | keyboard map |
 | `mods` | comma-separated mod ids in load order, later wins (empty) | game: mods applied to every level (`docs/MODDING.md`); `--mods ID,…` / `--no-mods` override |
 | `update_url` | https URL of `manifest.json` (empty = the GitHub release channel, `docs/UPDATES.md`) | launcher updater only; tests/dev override, not in the UI |

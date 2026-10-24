@@ -228,24 +228,37 @@ bool inside(const fs::path& p, const fs::path& root) {
     return !r.empty() && a == r.end();
 }
 
+// Parent pid of `pid` (/proc/<pid>/stat field 4, after the parenthesised comm), 0 if unknown.
+pid_t parentOf(pid_t pid) {
+    std::ifstream f(std::format("/proc/{}/stat", pid));
+    std::string st((std::istreambuf_iterator<char>(f)), {});
+    const size_t r = st.rfind(')');
+    int ppid = 0;
+    if (r != std::string::npos) std::sscanf(st.c_str() + r + 1, " %*c %d", &ppid);
+    return ppid;
+}
+
 // Legacy hand-off (0.9.x / 0.10.0 launchers export no kOriginEnv; the inner runtime overwrote APPIMAGE): the user's
-// AppImage is still mounted by its runtime's FUSE process, whose argv[0] is that file. Our uid, a regular file outside
-// the install root, "bbtime" in the name (Gear Lever bbtime.appimage, Shelly / AppImageLauncher bbtime-<v>-x86_64*).
-// ponytail: name heuristic; a renamed AppImage is not found (it keeps handing off), add a content check if needed.
+// AppImage is still mounted by its type-2 runtime, which forked the FUSE process and exec'd AppRun -> launcher ->
+// hand-off in the same pid. So that FUSE process is a child of this process or one of its ancestors, and its argv[0]
+// is the AppImage file the user started: an absolute regular file outside the install root carrying the AppImage
+// type-2 magic "AI\x02" at byte 8. Its name does not matter (renamed files are found).
 fs::path mountedAppImage(const fs::path& root) {
+    std::set<pid_t> chain;
+    for (pid_t p = getpid(); p > 1 && chain.insert(p).second;) p = parentOf(p);
     std::error_code ec;
     for (const auto& d : fs::directory_iterator("/proc", ec)) {
-        if (!std::isdigit(uint8_t(d.path().filename().string()[0]))) continue;
+        const std::string pid = d.path().filename().string();
+        if (!std::isdigit(uint8_t(pid[0])) || !chain.contains(parentOf(std::stoi(pid)))) continue;
         struct stat st{};
         if (stat(d.path().c_str(), &st) != 0 || st.st_uid != getuid()) continue;
         std::ifstream f(d.path() / "cmdline", std::ios::binary);
         std::string a0;
         std::getline(f, a0, '\0');
-        std::string name = fs::path(a0).filename().string();
-        std::ranges::transform(name, name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-        if (a0.starts_with('/') && name.contains("bbtime") && name.ends_with(".appimage") && fs::is_regular_file(a0, ec) &&
-            !inside(a0, root))
-            return a0;
+        if (!a0.starts_with('/') || !fs::is_regular_file(a0, ec) || inside(a0, root)) continue;
+        char head[11]{};
+        std::ifstream img(a0, std::ios::binary);
+        if (img.read(head, sizeof head) && std::string_view(head + 8, 3) == std::string_view("AI\x02", 3)) return a0;
     }
     return {};
 }
@@ -333,7 +346,8 @@ std::expected<fs::path, std::string> install(const Manifest& m, const Options& o
         return std::unexpected(e);
     if (cur) swapLink(o.installRoot / "previous", fs::path("versions") / *cur);
 
-    // ponytail: keeps only current + previous; keep N if users ask for deeper rollback.
+    // Retention: versions/ keeps exactly `current` and `previous` (the one rollback() can return to); every other
+    // version directory is removed, so an update never grows the install beyond two versions.
     const auto prev = previousVersion(o.installRoot);
     std::vector<fs::path> stale;
     for (const auto& e : fs::directory_iterator(versions, ec)) {

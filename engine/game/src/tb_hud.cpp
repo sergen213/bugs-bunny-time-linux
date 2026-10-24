@@ -86,6 +86,7 @@ void TbWorld::fadeTick() {  // 0x464ef0
         // 0xe00); S[0x2c4] (= 0x4d2764) keeps the value as it is.
         if (S[0x2c4]) return;
         f.dark = S[9] ? 0xe00 : 0;
+        if (!S[9]) f.rgb = {};  // the colour of S 50 goes with the next fade only
         return;
     }
     if (f.mode & 4) {
@@ -111,16 +112,23 @@ void TbWorld::fadeTick() {  // 0x464ef0
             }
         }
     }
-    if (f.mode & 0x30) f.mode = 0, f.dark = 0;
+    if (f.mode & 0x30) f.mode = 0, f.dark = 0, f.rgb = {};
 }
 
 std::array<uint8_t, 4> TbWorld::fadeOverlay() const {
-    // 0x464ef0 scales the level light colours (0x4883e0..) and the vertex brightness 0x488250 = (0x1000 - dark) >> 4;
-    // the black veil stands in (as LiT). TB has no flash colour: the 0x40 flash of S52 is a dark-light-dark blink.
-    // Without a fade mode the brightness is not touched (the paused dark 0xe00 does not dim the frame).
+    // 0x464ef0 scales the level light colours (0x4883e0..) and the vertex brightness 0x488250 = (0x1000 - dark) >> 4,
+    // a multiply of every glColor (world, sky, text). A 0x40 flash (S 52) with the S 50 colour (0x4d23c4 / 0x4d26ad /
+    // 0x4d26ac, white or red in the data) makes 0x464c30 set the GL light colour to rgb · dark / 2^24 per channel
+    // (oracle local/wine/tbintro/w13_flash: dark 0x800, rgb (0, 0, 255) -> blue x0.0311, red and green 0): a near-black
+    // tinted blink. Returned as the per-channel multiplier the app multiplies the frame by (alpha 255 = active, 0 =
+    // none). Without a fade mode the brightness is not touched (the paused dark 0xe00 does not dim the frame).
     if (!fade.mode) return {0, 0, 0, 0};
-    const int lit = 0x1000 - fade.dark;
-    return {0, 0, 0, uint8_t(255 - std::min(255, lit >> 4))};
+    if ((fade.mode & 0x40) && (fade.rgb[0] | fade.rgb[1] | fade.rgb[2])) {
+        auto ch = [&](int c) { return uint8_t((fade.rgb[c] * fade.dark * 255 + (1 << 23)) >> 24); };
+        return {ch(0), ch(1), ch(2), 255};
+    }
+    const uint8_t k = uint8_t(std::min(255, (0x1000 - fade.dark) >> 4));
+    return {k, k, k, uint8_t(k == 255 ? 0 : 255)};
 }
 
 // ------------------------------------------------------------------------------------------------ overlay text
@@ -346,14 +354,12 @@ uint32_t TbWorld::textRun(TbActor* e, uint16_t script, int16_t prio) {  // 0x466
                                                      0, 2, 6, 3, 1, 5, 4, 7, 8, 9, 10, 11, 12, 13, 3, 1,
                                                      3, 4, 2, 6, 0, 5, 1, 7, 8, 9, 10, 11, 12, 13, 3, 1,
                                                      2, 0, 3, 7, 6, 4, 1, 5, 8, 9, 10, 11, 12, 13, 3, 1};
-            // GetKeyNameText (0x40fba0) of the keys behind them, lower-cased (0x480020): config.pc defaults of
-            // 0x415fd0 (□ ○ △ ✕ L1 L2 R1 R2 select start ← → ↑ ↓, then 0x3e F4), the same keys as bbtime's P1 / P2 maps.
+            // GetKeyNameText (0x40fba0) of the keys behind them, lower-cased (0x480020): config.pc slots (□ ○ △ ✕ L1 L2
+            // R1 R2 select start ← → ↑ ↓, then 0x3e F4) = keyNames (the app's live P1 / P2 maps).
             // Levels 0x24 / 9 / 0x14 with GD+0x29 & 0x10 and Taz in focus (lookup 8): buttons 0..9 name player 2's keys
-            // (config.pc +0x88.., 0x639bf4 ..). ponytail: fixed default bindings (bbtime's P1 / P2 maps); P2 select /
-            // start names = GetKeyNameText of Right Ctrl / Right Shift (I).
-            static constexpr std::string_view kP1[15] = {"r", "q", "w", "e", "a", "d", "s", "f", "tab", "esc",
-                                                         "left", "right", "up", "down", "f4"};
-            static constexpr std::string_view kP2[10] = {"[", "i", "o", "p", "l", ";", "k", "'", "ctrl", "right shift"};
+            // (config.pc +0x88.., 0x639bf4 ..).
+            const auto& kP1 = keyNames[0];
+            const auto& kP2 = keyNames[1];
             uint32_t k = d[q];
             q += 1;
             if (k < 0x14) k = kRemap[(k + (GD[0x95] & 3u) * 16) & 0x3f];
@@ -677,7 +683,7 @@ void TbWorld::hudHealth(size_t hi, Slide& s, int32_t value) {  // 0x462820
     hudMove(h.bar, int16_t(hud_.pos[h.bar][0] + s.cur[0]), int16_t(hud_.pos[h.bar][1] + s.cur[1]));
 }
 
-void TbWorld::hudSetup() {  // 0x462430 (HUD sheet holder template 0x1f; the second sheet, template 0x28, not ported)
+void TbWorld::hudSetup() {  // 0x462430 (HUD sheet holder template 0x1f; the second sheet, template 0x28, is in no level)
     GD[0xac] &= 0xfe;
     for (size_t k = 0; k < hud.size(); ++k)
         hud[k] = {.tmpl = kHudTemplate[k], .x = kHudModelPos[k][0], .y = kHudModelPos[k][1], .z = kHudModelPos[k][2]};
@@ -689,6 +695,10 @@ void TbWorld::hudSetup() {  // 0x462430 (HUD sheet holder template 0x1f; the sec
         {{160, 0}, 0, 160, 0x61, 34, 0, 5, 12, 9},    {{0, -120}, 0, -120, 0x62, 36, 0, 5, 9, 13},
         {{0, -120}, 0, -120, 0x62, 36, 0, 5, 9, 13}};
     hud_ = {};
+    // 0x460b00(0x1f): the sheet holder entity takes a pool slot for the level (dying at once without links)
+    if (templates_.contains(0x1f))
+        if (const int s = takeSlot(); s >= 0)
+            if (const auto l = linksById_.find(0x1f); l == linksById_.end() || l->second.empty()) slotUsed[size_t(s)] = false;
     std::ranges::copy(kSlide, hud_.slide.begin());
     page_ = {{0, 0}, 0, 0, 0xa9, 0x28, 0, 10, 0x18, 0xc};  // 0x4d5960: x axis, moving to "out", page scroll
     // 0x4ced78.. bars: Bugs, Taz, S[6] (sheet 0x28), Bugs S[0x6d], Taz S[0x6e]; linked pairs share a panel.
@@ -756,7 +766,21 @@ void TbWorld::hudPage() {
 void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     const int level = int(GD[0]);
     if (!hud_.init && (S[4] & 0x10)) return;
-    if (level == 0 || level == 0x5d) return;  // title / credits screens (0x462150 / 0x4622d0): not ported
+    // TITLE (level 0, 0x462150) is not on the PC disc. CREDITS (0x5d, 0x4622d0 once): HUD sprites 0..2 show sheet
+    // frames 0..2 (each frame record's width +1 first) with their top-left at (124 i - 186, -50).
+    if (level == 0) return;
+    if (level == 0x5d) {
+        if (!hud_.init && !hudFrames_.empty()) {
+            for (size_t i = 0; i < 3 && i < hudFrames_.size(); ++i) {
+                ++hudFrames_[i][0];
+                hudSprites[i] = {};
+                hudSetSprite(i, uint8_t(i));
+                hudMove(i, int16_t(124 * int(i) - 186), -50);
+            }
+        }
+        hud_.init = true;
+        return;
+    }
     if (S[4] & 0x10) {  // cut-scene mode: only finish moving what is still on screen
         const bool any = std::ranges::any_of(hudSprites, [](const HudSprite& s) { return s.shown; }) ||
                          std::ranges::any_of(hud, [](const HudItem& h) { return h.shown; });
@@ -767,7 +791,9 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     if (!hud_.init) hudSetup();
     if (hudFrames_.empty()) return;  // no HUD sheet in this level (0x4d5d74 == 0)
     hudPage();
-    hudSprites[29].shown = false;  // snipe-mode cross-hair: look mode (0x4d4fd4 & 2) is not simulated
+    // 0x463170: the cross-hair (sprite 29) in the look view of Bugs with GD+0xa2 4 (pad cheat 2); the snipe one (30)
+    // needs S 86, in no PC level.
+    hudSprites[29].shown = lookMode_ && (GD[0xa2] & 4) && actors[size_t(focus())].id == 2;
     if (!(GD[0xac] & 1)) {
         hudSprites[31].shown = false;
         hud[14].shown = false;
@@ -831,8 +857,9 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
     if (s7 && !S[6] && hud_.health[2].shown == 0) s7 = 0, hud_.s7 = 0;
     if (!(keep & 3) && s7) hud_.cea |= 1;
     else hud_.cea &= 0xfc;
-    if ((s7 || (hud_.cea & 1) || (hud_.slide[8].flags & 0x200)) && hud_.health[2].bar)
-        unsupported.insert("hud S[6] bar (sheet template 0x28)");
+    // The S[6] bar (0x462820 on slide 8 while the coin counter is in) draws from the template-0x28 sheet
+    // 0x4d5cdc, which no level has (no entity with id 0x28 in any of the 58 files): the original would read its
+    // frames through a null sheet (0x461a00), so no shipped level shows it; sprites 0x1b / 0x1c stay hidden.
     const uint16_t v1 = uint16_t(GD[0x58] | GD[0x59] << 8);
     if (hud_.slot1 != v1 && hud_.slot1 != 0xffff) hud_.spd[0][1] = -600;
     hud_.cea = keep;
@@ -878,39 +905,56 @@ void TbWorld::hudTick() {  // 0x463170 (class 6 entity, first in the list)
 // ------------------------------------------------------------------------------------------------ camera node
 // Render pass 0x465130 clears B+0x3c 0x300, then 0x469aa0 poses each drawn entity: a part with flag 0x40 (camera node,
 // not hidden) is the view (0x464820): eye = its world origin, look = eye + its rotation · (0, 0, 1200), body = eye
-// (flags10 0x20: eye + R · (0, 0, 400)), flags |= 0x100; flags10 0x40 eases eye and look by 1/8 instead. The follow
+// (flags10 0x20: eye + R · (0, 0, 400), and eye / look / body become the restored pose), flags |= 0x100; flags10 0x40 eases eye and look by 1/8 instead. The follow
 // camera 0x439700 stands still while 0x300 is up and resumes from this pose (ARCA01 intro template 425, RETRY).
+// The node's world matrix is GsGetLw 0x405ab0 in integers: the entity root (0x44e690: RotMatrix 0x404160 of its
+// angles, ScaleMatrix 0x404710 by its scale, its position) composed (0x404ae0: 0x4048b0 s16 rows >> 12, t = M·t >> 12
+// + t) with each part's coordinate (RotMatrix of rot, ScaleMatrix, trans) down to the node; the look offset is
+// ApplyMatrixLV 0x404820 (row sums >> 12).
 void TbWorld::cameraNodes() {
     camScript.flags &= ~0x300u;
+    auto coord = [](int32_t rx, int32_t ry, int32_t rz, const std::array<int32_t, 3>& s, const V3& t) {
+        Mat M;
+        rotMatrixXYZ(M, rx, ry, rz);
+        for (size_t i = 0; i < 9; ++i) M.m[i] = int16_t((M.m[i] * int16_t(s[i % 3])) >> 12);
+        M.t = t;
+        return M;
+    };
+    auto comp = [](const Mat& P, const Mat& L) {
+        Mat R;
+        for (size_t i = 0; i < 3; ++i)
+            for (size_t j = 0; j < 3; ++j)
+                R.m[i * 3 + j] = int16_t((P.m[i * 3] * L.m[j] + P.m[i * 3 + 1] * L.m[3 + j] + P.m[i * 3 + 2] * L.m[6 + j]) >> 12);
+        const V3 v = applyLV(P, L.t);
+        R.t = {v.x + P.t.x, v.y + P.t.y, v.z + P.t.z};
+        return R;
+    };
     for (TbActor* a : order()) {
         if (!a->active || !a->drawn()) continue;
         const std::vector<TodPart>& parts = a->anim.parts;
         for (size_t i = 0; i < parts.size(); ++i) {
             if ((parts[i].flags & 0x8000) || !(parts[i].flags & 0x40)) continue;
-            auto world = [&](double z) {  // the part's coordinate chain applied to (0, 0, z), then the entity root
-                double v[3] = {0, 0, z};
-                for (int32_t k = int32_t(i), guard = 0; k >= 0 && size_t(k) < parts.size() && guard < 64; ++guard) {
-                    const TodPart& t = parts[size_t(k)];
-                    const double x = v[0], y = v[1], w = v[2];
-                    for (int r = 0; r < 3; ++r) v[r] = t.m[size_t(r * 3)] * x + t.m[size_t(r * 3 + 1)] * y + t.m[size_t(r * 3 + 2)] * w + t.trans[size_t(r)];
-                    k = t.parent;
-                }
-                const V3 r = rotY(a->yaw, int32_t(std::lround(v[0])), int32_t(std::lround(v[1])), int32_t(std::lround(v[2])));
-                return V3{a->pos.x + r.x, a->pos.y + r.y, a->pos.z + r.z};
-            };
+            std::vector<size_t> chain;
+            for (int32_t k = int32_t(i); k >= 0 && size_t(k) < parts.size() && chain.size() < 64; k = parts[size_t(k)].parent) chain.push_back(size_t(k));
+            Mat W = coord(a->pitch, a->yaw, a->roll, {a->scale[0], a->scale[1], a->scale[2]}, a->pos);
+            for (auto k = chain.rbegin(); k != chain.rend(); ++k) {
+                const TodPart& t = parts[*k];
+                W = comp(W, coord(t.rot[0], t.rot[1], t.rot[2], t.scale, {t.trans[0], t.trans[1], t.trans[2]}));
+            }
             camScript.flags |= 0x100;
-            const V3 e = world(0), l = world(1200);
+            const V3 e = W.t, d = applyLV(W, {0, 0, 1200});
             if (a->flags10 & 0x40) {
                 cam.eye = {cam.eye.x - ((cam.eye.x - e.x) >> 3), cam.eye.y - ((cam.eye.y - e.y) >> 3), cam.eye.z - ((cam.eye.z - e.z) >> 3)};
-                cam.look = {cam.look.x - ((cam.look.x - cam.eye.x - (l.x - e.x)) >> 3), cam.look.y - ((cam.look.y - cam.eye.y - (l.y - e.y)) >> 3),
-                            cam.look.z - ((cam.look.z - cam.eye.z - (l.z - e.z)) >> 3)};
+                cam.look = {cam.look.x - ((cam.look.x - cam.eye.x - d.x) >> 3), cam.look.y - ((cam.look.y - cam.eye.y - d.y) >> 3),
+                            cam.look.z - ((cam.look.z - cam.eye.z - d.z) >> 3)};
             } else {
-                cam.eye = e, cam.look = l;
+                cam.eye = e, cam.look = {e.x + d.x, e.y + d.y, e.z + d.z};
             }
             cam.body = cam.eye;
-            if (a->flags10 & 0x20) {
-                const V3 b = world(400);
-                cam.body = {cam.eye.x + b.x - e.x, cam.eye.y + b.y - e.y, cam.eye.z + b.z - e.z};
+            if (a->flags10 & 0x20) {  // also the pose the follow camera restores after the hold (B+0x6c / +0x7c / +0x8c)
+                const V3 b = applyLV(W, {0, 0, 400});
+                cam.body = {cam.eye.x + b.x, cam.eye.y + b.y, cam.eye.z + b.z};
+                cam.prevEye = cam.eye, cam.prevLook = cam.look, cam.prevBody = cam.body;
             }
         }
     }

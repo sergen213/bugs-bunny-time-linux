@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -42,10 +43,13 @@ enum class Water : uint8_t { Original, Enhanced, Cartoon };
 
 // A character or object for the Enhanced water's wave field (render_vk Renderer::setWaterBodies): engine-space feet
 // position, body radius and height. id: stable per body across frames (its motion gives wakes and splashes).
+// surface: engine y of the water the game has the body in (TB water zones, TbWorld::waterSurface); unset = the
+// stylised surface under its feet, if any.
 struct WaterBody {
     uint32_t id = 0;
     glm::vec3 feet{0.0f};
     float radius = 0.0f, height = 0.0f;
+    std::optional<float> surface;
 };
 
 struct WindowConfig {
@@ -73,6 +77,9 @@ struct Settings {
     // fades polygons to what lies behind via vertex alpha; TB clears once to 0,0,0 at 0x422950 and has no fog colour.
     // RUNTIME_REFERENCE.md §5).
     float fogColor[3] = {0.0f, 0.0f, 0.0f};
+    // Enhanced ground haze (Vulkan; BBLIT-Remaster M5b): strength 0..1 (0 = off) and the layer's top (engine y, the
+    // app keeps it 800 above Bugs' feet); the haze is the backdrop's horizon colour, so it needs the fog backdrop.
+    float haze = 0.0f, hazeTop = 0.0f;
     float zNear = 0.1f, zFar = 2000.0f;
     // Projection FOV for both backends. Original Fidelity is fixed to the exes' 51.28° (camera.h); its 4:3 pillarbox
     // gives the original framing, and without the pillarbox wider windows get Hor+ (the exe would stretch instead).
@@ -119,6 +126,9 @@ public:
     void setActorMeshes(std::span<const Mesh> meshes);
     // 30 Hz simulation tick selecting the current frame of Scene::textureAnims (Mesh::textureAnim).
     void setTextureTick(uint32_t tick) { texTick_ = tick; }
+    // LiT texture links of this frame (LitWorld::textureLinks): Scene::textures index per Scene::textureAnims entry,
+    // -1 = that link's tick clock. Empty = every link on the clock (TB, scene viewer).
+    void setTextureLinks(std::vector<int32_t> tex) { linkTex_ = std::move(tex); }
     // LiT zone/portal visibility (zones.h) for the next drawScene calls; default = draw every zone.
     void setZoneView(const ZoneView& v) { zoneView_ = v; }
     // Visible-zone table of the last drawScene (0x4b3460 order); empty = no zone walk (everything drawn).
@@ -133,6 +143,8 @@ public:
     // 2D layer in window pixels, origin top-left. Batched; flushed on texture change and endFrame().
     void drawImage(uint32_t image, float x, float y, float w, float h, bool smooth, const uint8_t rgba[4] = nullptr);
     void drawRect(float x, float y, float w, float h, const uint8_t rgba[4]);
+    // Multiplies the frame under the rect by rgb (DST_COLOR · src): TB fades / flashes, which scale every glColor.
+    void multiplyRect(float x, float y, float w, float h, const uint8_t rgb[4]);
     void drawText(float x, float y, int scale, std::string_view text, const uint8_t rgba[4]);
     static constexpr int kGlyph = 8; // glyph cell size in pixels at scale 1
 
@@ -145,12 +157,12 @@ public:
     int drawCalls() const { return drawCalls_; }
 
 private:
-    // late: Mesh::late; tris: triCentroids (pc_order.h) of a translucent mesh.
-    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; int16_t zone; bool late = false; std::vector<glm::vec3> tris; };
+    // unitUv: every UV in [0, 1] (no tiling); late: Mesh::late; tris: triCentroids (pc_order.h) of a translucent mesh.
+    struct GpuMesh { uint32_t texture; Blend blend; bool twoSided; int32_t baseVertex; uint32_t firstIndex, indexCount; glm::vec3 center; uint32_t vao; int32_t textureAnim; int16_t zone; bool late = false, background = false; float farClip = 0.0f, fogEnd = 0.0f; std::vector<glm::vec3> tris; bool unitUv = false; };
     struct GpuTexAnim { std::vector<uint32_t> frames; uint32_t start, hold; };
     struct V2 { float x, y, u, v; uint8_t rgba[4]; };
 
-    void flush2D();
+    void flush2D(bool multiply = false);
     void quad2D(uint32_t tex, uint32_t sampler, float x, float y, float w, float h,
                 float u0, float v0, float u1, float v1, const uint8_t rgba[4]);
     void freeScene();
@@ -168,7 +180,7 @@ private:
 
     uint32_t prog3D_ = 0, prog2D_ = 0;
     int uViewProj_ = -1, uView_ = -1, uAlphaRef_ = -1, uFog_ = -1, uFogColor_ = -1, uAdditive_ = -1, uScreen_ = -1,
-        uColorScale_ = -1, uTexGamma_ = -1, uLinearZ_ = -1;
+        uColorScale_ = -1, uTexGamma_ = -1, uLinearZ_ = -1, uUvClamp_ = -1;
     float colorScale_ = 1.0f, texGamma_ = 1.0f;  // Scene::colorScale / Scene::pcTexGamma of the uploaded scene
     bool linearOriginal_ = false;  // LiT: bugs.exe GL sets GL_LINEAR min/mag (0x4220c4), no mipmaps; PC ABR texels (0x420d10)
     uint32_t sampNearest_ = 0, sampTrilinear_ = 0, sampUiNearest_ = 0, sampUiLinear_ = 0, sampLinear_ = 0;
@@ -179,6 +191,7 @@ private:
     std::vector<GpuMesh> meshes_;
     std::vector<GpuTexAnim> texAnims_;
     uint32_t texTick_ = 0;
+    std::vector<int32_t> linkTex_;
     std::vector<WorldZone> zones_;  // Scene::zones of the uploaded scene
     ZoneView zoneView_;
     std::vector<ZoneEntry> zoneTable_;

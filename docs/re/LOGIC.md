@@ -176,8 +176,8 @@ channels besides `S[]`/`G[]`.
 | C91 | 0x5b | 0x42b8c0 | newly-pressed none-of A |  | — |
 | C92 | 0x5c | 0x42ba20 | menu item B value `== A` (menu table 0x4b3e80, 21×16 B; gated by item link) |  | cond 60 (0.57) |
 | C93 | 0x5d | 0x42ba70 | menu item B value `!= A` |  | — |
-| C94 | 0x5e | 0x42bad0 | key-binding conflict scan over config bytes 0x9ca8d0..0x9ca8f2 (front-end only) |  | — |
-| C95 | 0x5f | 0x42c140 | capture pressed joystick button into joyMap slot (menu item B) — front-end only |  | — |
+| C94 | 0x5e | 0x42bad0 | key capture: with a letter key (DIK 0x10–0x19, 0x1e–0x26, 0x2c–0x32) held, the lowest held scan code goes into the kbdMap slot of menu item B's value (0–7 → slots 8 9 10 11 6 7 4 5), the slot holding it before takes the replaced key; WriteConfig, true (pause menu Controls / Keyboard) |  | — |
+| C95 | 0x5f | 0x42c140 | joystick capture: 0x403210 (lowest held button, 0xfe none, 0xff no joystick) unless 0xff goes into joyMap byte 0 1 2 3 4 5 7 6 of menu item B's value, swapping as C94 (0xfe is stored too) |  | — |
 | C96 | 0x60 | 0x42c670 | tkdesc: Esc (`0x4b18d0 & 2`) — title: back to the slot menu (bbtime: `PadInput::esc`) | CondTkdesc | — |
 | C97 | 0x61 | 0x42c680 | `DAT_004b1a2c != 0` (pause request pending) |  | — |
 | C98 | 0x62 | 0x42c690 | joystick enabled (`config+0x38`) == A (bool) |  | — |
@@ -205,7 +205,7 @@ channels besides `S[]`/`G[]`.
 | A14 | 0x0e | 0x42c920 | andgi | ActionAndgi | act 6 (1.00); act 6 [hash] |
 | A15 | 0x0f | 0x42cac0 | rnds `S[Y] = rand() % X` | ActionRnds | act 7 (1.00); act 7 [hash] |
 | A16 | 0x10 | 0x42caf0 | rndg | ActionRndg | act 8 (1.00); act 8 [hash] |
-| A17 | 0x11 | 0x42cba0 | post message X to per-tick queue `0x4b2480[8]` (count `0x4b39de`, cleared each tick in 0x447d40) |  | — |
+| A17 | 0x11 | 0x42cba0 | post message X to per-tick queue `0x4b2480[8]` (count `0x4b39de`, cleared each tick in 0x447d40); its only reader is the portal walk 0x40fe90: a portal to a queued zone adds it flagged (L04A1 hides zone 31) |  | — |
 | A18 | 0x12 | 0x42c770 | movsi `S[Y] = X` | ActionMovsi | act 10 (1.00) |
 | A19 | 0x13 | 0x42c790 | movgi `G[Y] = X` | ActionMovgi | — |
 | A20 | 0x14 | 0x42c940 | movss `S[Y] = S[X]` | ActionMovss | act 12 (1.00); act 12 [hash] |
@@ -294,8 +294,8 @@ channels besides `S[]`/`G[]`.
 | A103 | 0x67 | 0x42dc20 | menu item Y −− (wrap) |  | t4 8 (0.60) |
 | A104 | 0x68 | 0x42dc50 | menu item Y = X (bounded) |  | — |
 | A105 | 0x69 | 0x42dc90 | menu item Y max = X (<0x14) |  | — |
-| A106 | 0x6a | 0x42dcd0 | resolution list step down |  | — |
-| A107 | 0x6b | 0x42dd50 | resolution list step up |  | — |
+| A106 | 0x6a | 0x42dcd0 | item Y: previous usable mode of the list 0x7c62a0 (none: unchanged) |  | — |
+| A107 | 0x6b | 0x42dd50 | item Y: next usable mode; windowed (0x4b3e6c = 0) also stops on a mode ≥ the desktop size |  | — |
 | A108 | 0x6c | 0x42de30 | menu item Y = index of current resolution (config W/H 0x9ca830/34) |  | — |
 | A109 | 0x6d | 0x42de70 | menu item Y link = X |  | t4 14 (0.86) |
 | A110 | 0x6e | 0x42de90 | menu item Y link value = X |  | t4 15 (0.86) |
@@ -306,7 +306,7 @@ channels besides `S[]`/`G[]`.
 | A115 | 0x73 | 0x42dfc0 | `0x4b3e68 = item Y` |  | t4 19 (0.83) |
 | A116 | 0x74 | 0x42dfe0 | `0x4b3e6c = item Y` (forced 1 when renderer != 2) |  | — |
 | A117 | 0x75 | 0x42e030 | `0x4b3e70 = item Y` |  | t4 21 (0.83) |
-| A118 | 0x76 | 0x42e050 | apply video mode (resolution search) |  | — |
+| A118 | 0x76 | 0x42e050 | apply: windowed steps the mode down while it covers the desktop; config fullscreen / fog / W×H / renderer (0→2, 1→0, 2→1), WriteConfig, 0x45f2b0 = 0x13 |  | — |
 | A119 | 0x77 | 0x42e1c0 | clamp item X to ≤5 if item Y set |  | — |
 | A120 | 0x78 | 0x42e210 | `0x4b3fc0 = 1` |  | t4 23 (0.57) |
 | A121 | 0x79 | 0x42e220 | `0x4b3fc0 = 0` |  | t4 26 (0.67) |
@@ -336,11 +336,12 @@ Opcode numbers are game-specific; every TB opcode still needs semantic verificat
   `x = x*0x343fd + 0x269ec3; return (x >> 16) & 0x7fff`) — needed for bit-exact random gates.
 * The title front end (TITLE.BZE: C96, A93, A100, A128 + ordinary ops, GAMEPLAY.md §8.1.1) is implemented and runs as
   level logic in bbtime. C92–C95, C97 and A102–A127 are the pause menu's options (present in every playable level,
-  not in the title) and poke `config.pc` fields directly; they stay unported (bbtime's Options screen instead).
+  not in the title) and poke `config.pc` fields directly; all are ported, the app writes their config changes to
+  settings.ini and applies them (RUNTIME_REFERENCE §30).
 
 ## 8. Residual unknowns
 
 * A24 tail, exact bit map of C82/C83's B byte beyond bit 0.
-* Overlay interpreter, font and key names: GAMEPLAY.md §7.6 (done); pause-menu opcodes C92–C95, C97, A102–A127 remain.
+* Overlay interpreter, font and key names: GAMEPLAY.md §7.6 (done); pause-menu opcodes done (RUNTIME_REFERENCE §30).
 * Semantics of 0x35 node fields `+8..+0xf`, 0x34 step fields; `0x4377a0` exact role.
 * Player flag names (flags14/18 bits) — see GAMEPLAY.md §3.

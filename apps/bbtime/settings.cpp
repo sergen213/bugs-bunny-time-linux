@@ -92,11 +92,35 @@ Settings parseSettings(std::string_view text, std::vector<std::string>* warnings
         else if (key == "water") ok = oneOf(v, s.water, {"original", "enhanced", "cartoon"});
         else if (key == "upscaling") ok = oneOf(v, s.upscaling, {"off", "fsr_quality", "fsr_balanced", "fsr_performance", "native_aa"});
         else if (key == "frame_generation") ok = boolean(v, s.frameGeneration);
+        else if (key == "stick_camera") ok = boolean(v, s.stickCamera);
+        else if (key == "camera_speed") ok = number(v, s.cameraSpeed, 10, 200);
+        else if (key == "camera_invert") ok = boolean(v, s.cameraInvert);
+        else if (key == "jump_buffer") ok = number(v, s.jumpBuffer, 0, 8);
+        else if (key == "hud_edges") ok = boolean(v, s.hudEdges);
+        else if (key == "haze") ok = number(v, s.haze, 0, 100);
+        else if (key == "title_logo") ok = number(v, s.titleLogo, 50, 100);
+        else if (key == "push_r") ok = number(v, s.pushR, 0, 120);
         else if (key == "music_volume") ok = number(v, s.musicVolume, 0, 100);
         else if (key == "sfx_volume") ok = number(v, s.sfxVolume, 0, 100);
+        else if (key == "lit_pad_preset") ok = number(v, s.litPadPreset, 0, 3);
+        else if (key == "lit_fog_distance") ok = number(v, s.litFogDistance, 0, 2);
+        else if (key == "lit_renderer") ok = number(v, s.litRenderer, 0, 2);
+        else if (key == "lit_language") ok = number(v, s.litLanguage, 0, 5);
+        else if (key == "lit_joy_buttons") {
+            std::array<int, 8> b{};
+            size_t n = 0;
+            for (size_t a = 0; a <= v.size() && ok; ++n) {
+                size_t e = v.find(',', a);
+                if (e == v.npos) e = v.size();
+                ok = n < 8 && number(trim(v.substr(a, e - a)), b[n], 0, 0xfe);
+                a = e + 1;
+            }
+            if ((ok = ok && n == 8)) s.litJoyButtons = b;
+        }
         else if (key == "tb_brightness") ok = number(v, s.tbBrightness, 0.25f, 2.0f);
         else if (key == "tb_renderer") ok = number(v, s.tbRenderer, 1, 2);
         else if (key == "tb_details") ok = number(v, s.tbDetails, 0, 2);
+        else if (key == "tb_language") ok = number(v, s.tbLanguage, 0, 6);
         else if (key == "update_url") s.updateUrl = v;
         else if (key == "mods") {
             s.mods.clear();
@@ -138,11 +162,27 @@ std::string formatSettings(const Settings& s) {
     kv("water", s.water);
     kv("upscaling", s.upscaling);
     kv("frame_generation", s.frameGeneration ? "true" : "false");
+    kv("stick_camera", s.stickCamera ? "true" : "false");
+    kv("camera_speed", s.cameraSpeed);
+    kv("camera_invert", s.cameraInvert ? "true" : "false");
+    kv("jump_buffer", s.jumpBuffer);
+    kv("hud_edges", s.hudEdges ? "true" : "false");
+    kv("haze", s.haze);
+    kv("title_logo", s.titleLogo);
+    kv("push_r", s.pushR);
     kv("music_volume", s.musicVolume);
     kv("sfx_volume", s.sfxVolume);
+    kv("lit_pad_preset", s.litPadPreset);
+    kv("lit_fog_distance", s.litFogDistance);
+    kv("lit_renderer", s.litRenderer);
+    kv("lit_language", s.litLanguage);
+    std::string joy;
+    for (const int b : s.litJoyButtons) joy += std::format("{}{}", joy.empty() ? "" : ",", b);
+    kv("lit_joy_buttons", joy);
     kv("tb_brightness", s.tbBrightness);
     kv("tb_renderer", s.tbRenderer);
     kv("tb_details", s.tbDetails);
+    kv("tb_language", s.tbLanguage);
     kv("update_url", s.updateUrl);
     std::string mods;
     for (const std::string& m : s.mods) mods += (mods.empty() ? "" : ",") + m;

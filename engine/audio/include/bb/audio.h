@@ -59,7 +59,9 @@ public:
     explicit XaStream(const std::filesystem::path& p) : XaStream(p, xaLayoutFor(p)) {}
     // Appends up to maxBytes bytes' worth of decoded samples to `out`; returns bytes consumed (0 at end).
     size_t read(size_t maxBytes, std::vector<int16_t>& out);
-    void rewind();  // seek to 0 and reset predictor state, like the game's loop restart
+    void rewind();  // seek to 0 (the clip start) and reset predictor state, like the game's loop restart
+    // .xa only: play bytes [offset, offset + size) (a LiT speech clip: 0x41e2b0 seeks there and plays size bytes).
+    void clip(uint64_t offset, uint64_t size);
     XaLayout layout() const { return layout_; }
     uint64_t bytes() const { return bytes_; }
     uint64_t frames() const { return xaFrames(bytes_, layout_); }
@@ -71,6 +73,7 @@ private:
     std::ifstream f_;
     XaLayout layout_;
     uint64_t bytes_ = 0;
+    uint64_t begin_ = 0, end_ = 0, pos_ = 0;  // clip range and read position (.xa)
     ImaState st_[2]{};
     std::vector<uint8_t> buf_;
 };
@@ -100,7 +103,7 @@ std::vector<std::span<const uint8_t>> sfxBank(std::span<const uint8_t> section3)
 // buffer copy (the exes keep 10 per blob). Volume in hundredths of dB (-10000 silent .. 0); pan -10000 (left only)
 // .. 10000 (right only), DSBPAN: the other side is attenuated by |pan| hundredths of dB.
 struct SfxCmd {
-    enum Op : uint8_t { Play, Volume, Stop } op = Play;
+    enum Op : uint8_t { Play, Volume, Stop, Pause, Resume } op = Play;  // Pause = Stop in place, Resume = Play on
     uint32_t key = 0;
     const AiffSound* sound = nullptr;  // Play: a looping sound plays [0, loopStart) then repeats [loopStart, loopEnd)
                                        // with the pan negated (the exes' second buffer gets -pan)
@@ -119,7 +122,8 @@ public:
     bool ok() const { return ctx_ != nullptr; }
     // Streams an .xa file (layout from xaLayoutFor), restarting from byte 0 at the end when loop is set.
     // Throws std::runtime_error if the file cannot be opened.
-    void playMusic(const std::filesystem::path& xa, bool loop = true);
+    // size > 0: only the clip [offset, offset + size) (XaStream::clip).
+    void playMusic(const std::filesystem::path& xa, bool loop = true, uint64_t offset = 0, uint64_t size = 0);
     void stopMusic();
     bool musicPlaying() const { return music_.has_value(); }
     void pauseMusic(bool paused);     // hold / resume the stream at its position (no-op when unchanged)

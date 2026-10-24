@@ -1,6 +1,7 @@
 // Synthetic BZE headers (both variants, corrupt/truncated) and level-script streams.
 #include "bb/bze.h"
 #include "bb/levelscript.h"
+#include "bb/manifest.h"
 
 #include <cassert>
 #include <cstring>
@@ -53,6 +54,12 @@ static bool scriptThrows(const Bytes& s, bb::BzeVariant v = bb::BzeVariant::Lost
 }
 
 int main() {
+    // Manifest JSON strings: UTF-8 kept, control bytes and bytes outside well-formed UTF-8 (lone continuation, overlong
+    // C0, surrogate ED A0, truncated sequence) escaped as \u00XX.
+    assert(bb::jsonQuote("a\"b\\c\n") == "\"a\\\"b\\\\c\\u000a\"");
+    assert(bb::jsonQuote("\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80") == "\"\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80\"");
+    assert(bb::jsonQuote("x\xffy\x80\xc0\xaf\xed\xa0\x80\xe2\x82") ==
+           "\"x\\u00ffy\\u0080\\u00c0\\u00af\\u00ed\\u00a0\\u0080\\u00e2\\u0082\"");
     // --- container ---
     const Bytes lit = build(false, {{1, 0x123, 0x800}, {3, 0x1000, 0x1000}});
     {

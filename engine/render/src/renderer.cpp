@@ -20,7 +20,7 @@ layout(location = 2) in vec4 aCol;
 uniform mat4 uViewProj;
 uniform mat4 uView;
 uniform vec2 uLinearZ;  // near, far: LiT Original Fidelity depth = eye depth linear in screen space (bugs.exe glOrtho)
-out vec2 vUv;
+centroid out vec2 vUv;  // MSAA (Enhanced): never extrapolated outside the covered triangle (no-op without MSAA)
 out vec4 vCol;
 out float vDist;
 void main() {
@@ -44,12 +44,18 @@ uniform int uAdditive;     // 1: additive/subtractive surfaces fade to black, no
                            // names the mode (128, 255, 64); alpha-blended, fog fades the alpha
 uniform float uColorScale; // vertex rgb multiplier (PS1 modulation: 255/128), result saturates
 uniform float uTexGamma;   // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
-in vec2 vUv;
+uniform bool uUvClamp;     // Enhanced non-tiling translucent mesh: UVs clamped half a texel inside (no wrap seam)
+centroid in vec2 vUv;
 in vec4 vCol;
 in float vDist;
 out vec4 oCol;
 void main() {
-    vec4 t = texture(uTex, vUv);
+    vec2 uv = vUv;
+    if (uUvClamp) {
+        vec2 h = 0.5 / vec2(textureSize(uTex, 0));
+        uv = clamp(uv, h, 1.0 - h);
+    }
+    vec4 t = texture(uTex, uv);
     float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
     vec4 vc = vCol;
     if (uAdditive == 3) {
@@ -243,6 +249,7 @@ std::string Renderer::init(const WindowConfig& cfg) {
     uAdditive_ = glGetUniformLocation(prog3D_, "uAdditive");
     uColorScale_ = glGetUniformLocation(prog3D_, "uColorScale");
     uTexGamma_ = glGetUniformLocation(prog3D_, "uTexGamma");
+    uUvClamp_ = glGetUniformLocation(prog3D_, "uUvClamp");
     prog2D_ = link(kVs2D, kFs2D);
     uScreen_ = glGetUniformLocation(prog2D_, "uScreen");
 
@@ -292,14 +299,14 @@ void Renderer::freeScene() {
 }
 
 // Fills the rgb of fully transparent texels from opaque neighbours (alpha stays 0), so bilinear filtering and
-// mipmaps do not pull black fringes into colour-keyed cutouts (PS1 0x0000 = transparent black).
-// ponytail: up to 16 dilation passes; textures with wider transparent areas keep black beyond that.
+// mipmaps do not pull black fringes into colour-keyed cutouts (PS1 0x0000 = transparent black). Dilates ring by ring
+// until every transparent texel has a colour (at most max(w, h) passes; none for a fully transparent texture).
 std::vector<uint8_t> bleedTransparent(const Texture& t) {
     std::vector<uint8_t> px = t.rgba;
     const int w = int(t.width), h = int(t.height);
     std::vector<uint8_t> filled(size_t(w) * h);
     for (size_t i = 0; i < filled.size(); ++i) filled[i] = px[i * 4 + 3] != 0;
-    for (int pass = 0; pass < 16; ++pass) {
+    for (;;) {
         std::vector<uint8_t> next = filled;
         bool changed = false;
         for (int y = 0; y < h; ++y)
@@ -361,9 +368,12 @@ void Renderer::appendMeshes(std::span<const Mesh> in, uint32_t vao, std::vector<
         }
         const bool texOk = m.texture >= 0 && size_t(m.texture) < sceneTextures_.size() && sceneTextures_[size_t(m.texture)];
         const bool animOk = m.textureAnim >= 0 && size_t(m.textureAnim) < texAnims_.size() && !texAnims_[size_t(m.textureAnim)].frames.empty();
+        const bool unitUv = std::ranges::all_of(m.vertices, [](const Vertex& v) {
+            return v.uv[0] >= -1e-4f && v.uv[0] <= 1.0001f && v.uv[1] >= -1e-4f && v.uv[1] <= 1.0001f;
+        });
         out.push_back({texOk ? sceneTextures_[size_t(m.texture)] : white_, m.blend, m.twoSided, int32_t(verts.size()),
                        uint32_t(idx.size()), uint32_t(m.indices.size()), (lo + hi) * 0.5f, vao, animOk ? m.textureAnim : -1, m.zone,
-                       m.late, triCentroids(m)});
+                       m.late, m.background, m.farClip, m.fogEnd, triCentroids(m), unitUv});
         verts.insert(verts.end(), m.vertices.begin(), m.vertices.end());
         idx.insert(idx.end(), m.indices.begin(), m.indices.end());
     }
@@ -444,7 +454,15 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     glUniformMatrix4fv(uView_, 1, GL_FALSE, glm::value_ptr(view));
     const bool pcLit = original && linearOriginal_;  // bugs.exe depth and blended order (pc_order.h)
     glUniform2f(uLinearZ_, pcLit ? s.zNear : 0.0f, pcLit ? s.zFar : 0.0f);
-    glUniform2f(uFog_, s.fog ? s.fogStart : 0.0f, s.fog ? s.fogEnd : 0.0f);
+    // Fog per mesh: the background layer never (TB has no fog; it sits beyond any fog range), Mesh::fogEnd in Original
+    // Fidelity (LiT per-object D), else the scene's.
+    auto fog = [&](const GpuMesh& m) {
+        if (!s.fog || m.background) return glm::vec2(0.0f);
+        return original && m.fogEnd > 0.0f ? glm::vec2(0.75f * m.fogEnd, m.fogEnd) : glm::vec2(s.fogStart, s.fogEnd);
+    };
+    // The background layer's far plane: a TB dome with Mesh::farClip (0x465710 flag 0x2000000) clips at 64000, any
+    // other at the world's zFar.
+    const glm::mat4 vpBack = projection(s.vfovRad(), float(vp.w) / float(vp.h), s.zNear, std::max(s.zFar, 64000.0f)) * view;
     glUniform3fv(uFogColor_, 1, s.fogColor);
     glUniform1f(uColorScale_, s.colorScale(colorScale_));
     glUniform1f(uTexGamma_, s.texGamma(texGamma_));
@@ -465,14 +483,20 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     // tri / tris: a run of the mesh's triangles (bugs.exe sorted pass); ref: alpha-test reference of a blended mesh.
     auto draw = [&](const GpuMesh& m, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f) {
         if (m.vao != boundVao) glBindVertexArray(boundVao = m.vao);
+        if (m.background) glUniformMatrix4fv(uViewProj_, 1, GL_FALSE, glm::value_ptr(m.farClip > 0.0f ? vpBack : vp3));
+        const glm::vec2 f = fog(m);
+        glUniform2f(uFog_, f.x, f.y);
         if (m.twoSided) glDisable(GL_CULL_FACE);
         else glEnable(GL_CULL_FACE);
         if (m.textureAnim >= 0) {
             const GpuTexAnim& a = texAnims_[size_t(m.textureAnim)];
-            glBindTexture(GL_TEXTURE_2D, a.frames[(a.start + texTick_ / a.hold) % a.frames.size()]);
+            const int32_t lt = size_t(m.textureAnim) < linkTex_.size() ? linkTex_[size_t(m.textureAnim)] : -1;
+            glBindTexture(GL_TEXTURE_2D, lt < 0 ? a.frames[(a.start + texTick_ / a.hold) % a.frames.size()]
+                                         : size_t(lt) < sceneTextures_.size() && sceneTextures_[size_t(lt)] ? sceneTextures_[size_t(lt)] : white_);
         } else {
             glBindTexture(GL_TEXTURE_2D, m.texture);
         }
+        glUniform1i(uUvClamp_, !original && m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && m.unitUv);
         glUniform1f(uAlphaRef_, m.blend == Blend::AlphaTest ? 0.5f : ref);
         // Original Fidelity draws ABR 2 the way the PC exe's GL path does (luma alpha, SRC_ALPHA / 1-SRC_ALPHA), and
         // LiT's textured ABR 0/1/3 as bugs.exe's per-mode texel alpha (0x420d10), also alpha-blended.
@@ -482,28 +506,11 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         ++drawCalls_;
     };
 
-    // Pass 1: opaque, pass 2: alpha-tested (both depth-writing, unsorted).
-    glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE);
-    for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
-        for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
-            for (const GpuMesh& m : *list)
-                if (m.blend == pass && shown(m)) draw(m);
-
-    // Pass 3: translucent (alpha, additive, subtractive), back-to-front by mesh centre, no depth writes.
-    // ponytail: per-mesh sort; per-triangle sort if intersecting translucent meshes show artefacts.
-    std::vector<const GpuMesh*> translucent;
-    for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
-        for (const GpuMesh& m : *list)
-            if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && shown(m)) translucent.push_back(&m);
+    // Per layer (Mesh::background: TB's OT layer 0, then the depth clear, then the world, 0x422eb0):
+    // pass 1 opaque, pass 2 alpha-tested (both depth-writing, unsorted), pass 3 translucent (alpha, additive,
+    // subtractive) per polygon back to front by mean eye z, the order bugs.exe draws its blended polygons in
+    // (0x413440, pc_order.h), without depth writes outside bugs.exe's own blended pass (LiT Original Fidelity).
     const bool pcOrder = original && linearOriginal_;
-    if (!pcOrder)
-        std::ranges::sort(translucent, std::greater{}, [&](const GpuMesh* m) {
-            const glm::vec3 d = m->center - cam.pos;
-            return glm::dot(d, d);
-        });
-    glEnable(GL_BLEND);
-    glDepthMask(pcOrder ? GL_TRUE : GL_FALSE);
     auto blended = [&](const GpuMesh* m, uint32_t tri = 0, uint32_t tris = UINT32_MAX, float ref = -1.0f) {
         // Destination alpha is kept at 1 so the window never turns see-through under a compositor.
         const bool pcSub = original && m->blend == Blend::Subtract;
@@ -512,24 +519,41 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         glBlendEquationSeparate(m->blend == Blend::Subtract && !pcSub ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
         draw(*m, tri, tris, ref);
     };
-    if (!pcOrder) {
-        for (const GpuMesh* m : translucent) blended(m);
-    } else {
+    for (const bool bg : {true, false}) {
+        if (!bg) glUniformMatrix4fv(uViewProj_, 1, GL_FALSE, glm::value_ptr(vp3));
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        for (Blend pass : {Blend::Opaque, Blend::AlphaTest})
+            for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
+                for (const GpuMesh& m : *list)
+                    if (m.blend == pass && m.background == bg && shown(m)) draw(m);
+        std::vector<const GpuMesh*> translucent;
+        for (const std::vector<GpuMesh>* list : {&meshes_, &actorMeshes_})
+            for (const GpuMesh& m : *list)
+                if (m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && m.background == bg && shown(m))
+                    translucent.push_back(&m);
+        glEnable(GL_BLEND);
+        glDepthMask(pcOrder ? GL_TRUE : GL_FALSE);
         // bugs.exe (LiT Original Fidelity, pc_order.h): untextured blended faces first, then layer 1 sorted per
         // triangle, then layer 2 (Mesh::late); all depth-writing, alpha test GREATER 0 except the sorted pass.
         constexpr float kGreater0 = 0.5f / 255.0f;
+        auto apart = [&](const GpuMesh& m) { return pcOrder && ((m.texture == white_ && m.textureAnim < 0) || m.late); };
         for (const GpuMesh* m : translucent)
-            if (m->texture == white_ && m->textureAnim < 0 && !m->late) blended(m, 0, UINT32_MAX, kGreater0);
+            if (pcOrder && m->texture == white_ && m->textureAnim < 0 && !m->late) blended(m, 0, UINT32_MAX, kGreater0);
         std::vector<PcTri> tris;
         const glm::vec4 zRow(view[0][2], view[1][2], view[2][2], view[3][2]);  // eye-space z of a world point
         for (uint32_t i = 0; i < translucent.size(); ++i) {
             const GpuMesh& m = *translucent[i];
-            if ((m.texture == white_ && m.textureAnim < 0) || m.late) continue;
+            if (apart(m)) continue;
             for (uint32_t t = 0; t < m.tris.size(); ++t) tris.push_back({glm::dot(zRow, glm::vec4(m.tris[t], 1.0f)), i, t});
         }
         drawPcSorted(tris, [&](uint32_t i, uint32_t t, uint32_t n) { blended(translucent[i], t, n); });
         for (const GpuMesh* m : translucent)
-            if (m->late) blended(m, 0, UINT32_MAX, kGreater0);
+            if (pcOrder && m->late) blended(m, 0, UINT32_MAX, kGreater0);
+        if (bg) {
+            glDepthMask(GL_TRUE);
+            glClear(GL_DEPTH_BUFFER_BIT);  // scissored to the viewport
+        }
     }
     glBlendEquation(GL_FUNC_ADD);
     glDisable(GL_CULL_FACE);
@@ -565,6 +589,12 @@ void Renderer::drawRect(float x, float y, float w, float h, const uint8_t rgba[4
     quad2D(white_, sampUiNearest_, x, y, w, h, 0, 0, 1, 1, rgba);
 }
 
+void Renderer::multiplyRect(float x, float y, float w, float h, const uint8_t rgb[4]) {
+    flush2D();
+    drawRect(x, y, w, h, rgb);
+    flush2D(true);
+}
+
 void Renderer::drawText(float x, float y, int scale, std::string_view text, const uint8_t rgba[4]) {
     const float g = float(kGlyph * scale);
     float cx = x;
@@ -584,7 +614,7 @@ void Renderer::drawText(float x, float y, int scale, std::string_view text, cons
     }
 }
 
-void Renderer::flush2D() {
+void Renderer::flush2D(bool multiply) {
     if (batch_.empty()) return;
     glUseProgram(prog2D_);
     glUniform2f(uScreen_, float(std::max(w_, 1)), float(std::max(h_, 1)));
@@ -593,7 +623,8 @@ void Renderer::flush2D() {
     glBindSampler(0, batchSampler_);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
-    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+    if (multiply) glBlendFuncSeparate(GL_DST_COLOR, GL_ZERO, GL_ZERO, GL_ONE);
+    else glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
     glBindVertexArray(vao2D_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo2D_);
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(batch_.size() * sizeof(V2)), batch_.data(), GL_STREAM_DRAW);

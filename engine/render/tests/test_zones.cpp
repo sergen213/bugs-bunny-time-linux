@@ -15,7 +15,7 @@ using namespace bb::render;
 // Eye at the origin looking down -Z, 60° at 4:3. Zone 0 has a portal ahead (-> 1) and one behind (-> 2); zone 1 a
 // portal far to the right that only a wide FOV sees (-> 3); zone 3 (depth limit 1) one ahead (-> 4, flagged).
 static ZonePortal portal(uint16_t to, float x, float z) {
-    return {to, {{{x - 1, -1, z}, {x + 1, -1, z}, {x - 1, 1, z}, {x + 1, 1, z}}}};
+    return {to, 0, {{{x - 1, -1, z}, {x + 1, -1, z}, {x - 1, 1, z}, {x + 1, 1, z}}}};
 }
 
 int main() {
@@ -32,20 +32,24 @@ int main() {
         return walkZones(zones, projection(glm::radians(vfovDeg), 4.0f / 3.0f, 0.1f, 100.0f) * cam.view(), v, t, drawn);
     };
     assert(!run(60, {}));  // no zone view: draw everything
-    assert(run(60, {0, 0, false}));
+    assert(run(60, {0, 0, false, {}}));
     assert(drawn == (std::vector<uint8_t>{1, 1, 0, 0, 0}));
     assert(t.size() == 2 && t[0].zone == 0 && t[1].zone == 1 && !t[1].flagged);
     // 120° (Hor+ wide): the side portal shows zone 3, whose own portal exceeds its depth limit (drawn, not walked).
-    assert(run(120, {0, 0, false}));
+    assert(run(120, {0, 0, false, {}}));
     assert(drawn == (std::vector<uint8_t>{1, 1, 0, 1, 0}));
     assert(t.size() == 4 && t[3].zone == 4 && t[3].flagged);
     // Eye in zone 2 behind the player (zone 0): both drawn, the table restarts from the player pass, zone 2 appended.
-    assert(run(60, {2, 0, false}));
+    assert(run(60, {2, 0, false, {}}));
     assert(drawn == (std::vector<uint8_t>{1, 1, 1, 0, 0}));
     assert(t.size() == 3 && t[0].zone == 0 && t[1].zone == 1 && t[2].zone == 2);
     // Camera node: the player pass is skipped.
-    assert(run(60, {2, 0, true}));
+    assert(run(60, {2, 0, true, {}}));
     assert(drawn == (std::vector<uint8_t>{0, 0, 1, 0, 0}));
+    // A17 queue holds zone 1: its portal adds it flagged (neither drawn nor walked).
+    assert(run(120, {0, 0, false, {1}}));
+    assert(drawn == (std::vector<uint8_t>{1, 0, 0, 0, 0}));
+    assert(t.size() == 2 && t[1].zone == 1 && t[1].flagged);
 
     // Real data (BBTIME_DATA): L01A tables of the Wine original (Proton-GE /b04 at 640x480, peeks of 0x4b3460 with
     // the eye 0x4b38c0 / look 0x4b38cc, camera = player zone 2; RUNTIME_REFERENCE.md §25) at the exe's 51.28°.
@@ -63,8 +67,31 @@ int main() {
         auto eng = [](glm::vec3 v) { return glm::vec3(v.x, -v.y, -v.z); };  // PS1 -> engine (scene.h)
         const glm::mat4 vp = projection(kOriginalVFovRad, 4.0f / 3.0f, 10.0f, 60000.0f) *
                              glm::lookAt(eng(p.eye), eng(p.look), glm::vec3(0, 1, 0));
-        assert(walkZones(s.zones, vp, {2, 2, false}, t, drawn));
+        assert(walkZones(s.zones, vp, {2, 2, false, {}}, t, drawn));
         assert(t.size() == p.table.size());
         for (size_t i = 0; i < t.size(); ++i) assert(t[i].zone == p.table[i].first && t[i].flagged == p.table[i].second);
+    }
+    // L04A1 (/b29, local/wine/compare/w13lit/steer/zq_L04A1.txt): Bugs in zone 30, its logic posts zone 31 by A17 every
+    // tick (queue 0x4b2480 = {31}); the portal to 31 adds it flagged (31 neither drawn nor walked), and the table
+    // without the queue would have listed it unflagged.
+    const std::filesystem::path bze4 = std::filesystem::path(data) / "lit/Datas/bze/L04A1.bze";
+    const Scene s4 = buildLitScene(loadBze(bze4), "L04A1");
+    const Probe probes4[] = {{{2361, -1220, 103}, {2637, -923, 772}, {{30, false}, {31, true}}},
+                             {{2138, -1280, 2070}, {2637, -923, 772}, {{30, false}}},
+                             {{2817, -1303, 1427}, {3757, -923, 119}, {{30, false}}},
+                             {{2147, -1303, 556}, {3757, -923, 119}, {{30, false}}},
+                             {{3027, -722, 2806}, {3372, -203, 1715}, {{30, false}}},
+                             {{3843, -707, 2156}, {2620, -203, 2625}, {{30, false}}},
+                             {{3096, -884, 2816}, {3785, -584, 1381}, {{30, false}}},
+                             {{2013, -707, 2199}, {3074, -203, 2946}, {{30, false}}},
+                             {{1581, -739, 2989}, {1944, -325, 1490}, {{30, false}}}};
+    for (const Probe& p : probes4) {
+        auto eng = [](glm::vec3 v) { return glm::vec3(v.x, -v.y, -v.z); };
+        const glm::mat4 vp = projection(kOriginalVFovRad, 4.0f / 3.0f, 10.0f, 60000.0f) *
+                             glm::lookAt(eng(p.eye), eng(p.look), glm::vec3(0, 1, 0));
+        assert(walkZones(s4.zones, vp, {30, 30, false, {31}}, t, drawn));
+        assert(t.size() == p.table.size());
+        for (size_t i = 0; i < t.size(); ++i) assert(t[i].zone == p.table[i].first && t[i].flagged == p.table[i].second);
+        if (t.size() == 2) assert(drawn[31] == 0 && walkZones(s4.zones, vp, {30, 30, false, {}}, t, drawn) && !t[1].flagged && drawn[31]);
     }
 }

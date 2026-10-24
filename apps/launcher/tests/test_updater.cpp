@@ -218,6 +218,24 @@ int main() {
     setenv(kOriginEnv, link.c_str(), 1);
     assert(originAppImage(o.installRoot) == link);
     unsetenv(kOriginEnv), unsetenv("APPIMAGE");
+    {  // Legacy hand-off: the user's (renamed) AppImage = argv[0] of a child process, found by the AppImage magic.
+        const fs::path renamed = apps / "Looney Tunes.AppImage", plain = apps / "not-an-appimage";
+        put(renamed, std::string("\x7f" "ELF\2\1\1\0AI\x02", 11) + "runtime");
+        put(plain, "#!/bin/sh\nsleep 5\n");
+        auto child = [](const fs::path& a0) {
+            const pid_t c = fork();
+            if (c == 0) execl("/bin/sleep", a0.c_str(), "5", nullptr), _exit(127);
+            usleep(200000);  // exec done: /proc/<c>/cmdline shows a0
+            return c;
+        };
+        setenv(kHandoffEnv, "1", 1);
+        const pid_t a = child(plain);
+        assert(originAppImage(o.installRoot).empty());
+        const pid_t b = child(renamed);
+        assert(originAppImage(o.installRoot) == renamed);
+        for (const pid_t c : {a, b}) kill(c, SIGKILL), waitpid(c, nullptr, 0);
+        unsetenv(kHandoffEnv);
+    }
 
     // Version parsing.
     assert(parseVersion("1.2.3") == (Version{1, 2, 3}) && parseVersion("10.0.0") > parseVersion("9.99.99"));

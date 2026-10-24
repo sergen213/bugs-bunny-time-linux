@@ -24,7 +24,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <format>
 #include <map>
 #include <optional>
@@ -39,6 +41,7 @@
 namespace fs = std::filesystem;
 using bb::GameId;
 using bb::render::Fidelity;
+using bbtime::ActorPrev, bbtime::lerpAngle, bbtime::lerpRoot;
 
 namespace {
 
@@ -74,6 +77,8 @@ struct Args {
     fs::path importSaves;                         // --import-saves: original Datas/bin (or install root) to import
     bool menu = false;                            // --menu: start in --game's original front end
     std::vector<std::string> mods;                // enabled mods in load order (settings.ini mods, --mods, --no-mods)
+    fs::path record, playback;                    // --record / --playback: LiT pad tape (the exe's /r: and /p:)
+    bbtime::Settings cfg;                         // settings.ini as loaded (LiT config.pc fields, volumes)
 };
 
 fs::path defaultDataRoot() {
@@ -95,6 +100,7 @@ constexpr const char* kUsage =
     "              [--slot 1-6] [--import-saves DIR]  (LiT saves in $XDG_DATA_HOME/bbtime/saves/lit)\n"
     "              [--menu]  (with --game, no --level: start in that game's original front end)\n"
     "              [--mods ID,ID,...] [--no-mods]  (mods in $XDG_DATA_HOME/bbtime/mods, later wins; docs/MODDING.md)\n"
+    "              [--record FILE] [--playback FILE]  (LiT pad tape, bugs.exe /r: and /p:; playback from TITLE)\n"
     "DIR contains lit/ and tb/ (default: $BBTIME_DATA, else $XDG_DATA_HOME/bbtime/original)";
 
 std::optional<Args> parseArgs(int argc, char** argv) {
@@ -131,6 +137,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
     a.vulkan = cfg.renderer == "vk";
     a.bindings = cfg.bindings;
     a.mods = cfg.mods;
+    a.cfg = cfg;
     bool dataExplicit = std::getenv("BBTIME_DATA") && *std::getenv("BBTIME_DATA");
     for (int i = 1; i < argc; ++i) {
         const std::string_view f = argv[i];
@@ -161,6 +168,7 @@ std::optional<Args> parseArgs(int argc, char** argv) {
         else if (f == "--fullscreen") a.fullscreen = true;
         else if (f == "--hidden") a.hidden = true;
         else if (f == "--mute") a.mute = true;
+        else if (f == "--record" || f == "--playback") { auto v = value(); ok = bool(v); if (v) (f == "--record" ? a.record : a.playback) = *v; }
         else if (f == "--no-hud") a.noHud = true;
         else if (f == "--renderer") {
             auto v = value();
@@ -359,6 +367,7 @@ struct App {
     int styleIdx = 0;                     // game whose look the collection menu wears (the last highlighted one)
     std::map<std::pair<std::string, int>, Game::Image> ttfCache;  // TB menu text images by {text, cell px}
     bool running = true, overlay = true, fullscreen = false, vsync = true;
+    float extentFog = 0.0f;               // Enhanced draw distance of the level (enterLevel, drawDistance)
     bool helpKey = false;                 // LiT F1 pressed since the last tick (PadInput::help)
     bb::Scene scene;
     size_t sceneTris = 0;
@@ -373,27 +382,95 @@ struct App {
     uint32_t simTick = 0;                 // 30 Hz ticks since start (texture animation clock)
     std::vector<bb::AnimState> actorAnim; // per Scene::actors (player excluded in play mode)
     std::vector<bb::Mesh> actorMeshes;    // posed every frame
+    // Debug: BBTIME_MOTION="N:path" (with --autoplay) renders N frames per tick at alpha k/N and writes one line per traced
+    // actor / shadow per frame: tick sub id centroid(x y z) rms flow verts (flow = mean vertex move since the last frame).
+    // Smoothness check for Enhanced pose interpolation (tools/re/motion_check.py; idea from BBLIT-Remaster trace_motion.py).
+    struct MotionTrace {
+        int steps = 0, sub = 0;
+        FILE* f = nullptr;
+        std::vector<std::tuple<int, size_t, size_t>> marks;  // id, first mesh, end mesh
+        std::map<int, std::vector<glm::vec3>> last;
+    } motion;
+    float hazeTop = 0.0f;                 // Enhanced ground haze top (engine y), eased after Bugs (BBLIT τ 1.5 s)
+    bool hazeFresh = true;                // set at level entry: the haze top starts at its target
     std::optional<bbtime::Play> play;     // LiT play mode (bb_game simulation)
     std::optional<bbtime::TbPlay> tbPlay; // TB play mode (bb_game TbWorld: Bugs + Taz)
     int players = 1;                      // TB 1 or 2 players (Options, --players)
+    bb::game::PadTape tape;               // LiT /r: /p: pad tape (pad.h): --record / --playback
     bbtime::KeyMap tbKeys[2] = {bbtime::tbKeyMap(0), bbtime::tbKeyMap(1)};
     size_t autoplay2At = 0;
     std::optional<std::array<uint8_t, 0x300>> tbCarry;  // TB GAME_DATA for the next enterLevel (reload 0x4014c0 keeps it)
+    int16_t tbInvuln = 0;  // TB 0x4d271c: process-wide in the exe (never reset, never decremented)
+    bb::game::TbWorld::Cheats tbCheats;   // TB cheat-code state, process-wide in the exe
     bool tbEntered = false;               // B+0x134 is 0 only for the session's first TB level (TbWorld::loadLookH)
     int tbLevel = -1;                     // current TB level-table index (GD+0), -1 = not in the table
     int tbSaveSlot = -1;                  // exe 0x48840c: the Savegame%d.dat of this game (-1 = none yet)
     std::string playStatus;               // why a LiT level stayed in viewer mode
     // Original SFX mixer commands (bb::game::Sfx) -> OpenAL. The config SFX volume of the exes' formulas follows the
-    // device's SFX volume (settings.ini sfx_volume / the TB Sound page): LiT 0..100, TB 0..127.
+    // device's SFX volume (settings.ini sfx_volume / the TB Sound page): LiT 0..100, TB 0..128 (exe default 0x80).
     void pumpSfx(bb::game::Sfx& s) {
         bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice();
         if (dev)
             for (const bb::SfxCmd& c : s.cmds) dev->sfx(c);
         s.cmds.clear();
-        s.volume = int32_t(std::lround((dev ? dev->sfxVolume() : 1.0f) * (s.tb ? 127 : 100)));
+        s.volume = int32_t(std::lround((dev ? dev->sfxVolume() : 1.0f) * (s.tb ? 128 : 100)));
     }
     bbtime::KeyMap keys;
     size_t autoplayAt = 0;
+    // >D n actions (config kbdMap 11 9 8 10 6 5 7 4) as settings.ini bind.* names.
+    static constexpr const char* kKeyActions[8] = {"kick", "crouch", "look", "jump", "roll", "camera_right", "action", "camera_left"};
+    // The LiT config.pc / GAME_DATA fields bbtime keeps in settings.ini (GAMEPLAY.md §2.2, §8.1): pad preset G[0x11]
+    // (loadUpdate's 0x448fa0 applies it), joystick buttons, volumes, and the Video page's mode list, desktop size
+    // and current mode (bbtime draws any size, windowed or desktop-fullscreen, so every listed mode is offered; the
+    // configured mode is the largest listed one within the window, as the exe's is always a listed mode).
+    void litConfig(bb::game::LitWorld& w) {
+        const bbtime::Settings& c = args.cfg;
+        w.G[0x11] = uint8_t(c.litPadPreset);
+        w.G[0x10] = uint8_t(c.litLanguage);  // 0x4076f0 rewrites it from config.pc +0x08 every frame
+        for (size_t n = 0; n < 8; ++n) w.joyButtons[n] = uint8_t(c.litJoyButtons[n]);
+        w.volume34 = c.musicVolume, w.volume30 = c.sfxVolume;
+        w.modeValid = {false, true, true, true, true, true, false, false};
+        if (const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(r.window()))) w.deskW = m->w, w.deskH = m->h;
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(r.window(), &ww, &wh);
+        w.video = {320, 240, fullscreen ? 1 : 0, c.litFogDistance, c.litRenderer};
+        static constexpr std::pair<int, int> kModes[] = {{512, 384}, {640, 480}, {800, 600}, {1024, 768}};
+        for (const auto& [mw, mh] : kModes)
+            if (mw <= ww && mh <= wh) w.video.width = mw, w.video.height = mh;
+    }
+    // The exe's WriteConfig calls of this tick (LitWorld::configChanged) -> settings.ini and the live app: C94 keys
+    // (bind.*), C95 joystick buttons, A122-A125 volumes, A118 Video "Apply" (window size / fullscreen as the exe's
+    // display re-init 0x45f2b0 = 0x13, fog distance, the kept renderer choice).
+    void litSync(bb::game::LitWorld& w) {
+        if (!w.configChanged) return;
+        bbtime::Settings st = bbtime::loadSettings();
+        bbtime::Settings& c = args.cfg;
+        if (w.configChanged & 1) {
+            for (size_t n = 0; n < 8; ++n)
+                if (const SDL_Scancode sc = bbtime::scancodeOfDik(w.keyCodes[n]); sc != SDL_SCANCODE_UNKNOWN)
+                    st.bindings[kKeyActions[n]] = args.bindings[kKeyActions[n]] = SDL_GetScancodeName(sc);
+            const auto joy = keys.joy;
+            keys = bbtime::makeKeyMap(args.bindings, nullptr);
+            keys.joy = joy;
+        }
+        if (w.configChanged & 2)
+            for (size_t n = 0; n < 8; ++n) st.litJoyButtons[n] = c.litJoyButtons[n] = keys.joy[n] = w.joyButtons[n];
+        if (w.configChanged & 4) {
+            st.musicVolume = c.musicVolume = w.volume34, st.sfxVolume = c.sfxVolume = w.volume30;
+            if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->setSfxVolume(float(w.volume30) / 100.0f);
+        }
+        if (w.configChanged & 8) {
+            st.litFogDistance = c.litFogDistance = w.video.fogDist, st.litRenderer = c.litRenderer = w.video.renderer;
+            st.fullscreen = w.video.fullscreen != 0;
+            if (st.fullscreen != fullscreen) fullscreen = st.fullscreen, r.setFullscreen(fullscreen);
+            if (!fullscreen) {
+                st.width = w.video.width, st.height = w.video.height;
+                SDL_SetWindowSize(r.window(), w.video.width, w.video.height);
+            }
+        }
+        w.configChanged = 0;
+        if (const std::string err = bbtime::saveSettings(st); !err.empty()) std::println(stderr, "bbtime: {}", err);
+    }
     // LiT GAME_DATA image of the active slot (--slot; Savegame<N>.dat or a new game): seeds G[] when a level is
     // entered without carried globals, and keeps GD+0x08..+0x3f and the checksum chain for the next save.
     std::optional<bb::game::LitSaveGame> litSave;
@@ -401,6 +478,7 @@ struct App {
     // LiT level change (GAMEPLAY §1.2): 0x44bec0 fade out while the world keeps ticking, then the loading screen
     // (the loading BZE's TIM) while the target loads (+ the 3000 ms minimum of LitWorld::holdsLoading), then two
     // unrendered ticks and the 0x44be90 fade in (litEnter; also on the first entry, like the exe's /b boot path).
+    std::pair<bb::game::V3, int32_t> litCheckpoint{};  // respawn point the last LiT level left (0 after start-up)
     struct LitLoading { int next = -1; std::array<uint8_t, 256> G{}; uint32_t image = 0; uint64_t startMs = 0; bool loaded = false; };
     std::optional<LitLoading> litLoading;
     bool litFadingOut = false, litEnter = false;
@@ -432,13 +510,16 @@ struct App {
         scene = bb::loadLevelScene(game().id, game().root, level, &bze, bbtime::loadSettings().tbBrightness);  // TB Video page
         freeFont();
         actorAnim.assign(scene.actors.size(), {});
+        if (play) litCheckpoint = {play->world.checkpoint(), play->world.checkpointYaw()};  // exe globals 0x4b2460..
         play.reset();
         tbPlay.reset();
         playStatus.clear();
         if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->stopSfx();  // the level's voices
+        hazeFresh = true;
         if (game().id == GameId::LostInTime && !scene.placeholder) {
             try {
-                bb::game::LitWorld w = bb::game::LitWorld::load(bze, &scene);
+                bb::game::LitWorld w = bb::game::LitWorld::load(bze, &scene, uint8_t(args.cfg.litLanguage));
+                w.carryCheckpoint(litCheckpoint.first, litCheckpoint.second);
                 // Debug: BBTIME_LIT_START="x,y,z" (PS1 units) places Bugs there in the first LiT level entered
                 // (smoke screenshots of far-away spots such as level exits); later levels start normally.
                 static bool litStartUsed = false;
@@ -480,7 +561,6 @@ struct App {
                 w.level = litLevel;
                 // >D overlay key names: the first key bound to each config kbdMap action, in the exe's DIK spelling
                 // for the default keys (letters as is, arrows / Tab / Return as KEY_*).
-                static constexpr const char* kKeyActions[8] = {"kick", "crouch", "look", "jump", "roll", "camera_right", "action", "camera_left"};
                 for (size_t n = 0; n < 8; ++n)
                     if (auto b = args.bindings.find(kKeyActions[n]); b != args.bindings.end() && !b->second.empty()) {
                         std::string k = b->second.substr(0, b->second.find(','));
@@ -489,8 +569,10 @@ struct App {
                             {"UP", "KEY_UPARROW"}, {"DOWN", "KEY_DOWNARROW"}, {"LEFT", "KEY_LEFTARROW"},
                             {"RIGHT", "KEY_RIGHTARROW"}, {"TAB", "KEY_TAB"}, {"RETURN", "KEY_ENTER"}, {"SPACE", "KEY_SPACE"}};
                         w.keyNames[n] = k.size() == 1 ? k : kDik.contains(k) ? kDik.at(k) : "KEY_" + k;
+                        w.keyCodes[n] = bbtime::dikOf(SDL_GetScancodeFromName(b->second.substr(0, b->second.find(',')).c_str()));
                     }
                 w.joystick = pad != nullptr;  // config use-joystick: on with a connected gamepad (">DJ" adds "/Button<n>")
+                litConfig(w);
                 bb::applySoundMods(w.sfx, GameId::LostInTime, level);
                 w.loadUpdate();  // as 0x430f80: player + camera initialised before the first rendered frame
                 play.emplace(std::move(w));
@@ -501,20 +583,42 @@ struct App {
         }
         if (game().id == GameId::TimeBusters && !scene.placeholder) {
             try {
-                tbPlay.emplace(bb::game::TbWorld::load(bze, scene, tbCarry ? &*tbCarry : nullptr));
+                tbPlay.emplace(bb::game::TbWorld::load(bze, scene, tbCarry ? &*tbCarry : nullptr, uint8_t(bbtime::loadSettings().tbLanguage)));
                 tbPlay->world.setTwoPlayer(players == 2);
+                tbPlay->speech = !args.mute && bbtime::audioDevice(), tbPlay->speechRoot = game().root;
+                tbPlay->world.saveSlot = tbSaveSlot;  // 0x48840c: R 0x52 tests slot >= 0
                 bb::applySoundMods(tbPlay->world.sfx, GameId::TimeBusters, level);
                 tbPlay->world.loadLookH = std::exchange(tbEntered, true) ? 300 : 0;
-                // Debug (first TB level entered; smokes compared with the oracle's pokes): BBTIME_TB_START="x,y,z,yaw"
-                // (PS1 units, 4.12) places Bugs (+0xfc/+0xf6); BBTIME_TB_GD="a0=0,a2=2,a5=1" writes GAME_DATA bytes
+                tbPlay->world.invuln = tbInvuln;
+                tbPlay->world.cheats = tbCheats;
+                // HUD key names from the live maps (GetKeyNameText lower-cased; unextended Right Ctrl reads "ctrl").
+                static constexpr uint16_t kSlots[14] = {bb::game::PadSquare, bb::game::PadCircle, bb::game::PadTriangle, bb::game::PadCross,
+                                                        bb::game::PadL1, bb::game::PadL2, bb::game::PadR1, bb::game::PadR2, bb::game::PadSelect,
+                                                        bb::game::PadStart, bb::game::PadLeft, bb::game::PadRight, bb::game::PadUp, bb::game::PadDown};
+                for (size_t p = 0; p < 2; ++p)
+                    for (size_t i = 0; i < 14; ++i)
+                        if (const auto k = std::ranges::find(tbKeys[p].keys, kSlots[i], &std::pair<SDL_Scancode, uint16_t>::second); k != tbKeys[p].keys.end()) {
+                            std::string n = k->first == SDL_SCANCODE_RCTRL ? "ctrl" : SDL_GetScancodeName(k->first);
+                            for (char& c : n) c = char(std::tolower(uint8_t(c)));
+                            tbPlay->world.keyNames[p][i] = std::move(n);
+                        }
+                for (const auto& q : tbPlay->world.waterZoneTops()) {  // Enhanced water fills (Scene::waterZones)
+                    std::array<bb::Corner, 4> e;
+                    for (size_t k = 0; k < 4; ++k) e[k] = {float(q[k].x), -float(q[k].y), -float(q[k].z)};
+                    scene.waterZones.push_back(e);
+                }
+                // Debug (first TB level entered; smokes compared with the oracle's pokes): BBTIME_TB_START="x,y,z,yaw[,x,y,z,yaw]"
+                // (PS1 units, 4.12) places Bugs [and Taz] (+0xfc/+0xf6); BBTIME_TB_GD="a0=0,a2=2,a5=1" writes GAME_DATA bytes
                 // (hex offset = value: lives, down flags, health) before the first tick.
                 static bool tbStartUsed = false;
                 if (!tbStartUsed) {
                     tbStartUsed = true;
                     bb::game::TbWorld& w = tbPlay->world;
-                    int x = 0, y = 0, z = 0, yaw = 0;
-                    if (const char* s = std::getenv("BBTIME_TB_START"); s && std::sscanf(s, "%d,%d,%d,%d", &x, &y, &z, &yaw) >= 3)
-                        w.actors[0].pos = {x, y, z}, w.actors[0].yaw = int16_t(yaw);
+                    int p[8] = {};
+                    const char* s = std::getenv("BBTIME_TB_START");
+                    const int got = s ? std::sscanf(s, "%d,%d,%d,%d,%d,%d,%d,%d", &p[0], &p[1], &p[2], &p[3], &p[4], &p[5], &p[6], &p[7]) : 0;
+                    for (int k = 0; k < 2 && got >= 4 * k + 3; ++k)
+                        w.actors[size_t(k)].pos = {p[4 * k], p[4 * k + 1], p[4 * k + 2]}, w.actors[size_t(k)].yaw = int16_t(p[4 * k + 3]);
                     unsigned off = 0, val = 0;
                     int n = 0;
                     for (const char* s = std::getenv("BBTIME_TB_GD"); s && std::sscanf(s, "%x=%u%n", &off, &val, &n) == 2; s += n + (s[n] == ','))
@@ -541,6 +645,14 @@ struct App {
             if (tbPlay) {  // load 0x4018a0: GD+0 = the level, then the fade in from black at speed 200
                 if (tbLevel >= 0) tbPlay->world.GD[0] = uint8_t(tbLevel);
                 tbPlay->world.fadeIn(1, 200);
+                // Debug: a held fade (oracle local/wine/tbintro/w13_flash.sh): BBTIME_TB_FADE=mode,level,speed,r,g,b (hex mode)
+                if (unsigned m = 0, cr = 0, cg = 0, cb = 0; const char* f = std::getenv("BBTIME_TB_FADE")) {
+                    int lv = 0, sp = 0;
+                    if (std::sscanf(f, "%x,%d,%d,%u,%u,%u", &m, &lv, &sp, &cr, &cg, &cb) == 6) {
+                        auto& fd = tbPlay->world.fade;
+                        fd.mode = uint8_t(m), fd.level = int16_t(lv), fd.speed = int16_t(sp), fd.rgb = {uint8_t(cr), uint8_t(cg), uint8_t(cb)};
+                    }
+                }
             }
         }
         r.uploadScene(scene);
@@ -562,13 +674,11 @@ struct App {
                    glm::all(glm::lessThanEqual(glm::vec3(p[0], p[1], p[2]), hi));
         };
         float fogEnd = radius * 2.5f;
-        for (const bb::Mesh& m : scene.skyMeshes)  // TB sky domes (eye space) never fade or clip
-            for (const bb::Vertex& v : m.vertices) fogEnd = std::max(fogEnd, glm::length(glm::vec3(v.pos[0], v.pos[1], v.pos[2])) / 0.7f);
         if (scene.spawn && inside(*scene.spawn)) { // behind and above the player start, facing the player's direction
             cam.yaw = scene.spawnYaw;
             cam.pitch = -0.1f;
             const glm::vec3 p(scene.spawn->at(0), scene.spawn->at(1), scene.spawn->at(2));
-            // ponytail: fixed offset (LiT units, Bugs is a few hundred tall); no collision, may clip into walls.
+            // Viewer start (no game camera; the games place theirs below): behind and above the start, LiT units.
             cam.pos = p + glm::vec3(0.0f, 300.0f, 0.0f) - glm::vec3(cam.forward().x, 0.0f, cam.forward().z) * 300.0f;
         } else if (hi.z - lo.z < radius * 1e-3f) { // flat wall facing +Z (texture gallery): no fog
             cam.pos = centre + glm::vec3(0.0f, 0.0f, radius * 1.1f);
@@ -577,13 +687,13 @@ struct App {
             cam.pos = centre + glm::vec3(0.0f, radius * 0.25f, radius * 0.75f);
             cam.pitch = -0.3f;
         }
-        // Draw distance: the original fades over the last 25 % of D = min(0xFFFF, b + (9*fogDist >> 1) * u_level)
-        // (RESEARCH.md §8.5); the per-level fogDist/u_level source is Research Required, so D scales with the level
-        // extent here (LiT levels span ~10k-40k units -> near ~10, far = D).
-        s.fogEnd = std::min(fogEnd, 65535.0f);
-        s.fogStart = s.fogEnd * 0.75f;
+        // Enhanced draw distance: the level's extent (fog over the last 25 %), never closer than the original's.
+        // Original Fidelity uses the exe's own (drawDistance: Scene::litFogUnit / tbFarClip).
+        extentFog = std::min(fogEnd, 65535.0f);
+        if (scene.litFogUnit) extentFog = std::max(extentFog, litFog(scene.litFogUnit, scene.litFogUnit));
+        if (scene.tbFarClip) extentFog = std::max(extentFog, float(scene.tbFarClip));
         s.zNear = std::max(radius * 5e-4f, 0.05f);
-        s.zFar = s.fogEnd * 1.05f;
+        drawDistance();
         moveSpeed = std::max(8.0f, radius * 0.05f);
         if (play) cam = play->camera(1.0f, false);
         if (tbPlay) cam = tbPlay->camera(1.0f, false);
@@ -619,7 +729,7 @@ struct App {
             litSave.reset();
             enterLevel("TITLE");
             frontEnd = true;
-            overlay = false;  // the original screen, diagnostics on F3
+            overlay = false;  // the original screen, diagnostics on F7
         } else {  // GDI title menu 0x41c0f0 over menu.men (tb_front.cpp)
             if (!tbFront) tbFront.emplace();
             if (const std::string err = tbFront->open(game().root, bbtime::saveDir() / "tb", tbKeys, args.mute); !err.empty()) {
@@ -628,7 +738,7 @@ struct App {
                 return;
             }
             screen = Screen::TbFront;
-            overlay = false;  // the original screen, diagnostics on F3
+            overlay = false;  // the original screen, diagnostics on F7
         }
     }
 
@@ -711,8 +821,8 @@ struct App {
             }
             break;
         case Screen::Options:
-            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 13) % 13;
-            else if (a == Action::Back || (a == Action::Accept && optSel == 12)) screen = Screen::Main;
+            if (a == Action::Up || a == Action::Down) optSel = (optSel + step + 17) % 17;
+            else if (a == Action::Back || (a == Action::Accept && optSel == 16)) screen = Screen::Main;
             else if (a != Action::Back) changeOption(a == Action::Left ? -1 : 1);
             break;
         case Screen::Game: {
@@ -752,6 +862,23 @@ struct App {
         case 9: s.water = bb::render::Water((int(s.water) + 3 + dir) % 3); break;
         case 10: s.upscaling = bb::render::Upscaling((int(s.upscaling) + 5 + dir) % 5); break;
         case 11: s.frameGeneration = !s.frameGeneration; break;
+        case 12: {  // LiT pad remap preset G[0x11] (settings.ini lit_pad_preset; 0x448fa0 applies it at the next level)
+            args.cfg.litPadPreset = (args.cfg.litPadPreset + 4 + dir) % 4;
+            break;
+        }
+        case 13: {  // Enhanced right-stick camera: off, on, inverted
+            const int v = ((args.cfg.stickCamera ? 1 + args.cfg.cameraInvert : 0) + 3 + dir) % 3;
+            args.cfg.stickCamera = v != 0, args.cfg.cameraInvert = v == 2;
+            break;
+        }
+        case 14: args.cfg.jumpBuffer = (args.cfg.jumpBuffer / 2 * 2 + 10 + 2 * dir) % 10; break;  // 0, 2, 4, 6, 8
+        case 15: args.cfg.hudEdges = !args.cfg.hudEdges; break;
+        }
+        if (optSel >= 12 && optSel <= 15) {  // kept in settings.ini (the launcher's controls too)
+            bbtime::Settings st = bbtime::loadSettings();
+            st.litPadPreset = args.cfg.litPadPreset, st.stickCamera = args.cfg.stickCamera, st.cameraInvert = args.cfg.cameraInvert;
+            st.jumpBuffer = args.cfg.jumpBuffer, st.hudEdges = args.cfg.hudEdges;
+            if (const std::string err = bbtime::saveSettings(st); !err.empty()) std::println(stderr, "bbtime: {}", err);
         }
     }
 
@@ -807,16 +934,22 @@ struct App {
         case SDL_EVENT_KEY_DOWN: {
             const SDL_Keycode k = e.key.key;
             if (screen == Screen::TbFront && tbFront->capturing()) { tbFrontAction(tbFront->captureKey(e.key.scancode)); break; }
-            if (k == SDLK_F3) overlay = !overlay;
+            // bugs.exe's window keys own F1-F4 in LiT (help, sound, music, quit); bbtime's own keys sit on F5-F8.
+            if (k == SDLK_F7) overlay = !overlay;
             else if (k == SDLK_F11) { fullscreen = !fullscreen; r.setFullscreen(fullscreen); }
             // LiT: Esc is the game's (pause menu / resume in levels, C96 on the title past its logo page); Backspace
             // or the gamepad's Back leave to the collection menu.
             else if (k == SDLK_ESCAPE && screen == Screen::Level && play && (litLevel != 0 || play->world.S[0x1b])) escKey = true;
             else if (k == SDLK_ESCAPE || k == SDLK_BACKSPACE) menu(Action::Back);
             else if (screen == Screen::Level) {
-                if (k == SDLK_F2) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
-                else if (k == SDLK_F4) s.fog = !s.fog;
+                if (k == SDLK_F6) s.fidelity = s.fidelity == Fidelity::Enhanced ? Fidelity::Original : Fidelity::Enhanced;
+                else if (k == SDLK_F8) s.fog = !s.fog;
                 else if (k == SDLK_F1 && play) helpKey = true;  // the original's F1: help screen (LitWorld::tick)
+                else if (k == SDLK_F2 && play) {                // F2 sound on / off (0x40e270 VK 0x71)
+                    play->world.soundKey();
+                    if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->setSfxVolume(float(play->world.volume30) / 100.0f);
+                } else if (k == SDLK_F3 && play) play->world.musicKey();  // F3 music on / off (VK 0x72)
+                else if (k == SDLK_F4 && play) play->world.quitRequest = true;  // F4 quit (0x45f2b0 = 0x14): as A128
                 else if (k == SDLK_F5 && play) { // debug free-fly camera
                     play->freeFly = !play->freeFly;
                     if (play->freeFly) prevCam = cam = play->camera(alpha, s.fidelity == Fidelity::Enhanced);
@@ -867,9 +1000,20 @@ struct App {
             auto input = [&] {
                 bb::game::PadInput in;
                 if (autoplayAt < args.autoplay.size()) in = args.autoplay[autoplayAt++];
-                else if (!play->freeFly) in = bbtime::readPad(keys, pad);
+                else if (!play->freeFly) {
+                    in = bbtime::readPad(keys, pad);
+                    // Enhanced right-stick camera (radial 12 % dead zone, full at 90 %, t^1.5 like BBLIT-Remaster):
+                    // stick right turns the camera like R2 (camera right), camera_invert swaps it.
+                    if (pad && s.fidelity == Fidelity::Enhanced && args.cfg.stickCamera) {
+                        const float x = float(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX)) / 32767.0f;
+                        const float t = std::clamp((std::abs(x) - 0.12f) / (0.9f - 0.12f), 0.0f, 1.0f);
+                        if (t > 0.0f)
+                            in.camStep = int16_t(std::lround(((x > 0.0f) != args.cfg.cameraInvert ? -1.0f : 1.0f) * float(args.cfg.cameraSpeed) * std::pow(t, 1.5f)));
+                    }
+                }
                 in.help = in.help || std::exchange(helpKey, false);
                 in.esc = in.esc || std::exchange(escKey, false);
+                tape.step(in);  // bugs.exe /r: /p: (0x4491c0 head): report bytes 2 / 3
                 return in;
             };
             if (litLoading) {  // the loading screen stays the presented frame while the target loads
@@ -888,6 +1032,7 @@ struct App {
                 if (!play) return;
             }
             play->world.viewHalfX = std::max(400.0 * viewTan()[0], 256.0);
+            play->world.jumpBuffer = s.fidelity == Fidelity::Enhanced ? uint8_t(args.cfg.jumpBuffer) : 0;  // lit_world.h
             if (litEnter) {  // 0x4065e0 after the load: the second unrendered tick (counter 5; loadUpdate stood for the
                 litEnter = false;  // load pass and counter 3), update 1 of the fade in, then tick + draw (counter 7)
                 litPoke(play->world), play->tick(input());
@@ -895,6 +1040,7 @@ struct App {
                 play->world.fadeTick();
             }
             litPoke(play->world), play->tick(input());
+            litSync(play->world);
             pumpSfx(play->world.sfx);
             // 0x407190: title requests 4/5 + the Savedata read (a game started: its GAME_DATA image), then save (6).
             if (auto g = bb::game::litFrontEnd(play->world, bbtime::saveDir() / "lit")) {
@@ -922,6 +1068,14 @@ struct App {
             if (autoplay2At < args.autoplay2.size()) p2 = args.autoplay2[autoplay2At++];
             else if (!tbPlay->freeFly) p2 = bbtime::readPad(tbKeys[1], pad2);
             tbPlay->world.viewTanX = viewTan()[0], tbPlay->world.viewTanY = viewTan()[1];
+            if (!tbPlay->freeFly) tbPlay->world.cheatKeys(bbtime::dikHeld());
+            tbPlay->world.freeView.reset();
+            if (tbPlay->freeFly) {  // engine (x, y up, -z) -> PS1; look 1000 along yaw / pitch (TbPlay::camera inverse)
+                const float cp = std::cos(cam.pitch);
+                const glm::vec3 l = cam.pos + 1000.0f * glm::vec3(-std::sin(cam.yaw) * cp, std::sin(cam.pitch), -std::cos(cam.yaw) * cp);
+                auto ps1 = [](const glm::vec3& v) { return bb::game::V3{int32_t(std::lround(v.x)), int32_t(std::lround(-v.y)), int32_t(std::lround(-v.z))}; };
+                tbPlay->world.freeView = std::array{ps1(cam.pos), ps1(l)};
+            }
             tbPlay->tick(p1, p2);
             pumpSfx(tbPlay->world.sfx);
             // 0x401b60 (next frame's head, no reload pending): the pause menu's save request S[0x29] = 6.
@@ -931,22 +1085,30 @@ struct App {
                 localtime_r(&t, &now);
                 if (const std::string err = bb::game::tbSaveRequest(w, tbSaveSlot, bbtime::saveDir() / "tb", now); !err.empty())
                     std::println(stderr, "bbtime: TB save failed: {}", err);
+                w.saveSlot = tbSaveSlot;
             }
-            // Reload 0x4014c0 (level GD+0, GAME_DATA kept) after 0x401910's fade-out: fadeOut(2, 0x100) on the request
-            // tick, the world keeps ticking, and the load follows the tick that reaches level 0 (16 frames; trace
-            // local/wine/tbnpc/hud/fade_trace.csv). enterLevel then fades in at speed 200.
+            // Reload 0x4014c0 (level GD+0, GAME_DATA kept) after 0x401910's fade-out: unpause + fadeOut(2, 0x100) on the
+            // frame after the request, the world keeps ticking, and the load follows the tick that reaches level 0 (16
+            // frames; trace local/wine/tbnpc/hud/fade_trace.csv). enterLevel then fades in at speed 200.
             if (bb::game::TbWorld& w = tbPlay->world; w.restart) {
-                if (!tbFadingOut) {
-                    tbFadingOut = true;
-                    w.fadeOut(2, 0x100);
-                    w.fadeTick();
-                }
+                if (!tbFadingOut) tbFadingOut = true, w.reloadStart();
                 if (w.fade.level > 0) return;
                 const int next = w.nextLevel >= 0 ? w.nextLevel : tbLevel;
                 const std::string name(bb::game::TbWorld::levelName(next));
                 std::printf("level change -> %d %s\n", next, name.c_str());
                 tbCarry = w.GD;
+                tbInvuln = w.invuln;
+                tbCheats = w.cheats;
                 try { enterLevel(name); } catch (const std::exception& e) { tbPlay.reset(); playStatus = e.what(); }
+                return;
+            }
+            // S 119 (0x432cc0): state 0x4d03d0 = 11 -> the front end, music and sound streams stopped.
+            if (tbPlay->world.quitToMenu) {
+                if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->stopSfx();
+                const int gi = gameIdx;
+                leaveLevel();
+                tbPlay.reset();
+                openFrontEnd(gi);
                 return;
             }
             if (!tbPlay->freeFly) return;
@@ -1077,7 +1239,7 @@ struct App {
         for (int i = 0; i < 2; ++i)
             text(styleIdx, f.x(320), f.y(366.0f + 36.0f * float(i)), (tb ? 30.0f : 18.0f) * f.u, i ? "Quit" : "Options",
                  mainSel == 2 + i ? (tb ? kTbSel : kLitSel) : (tb ? kTbRed : kLitText), 0.5f);
-        hints("Enter/A: play   L/X: level list   Esc/B: quit   F3: diagnostics   F11: fullscreen");
+        hints("Enter/A: play   L/X: level list   Esc/B: quit   F7: diagnostics   F11: fullscreen");
     }
 
     void drawOptions() {
@@ -1086,7 +1248,9 @@ struct App {
         auto onoff = [](bool b) { return b ? "On" : "Off"; };
         static constexpr const char* kShadowNames[] = {"Off", "Shadow map", "Ray-traced", "Ray-traced + AO"};
         static constexpr const char* kUpscaleNames[] = {"Off", "FSR Quality", "FSR Balanced", "FSR Performance", "FSR Native AA"};
-        const std::string rows[12][2] = {
+        // LiT preset 1-3 (0x4ae1f0): what □ ○ △ ✕ L1 L2 R1 R2 do.
+        static constexpr const char* kPresetNames[4] = {"Standard", "Type 1", "Type 2", "Type 3"};
+        const std::string rows[16][2] = {
             {"Renderer mode", s.fidelity == Fidelity::Enhanced ? "Enhanced" : "Original Fidelity"},
             {"Vertical FOV", std::format("{:.0f} deg", s.vfovDeg)},
             {"4:3 pillarbox", onoff(s.pillarbox)},
@@ -1098,7 +1262,11 @@ struct App {
             {"Reflections", onoff(s.reflections)},
             {"Water", s.water == bb::render::Water::Enhanced ? "Enhanced" : s.water == bb::render::Water::Cartoon ? "Cartoon" : "Original"},
             {"Upscaling", kUpscaleNames[int(s.upscaling)]},
-            {"Frame generation", onoff(s.frameGeneration)}};
+            {"Frame generation", onoff(s.frameGeneration)},
+            {"LiT controller", kPresetNames[args.cfg.litPadPreset & 3]},
+            {"Right-stick camera", !args.cfg.stickCamera ? "Off" : args.cfg.cameraInvert ? "Inverted" : "On"},
+            {"Jump buffer", args.cfg.jumpBuffer ? std::format("{} ticks", args.cfg.jumpBuffer) : "Off"},
+            {"HUD at screen edges", onoff(args.cfg.hudEdges)}};
         std::string shadowNote = "Enhanced mode, Vulkan renderer", reflNote = "water / ice / polished floors; Vulkan, ray tracing",
                     waterNote = "refraction, shore foam, reflections, waves; Enhanced, Vulkan",
                     fsrNote = "AMD FSR 3.1.4; Enhanced, Vulkan; replaces MSAA",
@@ -1110,32 +1278,40 @@ struct App {
         } else {
             shadowNote = reflNote = waterNote = fsrNote = fgNote = "Vulkan renderer only";
         }
-        const std::string_view notes[13] = {"F2 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
+        static constexpr const char* kPresetNotes[4] = {
+            "LiT pad as the original's default (applies from the next level)",
+            "circle roll, triangle crouch, L1 action, R1 look",
+            "square roll, circle action, cross kick, L1 crouch, R1 jump",
+            "square crouch, circle action, triangle kick, cross look, L1/L2 camera, R1 roll, R2 jump"};
+        const std::string_view notes[17] = {"F6 switches it in a level", "Hor+, Enhanced mode (Original Fidelity: 51.28)",
                                             "Original Fidelity mode", "Enhanced mode (off while FSR is on)", "", "F11 switches it anywhere",
                                             players == 2 ? "co-op: P2 keypad / 2nd gamepad" : "R1 switch, L1 call friend", shadowNote,
-                                            reflNote, waterNote, fsrNote, fgNote, ""};
+                                            reflNote, waterNote, fsrNote, fgNote, kPresetNotes[args.cfg.litPadPreset & 3],
+                                            "LiT camera on the right stick, like L2 / R2; Enhanced mode",
+                                            "LiT: a jump pressed just before landing still jumps; Enhanced mode",
+                                            "counters at wide-screen edges in levels; Enhanced mode", ""};
         if (tb) {  // config page pc03: labels in the key-label orange, values white (Controls page), Back image + red label
             page(games[1].options, 255);
             text(1, f.x(320), f.y(14), 30 * f.u, "Options", kTbRed, 0.5f);
-            for (int i = 0; i < 12; ++i) {  // 21-px rows: 12 of them above the note line
+            for (int i = 0; i < 16; ++i) {  // 15.5-px rows: 16 of them above the note line
                 const bool sel = optSel == i;
-                text(1, f.x(60), f.y(62.0f + 21.0f * float(i)), 20 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
-                text(1, f.x(600), f.y(62.0f + 21.0f * float(i)), 20 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
+                text(1, f.x(60), f.y(58.0f + 15.5f * float(i)), 16 * f.u, rows[i][0], sel ? kTbSel : kTbKey);
+                text(1, f.x(600), f.y(58.0f + 15.5f * float(i)), 16 * f.u, rows[i][1], sel ? kTbSel : kLitText, 1.0f);
             }
             text(1, f.x(320), f.y(318), 22 * f.u, notes[optSel], kTbGrey, 0.5f);
-            const Game::Image& b = optSel == 12 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
+            const Game::Image& b = optSel == 16 ? games[1].backHot : games[1].back;  // BACK_SETTINGS (35, 375)
             if (b.img) r.drawImage(b.img, f.x(35), f.y(375), float(b.w) * f.u, float(b.h) * f.u, s.fidelity == Fidelity::Enhanced);
-            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 12 ? kTbSel : kTbRed, 0.5f);
+            text(1, f.x(35.0f + float(b.w) * 0.5f), f.y(375.0f + float(b.h)), 30 * f.u, "Back", optSel == 16 ? kTbSel : kTbRed, 0.5f);
         } else {  // the title slot-menu panel
             page(games[0].bg, 60);
             litPanel(f.x(70), f.y(56), 500 * f.u, 370 * f.u, f.u);
             text(0, f.x(320), f.y(74), 24 * f.u, "Options", kLitSel, 0.5f);
-            for (int i = 0; i < 13; ++i) {
-                const uint8_t* c = optSel == i ? (i == 12 ? kLitSel : kLitCur) : kLitText;
-                const float y = f.y(108.0f + 21.0f * float(i));
-                if (i == 12) { text(0, f.x(320), y, 14 * f.u, "Back", c, 0.5f); break; }
-                text(0, f.x(96), y, 14 * f.u, rows[i][0], c);
-                text(0, f.x(544), y, 14 * f.u, rows[i][1], c, 1.0f);
+            for (int i = 0; i < 17; ++i) {
+                const uint8_t* c = optSel == i ? (i == 16 ? kLitSel : kLitCur) : kLitText;
+                const float y = f.y(100.0f + 16.0f * float(i));
+                if (i == 16) { text(0, f.x(320), y, 13 * f.u, "Back", c, 0.5f); break; }
+                text(0, f.x(96), y, 13 * f.u, rows[i][0], c);
+                text(0, f.x(544), y, 13 * f.u, rows[i][1], c, 1.0f);
             }
             text(0, f.x(320), f.y(386), 12 * f.u, notes[optSel], kLitText, 0.5f);
         }
@@ -1209,26 +1385,41 @@ struct App {
                 c.yaw = glm::mix(prevCam.yaw, cam.yaw, alpha);
                 c.pitch = glm::mix(prevCam.pitch, cam.pitch, alpha);
             }
+            drawDistance();
+            // Enhanced ground haze (BBLIT-Remaster [level4/5/7/8] haze=100): L01A, L01B, L01D1, L01D2 hide where the
+            // distant cliffs end; its top 800 above Bugs' feet (haze_depth -800), eased after him (tau 1.5 s).
+            s.haze = 0.0f;
+            if (play && lerp && (litLevel == 4 || litLevel == 5 || litLevel == 7 || litLevel == 8) && args.cfg.haze > 0) {
+                const float top = -float(play->view(alpha, true).player.y) + 800.0f;
+                hazeTop = hazeFresh ? top : hazeTop + (top - hazeTop) * std::min(1.0f, frameDt / 1.5f);
+                hazeFresh = false;
+                s.haze = float(args.cfg.haze) / 100.0f, s.hazeTop = hazeTop;
+            }
             poseActors(lerp, c);
             feedWater(lerp);
             // LiT zone/portal visibility (0x44c270): eye + player zones; the free-fly camera sees every zone.
             // Debug: BBTIME_LIT_ALL_ZONES=1 draws every zone (A/B against the walk).
             static const bool allZones = std::getenv("BBTIME_LIT_ALL_ZONES");
             if (play && !freeCamera() && !allZones)
-                r.setZoneView({play->world.camZone, play->world.p.zone, (play->world.cam.flags & 0x300) != 0});
+                r.setZoneView({play->world.camZone, play->world.p.zone, (play->world.cam.flags & 0x300) != 0, play->world.zoneMessages});
             else
                 r.setZoneView({});
+            {  // Texture links (LiT 0x4e5e80 aliases, TB class-2 link entities): the world's record, else the clock
+                std::vector<int32_t> links;
+                if (const auto* tl = play ? &play->world.textureLinks : tbPlay ? &tbPlay->world.textureLinks : nullptr)
+                    for (const bb::TextureAnim& a : scene.textureAnims) {
+                        const auto it = tl->find(uint16_t(a.linkId));
+                        links.push_back(it == tl->end() || a.records.empty() ? -1 : a.records[it->second % a.records.size()]);
+                    }
+                r.setTextureLinks(std::move(links));
+            }
             r.drawScene(c, s);
-            if (play) {  // the table the next tick's +0x3c & 1 actor test reads: zones whose first entry is unflagged
-                std::optional<std::vector<int16_t>> zt;
+            if (play) {  // the table the next tick's +0x3c & 1 actor test reads: each zone's first entry
+                std::optional<std::vector<std::pair<int16_t, bool>>> zt;
                 if (!r.zoneTable().empty()) {
                     zt.emplace();
-                    std::vector<int16_t> seen;
-                    for (const bb::render::ZoneEntry& e : r.zoneTable()) {
-                        if (std::ranges::find(seen, e.zone) != seen.end()) continue;
-                        seen.push_back(e.zone);
-                        if (!e.flagged) zt->push_back(e.zone);
-                    }
+                    for (const bb::render::ZoneEntry& e : r.zoneTable())
+                        if (std::ranges::find(*zt, e.zone, &std::pair<int16_t, bool>::first) == zt->end()) zt->emplace_back(e.zone, e.flagged);
                 }
                 play->world.zoneTable = std::move(zt);
             }
@@ -1237,8 +1428,10 @@ struct App {
                 if (play) drawLitBars();
                 drawOverlayText(play ? play->world.glyphs : tbPlay->world.glyphs);  // game text: drawn with --no-hud too
                 if (tbPlay) drawTbSprites();  // the HUD sheet sprites (game HUD)
-                if (const auto f = play ? play->world.fadeOverlay() : tbPlay->world.fadeOverlay(); f[3])
-                    r.drawRect(0, 0, W, H, f.data());  // fade (LiT also the A71 flash)
+                if (play) {
+                    if (const auto f = play->world.fadeOverlay(); f[3]) r.drawRect(0, 0, W, H, f.data());  // fade, A71 flash
+                } else if (const auto f = tbPlay->world.fadeOverlay(); f[3])
+                    r.multiplyRect(0, 0, W, H, f.data());  // fade / S 50 flash: every glColor × light colour
             }
             if (play && !args.noHud) drawHud();
             if (tbPlay && !args.noHud) drawTbHud();
@@ -1256,24 +1449,62 @@ struct App {
         if (overlay) drawOverlay();
     }
 
+    // Draw distance. LiT 0x40cc80: an object drawn with far value `far` fogs out at D = min(0xFFFF, 4·far +
+    // ((9·fogDist) / 2)·u) over its last 25 %, the world with far = u; fogDist = config.pc +0x1c, 2 (far) in the shipped
+    // config; glOrtho far 65536 (RUNTIME_REFERENCE §29). TB: no fog in the GL exe; the world and entities clip at
+    // Scene::tbFarClip, the sky dome (background layer) at 64000 (renderer). Enhanced: extentFog (enterLevel).
+    float litFog(uint32_t u, uint32_t far) const {
+        const int f = play ? play->world.video.fogDist : args.cfg.litFogDistance;  // config +0x1c, used only in 0..2
+        return float(std::min<uint32_t>(0xFFFF, 4 * far + (f >= 0 && f < 3 ? uint32_t(9 * f / 2) * u : 0)));
+    }
+    void drawDistance() {
+        const bool original = s.fidelity == Fidelity::Original;
+        if (original && scene.litFogUnit) {
+            s.fogEnd = litFog(scene.litFogUnit, scene.litFogUnit), s.fogStart = 0.75f * s.fogEnd, s.zFar = 65536.0f;
+        } else if (original && scene.tbFarClip) {
+            s.fogEnd = s.fogStart = 0.0f, s.zFar = float(scene.tbFarClip);
+        } else {
+            s.fogEnd = extentFog, s.fogStart = 0.75f * extentFog, s.zFar = std::max(extentFog * 1.05f, scene.litFogUnit ? 65536.0f : 0.0f);
+        }
+    }
+
+    // TB floor shade (0x465130, TbActor::shade): every glColor of the entity × (32 - shade) / 32 (0x488400).
+    void tbShade(size_t first, uint8_t shade) {
+        if (!shade) return;
+        for (size_t k = first; k < actorMeshes.size(); ++k)
+            for (bb::Vertex& v : actorMeshes[k].vertices)
+                for (int c = 0; c < 3; ++c) v.rgba[c] = uint8_t((v.rgba[c] * (32 - shade) + 16) / 32);
+    }
     // Live actors (not spawn templates); in play mode Bugs at the simulated position and collected pickups hidden.
     void poseActors(bool lerp, const bb::render::Camera& c) {
         const glm::vec3 eye = c.pos;
+        // Enhanced: poses and roots between the last two ticks (play.h ActorPrev, bb::interpolatePose); Original: the tick's.
+        const auto shownPose = [&](const bb::AnimState* prev, const bb::AnimState& cur) {
+            return lerp && prev ? bb::interpolatePose(*prev, cur, alpha) : cur;
+        };
         actorMeshes.clear();
+        motion.marks.clear();
+        const auto traced = [&](int id, size_t first) { if (motion.f) motion.marks.emplace_back(id, first, actorMeshes.size()); };
         for (size_t i = 0; i < scene.actors.size(); ++i) {
             const bb::ActorInstance& a = scene.actors[i];
             if (a.chunk == 8) continue;
-            if (tbPlay && a.player) {
+            if (tbPlay && a.player) {  // 0x465130 skips +0x24 & 4 (e.g. the focus in the L2 + R2 look view)
                 const size_t k = a.entityId == 2 ? 0 : 1;
+                if (tbPlay->world.actors[k].f24 & 4) continue;
                 const auto v = tbPlay->view(alpha, lerp);
-                bb::poseActor(scene.actorModels[a.model], tbPlay->world.actors[k].anim, {v.pos[k].x, v.pos[k].y, v.pos[k].z},
+                const size_t first = actorMeshes.size();
+                bb::poseActor(scene.actorModels[a.model], shownPose(&tbPlay->prevAnim[k], tbPlay->world.actors[k].anim), {v.pos[k].x, v.pos[k].y, v.pos[k].z},
                               {0, v.yaw[k], v.roll[k]}, a.scale, actorMeshes);
+                tbShade(first, tbPlay->world.actors[k].shade);
+                traced(-1 - int(k), first);
                 continue;
             }
             if (play && a.player) {
                 const auto v = play->view(alpha, lerp);
-                bb::poseActor(scene.actorModels[a.model], play->world.p.animState, {v.player.x, v.player.y, v.player.z},
+                const size_t first = actorMeshes.size();
+                bb::poseActor(scene.actorModels[a.model], shownPose(&play->prevPlayerAnim, play->world.p.animState), {v.player.x, v.player.y, v.player.z},
                               {0, int16_t(v.yaw - v.parent[1]), v.lean}, a.scale, actorMeshes, v.parent);
+                traced(-1, first);
                 continue;
             }
             if (play || tbPlay) continue;  // the simulation's actors are drawn below
@@ -1281,27 +1512,128 @@ struct App {
         }
         // Enhanced draw distance: entities unlisted only by their activation range are drawn too (frozen, not ticked).
         const bool farDraw = s.fidelity == Fidelity::Enhanced && !s.frame43;
-        if (tbPlay)  // listed entities (view list 0x45eee0; the shadow pass 0x464480 draws from it too, I), not removed
-            for (const bb::game::TbActor& e : tbPlay->world.entities)
-                if ((e.active || (farDraw && e.far)) && e.drawn() && e.model && !e.anim.parts.empty())
-                    bb::poseActor(*e.model, e.anim, {e.pos.x, e.pos.y, e.pos.z}, {e.pitch, e.yaw, e.roll},
-                                  {e.scale[0], e.scale[1], e.scale[2]}, actorMeshes);
+        if (tbPlay) {  // listed entities in view (0x465130 skips +0x24 & 4: frustum / zone out, kept listed by 0x10 /
+                       // 0x40; the shadow pass 0x464480 draws from the list too, I), not removed
+            // Class 0 (0x450890) never animates: its model instance draws the static mesh under the entity matrix
+            // (0x44e5d0), as one root part (ARCA01's wall-disc panel, chunk 0x1584d, which also links a rig).
+            bb::AnimState rigid;
+            rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
+            for (const bb::game::TbActor& e : tbPlay->world.entities) {
+                const bool still = e.behaviour == 0 && e.anim.parts.empty();
+                if (((e.active && !(e.f24 & 4)) || (farDraw && e.far)) && e.drawn() && e.model && (still || !e.anim.parts.empty())) {
+                    const size_t first = actorMeshes.size();
+                    const auto pv = tbPlay->prevEntities.find(&e);
+                    const ActorPrev* p = lerp && pv != tbPlay->prevEntities.end() ? &pv->second : nullptr;
+                    const bb::game::V3 at = p ? lerpRoot(p->pos, e.pos, alpha) : e.pos;
+                    const std::array<int16_t, 3> rot = p ? std::array<int16_t, 3>{lerpAngle(p->rot[0], e.pitch, alpha), lerpAngle(p->rot[1], e.yaw, alpha),
+                                                                                  lerpAngle(p->rot[2], e.roll, alpha)}
+                                                         : std::array<int16_t, 3>{e.pitch, e.yaw, e.roll};
+                    bb::poseActor(e.mesh ? *e.mesh : *e.model, still ? rigid : shownPose(p ? &p->anim : nullptr, e.anim), {at.x, at.y, at.z},
+                                  rot, {e.scale[0], e.scale[1], e.scale[2]}, actorMeshes);
+                    tbShade(first, e.shade);
+                    traced(int(e.uid), first);
+                }
+            }
+        }
         // Enhanced sun shadows (Vulkan): actorMeshes[0, casters) cast and receive them. LiT's sky dome (behaviour 9,
         // follows the eye) is posed after that range then, as are the HUD models.
         bool sunShadows = false;
         if constexpr (requires { R::dynamicShadows(s); }) sunShadows = R::dynamicShadows(s);
+        // An actor's far value (0x44cb90; nullptr = Bugs: u): the activation radius +0x3e with +0x3c & 2, else u;
+        // flagsC 0x2000000 caps it at u, and the sky (type 9) or flagsC 0x20000000 takes 0x3fff.
+        const auto litFar = [](const bb::game::LitActor* a, uint32_t u) -> uint32_t {
+            if (!a) return u;
+            const uint32_t far = (a->act3c & 2) ? a->act3e : u;
+            if (!(a->flagsC & 0x2000000)) return far;
+            return a->type == 9 || (a->flagsC & 0x20000000) ? 0x3fff : std::min(far, u);
+        };
+        // Enhanced: how far an actor's interpolated root lies from its tick position (engine units). Attached actors
+        // (parent frame) take their parent's plus the parent part's interpolated move (Bugs: index < 0, his drawn root).
+        // Members through locals: GCC 14 rejects implicit member access in a deducing-this lambda.
+        const float alpha = this->alpha;
+        auto& play = this->play;
+        const auto litLag = [&](this const auto& self, int32_t i, int depth = 0) -> glm::vec3 {
+            if (!lerp || depth > 8) return {};
+            if (i < 0) {
+                const bb::game::V3 at = play->view(alpha, true).player, now = play->cur.player;
+                return bbtime::toEngine({at.x - now.x, at.y - now.y, at.z - now.z});
+            }
+            const bb::game::LitActor& a = play->world.actors[size_t(i)];
+            if (a.parent != -1 && !(a.type == 31 && (a.flagsC & 0x20))) {  // + the parent part's interpolated move
+                glm::vec3 d = self(a.parent, depth + 1);
+                const bool bugs = a.parent < 0;
+                const bb::AnimState* was = bugs ? &play->prevPlayerAnim
+                                         : size_t(a.parent) < play->prevActors.size() ? &play->prevActors[size_t(a.parent)].anim : nullptr;
+                const bb::AnimState& now = bugs ? play->world.p.animState : play->world.actors[size_t(a.parent)].animState;
+                if (was)
+                    if (const auto q = play->world.parentPoint(a, bb::interpolatePose(*was, now, alpha)), o = play->world.parentPoint(a, now); q && o)
+                        d += bbtime::toEngine({q->x - o->x, q->y - o->y, q->z - o->z});
+                return d;
+            }
+            if (size_t(i) >= play->prevActors.size()) return {};
+            const bb::game::V3 at = lerpRoot(play->prevActors[size_t(i)].pos, a.pos, alpha, bbtime::kLitJump);
+            return bbtime::toEngine({at.x - a.pos.x, at.y - a.pos.y, at.z - a.pos.z});
+        };
         auto poseLit = [&](bool sky) {
-            for (const bb::game::LitActor& a : play->world.actors) {
+            for (size_t ai = 0; ai < play->world.actors.size(); ++ai) {
+                const bb::game::LitActor& a = play->world.actors[ai];
                 const int32_t m = play->world.defs[size_t(a.def)].model;
                 if (a.dead || !(a.visible || (farDraw && a.far)) || m < 0 || a.animState.parts.empty() || (sunShadows && (a.type == 9) != sky)) continue;
                 // Attached at a parent's part: drawn under that part's full matrix (GsGetLws), e.g. hidden by a
-                // zero-scale part (LS01 clock-gate displays); otherwise the yaw-only frame the simulation keeps.
+                // zero-scale part (LS01 clock-gate displays); a type-31 shot from an f3 0x20 hand event under its kept
+                // +0x80 alone; otherwise the yaw-only frame the simulation keeps.
                 const auto pm = play->world.parentFrame(a);
+                const bool kept = a.type == 31 && (a.flagsC & 0x20);
                 const size_t first = actorMeshes.size();
-                bb::poseActor(scene.actorModels[size_t(m)], a.animState, {a.pos.x, a.pos.y, a.pos.z},
-                              {a.rot[0], pm ? a.matYaw : a.yaw, a.rot[2]}, a.scale, actorMeshes, {}, pm ? &*pm : nullptr);
+                const ActorPrev* p = lerp && ai < play->prevActors.size() ? &play->prevActors[ai] : nullptr;
+                const bool own = p && !pm && !kept;  // roots in a parent's frame follow that frame as is
+                const bb::game::V3 at = own ? lerpRoot(p->pos, a.pos, alpha, bbtime::kLitJump) : a.pos;
+                const std::array<int16_t, 3> rot = own ? std::array<int16_t, 3>{lerpAngle(p->rot[0], a.rot[0], alpha), lerpAngle(p->rot[1], a.yaw, alpha),
+                                                                                 lerpAngle(p->rot[2], a.rot[2], alpha)}
+                                                        : std::array<int16_t, 3>{a.rot[0], pm ? a.matYaw : a.yaw, a.rot[2]};
+                bb::poseActor(scene.actorModels[size_t(m)], shownPose(p ? &p->anim : nullptr, a.animState), {at.x, at.y, at.z},
+                              kept ? std::array<int16_t, 3>{} : rot,
+                              kept ? std::array<int32_t, 3>{4096, 4096, 4096} : a.scale, actorMeshes, {}, pm ? &*pm : nullptr);
+                if (p && !own)  // in a parent's frame / kept matrix: moved with the parent's (own) interpolated root
+                    if (const glm::vec3 d = litLag(int32_t(ai)); d != glm::vec3(0.0f))
+                        for (size_t k = first; k < actorMeshes.size(); ++k)
+                            for (bb::Vertex& v : actorMeshes[k].vertices) v.pos[0] += d.x, v.pos[1] += d.y, v.pos[2] += d.z;
                 if (a.type == 1)  // Bugs: PC blended layer 2 (0x44ca11)
                     for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].late = true;
+                if (a.type == 9 && lerp)  // Enhanced: the sky (behaviour 9, follows the eye) is the background layer, drawn
+                    for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].background = true;  // first; fog fades into it
+                if (const uint32_t u = scene.litFogUnit)
+                    for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].fogEnd = litFog(u, litFar(&a, u));
+                traced(int(ai), first);
+                const auto moved = [&](auto&& f) {
+                    for (size_t k = first; k < actorMeshes.size(); ++k)
+                        for (bb::Vertex& v : actorMeshes[k].vertices) f(v);
+                };
+                // Enhanced visual repairs (BBLIT-Remaster ideas); the simulation, shadows and particles keep the logical
+                // position. TITLE logo (template entity 20, z -2160..-2120): drawn at title_logo % of its depth toward the
+                // eye (same screen place), ahead of the time machine's carrot (to -2062), which cut through it.
+                if (lerp && litLevel == 0 && a.entityId == 20 && args.cfg.titleLogo < 100) {
+                    const float k = float(args.cfg.titleLogo) / 100.0f;
+                    moved([&](bb::Vertex& v) {
+                        for (int j = 0; j < 3; ++j) v.pos[j] = eye[j] + (v.pos[j] - eye[j]) * k;
+                    });
+                }
+                // A pushable stone (type 5) holds Bugs 170 from its centre on one side and 240 on the other, so he sinks
+                // ~65 into it (on the PS1 too): drawn moved out of his push_r cylinder along the shallower axis, <= 120.
+                if (lerp && a.type == 5 && args.cfg.pushR > 0) {
+                    glm::vec3 lo(1e9f), hi(-1e9f);
+                    moved([&](bb::Vertex& v) {
+                        lo = glm::min(lo, glm::vec3(v.pos[0], v.pos[1], v.pos[2])), hi = glm::max(hi, glm::vec3(v.pos[0], v.pos[1], v.pos[2]));
+                    });
+                    const glm::vec3 b = bbtime::toEngine(play->view(alpha, true).player), mid = (lo + hi) * 0.5f;
+                    const float r = float(args.cfg.pushR);
+                    const float px = std::min(b.x + r - lo.x, hi.x - b.x + r), pz = std::min(b.z + r - lo.z, hi.z - b.z + r);
+                    if (b.y < hi.y && b.y + 400.0f > lo.y && px > 0.0f && pz > 0.0f) {
+                        const glm::vec3 d = px < pz ? glm::vec3(std::copysign(std::min(px, 120.0f), mid.x - b.x), 0.0f, 0.0f)
+                                                    : glm::vec3(0.0f, 0.0f, std::copysign(std::min(pz, 120.0f), mid.z - b.z));
+                        moved([&](bb::Vertex& v) { v.pos[0] += d.x, v.pos[2] += d.z; });
+                    }
+                }
             }
         };
         if (play) poseLit(false);
@@ -1344,29 +1676,116 @@ struct App {
                 }
             }
         }
+        if (tbPlay) {  // TB effects (TbWorld::fx, tb_fx.cpp): particle sprites, water-surface quads, gouraud lines
+            const glm::mat4 toWorld = glm::inverse(c.view());
+            const glm::vec3 right = glm::normalize(glm::vec3(toWorld[0])), down = -glm::normalize(glm::vec3(toWorld[1]));
+            const glm::vec3 fwd = -glm::normalize(glm::vec3(toWorld[2]));
+            const auto P = [](const bb::game::V3& v) { return glm::vec3(float(v.x), -float(v.y), -float(v.z)); };
+            const uint8_t white = uint8_t(std::min(255.0f, std::round(255.0f / s.colorScale(scene.colorScale))));  // GL 0x41c660: 1.0
+            const bool pc = s.fidelity == bb::render::Fidelity::Original;
+            // GL lines are one pixel of the original's 480-line window: z · 2 tan(vfov / 2) / 480 world units.
+            const float px = float(2.0 * viewTan()[1] / 480.0);
+            bb::Mesh lines;
+            lines.name = "fx lines", lines.twoSided = true;
+            for (const bb::game::TbWorld::FxDraw& f : tbPlay->world.fx) {
+                using K = bb::game::TbWorld::FxDraw::Kind;
+                if (f.kind == K::Line) {
+                    const glm::vec3 a = P(f.pos);
+                    glm::vec3 b = P(f.to);
+                    const float zb = std::max(1.0f, glm::dot(b - c.pos, fwd));
+                    b += right * (float(f.dx) * zb / 400.0f) + down * (float(f.dy) * zb / 250.0f);  // PS1 screen units
+                    glm::vec3 side = glm::cross(b - a, a - c.pos);
+                    const float sl = glm::length(side);
+                    side = sl > 1e-6f ? side / sl : right;
+                    const float wa = 0.5f * px * std::max(1.0f, glm::dot(a - c.pos, fwd)), wb = 0.5f * px * zb;
+                    const auto base = uint32_t(lines.vertices.size());
+                    for (const auto& [p, w, col] : {std::tuple{a, wa, f.c0}, std::tuple{b, wb, f.c1}})
+                        for (const float sgn : {-1.0f, 1.0f}) {
+                            const glm::vec3 q = p + side * (sgn * w);
+                            lines.vertices.push_back({.pos = {q.x, q.y, q.z}, .uv = {0, 0}, .rgba = {col[0], col[1], col[2], 255}});
+                        }
+                    lines.indices.insert(lines.indices.end(), {base, base + 1, base + 2, base + 1, base + 3, base + 2});
+                    continue;
+                }
+                const auto sp = scene.sprites.find(f.asset);
+                if (sp == scene.sprites.end() || f.frame >= sp->second.size() || sp->second[f.frame].texture < 0) continue;
+                const bb::SpriteFrame& fr = sp->second[f.frame];
+                std::array<glm::vec3, 4> q;
+                if (f.kind == K::Ground) {
+                    for (size_t k = 0; k < 4; ++k) q[k] = P(f.quad[k]);
+                } else {  // 0x453350's screen offsets (x right, y down; y in 0.625-scaled units) as world view-plane offsets
+                    const float an = float(f.angle) * 6.2831853f / 4096.0f, cs = std::cos(an), sn = std::sin(an);
+                    const float sz = float(f.size);
+                    const glm::vec3 o = P(f.pos);
+                    const std::array<std::array<float, 2>, 4> k{{{0.625f * cs, 1.6f * sn}, {-sn, cs}, {sn, -cs}, {-0.625f * cs, -1.6f * sn}}};
+                    for (size_t i = 0; i < 4; ++i) q[i] = o + sz * (right * k[i][0] + down * k[i][1]);
+                }
+                bb::Mesh& m = actorMeshes.emplace_back();
+                // The GL path culls back faces (0x41eee0): a surface quad shows from above only (the PS1 order v0 v1 v2
+                // faces +y PS1 = down, so reversed here); the screen-space sprites always face the eye.
+                m.name = "fx", m.texture = fr.texture, m.blend = pc ? fr.pcBlend : fr.blend, m.twoSided = f.kind != K::Ground;
+                m.indices = f.kind == K::Ground ? std::vector<uint32_t>{0, 2, 1, 1, 2, 3} : std::vector<uint32_t>{0, 1, 2, 1, 3, 2};
+                constexpr float uv[4][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+                for (size_t i = 0; i < 4; ++i)
+                    m.vertices.push_back({.pos = {q[i].x, q[i].y, q[i].z}, .uv = {uv[i][0], uv[i][1]}, .rgba = {white, white, white, pc ? fr.pcAlpha : fr.alpha}});
+            }
+            if (!lines.indices.empty()) actorMeshes.push_back(std::move(lines));
+        }
+        if (tbPlay && !sunShadows) {  // blob shadows (0x464480, TbWorld::shadows): after the particles, as LiT's 0x44bb50
+            // its composed matrix moves by PS1 view-space (0, +5, +9) (TR y / z += 5 / 9 around 0x404c30). Engine (0, -5, -9).
+            const glm::vec3 shift = glm::mat3(glm::inverse(c.view())) * glm::vec3(0.0f, -5.0f, -9.0f);
+            bb::AnimState rigid;
+            rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
+            for (const bb::game::TbWorld::Shadow& sh : tbPlay->world.shadows) {
+                const size_t first = actorMeshes.size();
+                // Enhanced: from the owner's shadow of the last tick, as its owner glides (none then / teleport: as is).
+                bb::game::V3 at = sh.pos;
+                std::array<int16_t, 3> rot = sh.rot;
+                if (lerp)
+                    if (const auto w = std::ranges::find(tbPlay->prevShadows, sh.uid, &bb::game::TbWorld::Shadow::uid); w != tbPlay->prevShadows.end()) {
+                        at = lerpRoot(w->pos, sh.pos, alpha);
+                        for (size_t k = 0; k < 3; ++k) rot[k] = lerpAngle(w->rot[k], sh.rot[k], alpha);
+                    }
+                bb::poseActor(*sh.model, rigid, {at.x, at.y, at.z}, rot, {int16_t(sh.scale), 0x1000, int16_t(sh.scale)}, actorMeshes);
+                for (size_t k = first; k < actorMeshes.size(); ++k)
+                    for (bb::Vertex& v : actorMeshes[k].vertices) v.pos[0] += shift.x, v.pos[1] += shift.y, v.pos[2] += shift.z;
+                traced(20000 + int(sh.uid), first);
+            }
+        }
         if (play && !sunShadows) {  // ground shadows (0x44bb50): the shadow entity's model on one identity part
-            // The PC exe orders polygons by ordering-table bucket (the shadow +9 deeper in view space), not per pixel;
-            // with a depth buffer the quad would sink into the visual floor (which differs from the collision heights
-            // it is placed on), so its vertices are pulled kShadowPull units toward the eye (Inferred value; ponytail:
-            // a per-mesh polygon offset in both backends if thin geometry ever shows it through).
-            constexpr float kShadowPull = 24.0f;
+            // 0x44bb50 composes the view and model matrices (0x40a050) and moves the shadow by PS1 view-space (0, +5, +9)
+            // (TR y / z of the composed matrix, restored after 0x4088f0): 5 down and 9 away from the eye on screen
+            // (bugs.exe's view keeps PS1 y down: live 0x4efb00 row 1 = (3, 2558, −70), y scale 0x4efb5c = +2560),
+            // depth-tested as layer 2 like any polygon. Engine view space: (0, -5, -9).
+            const glm::vec3 shadowShift = glm::mat3(glm::inverse(c.view())) * glm::vec3(0.0f, -5.0f, -9.0f);
             bb::AnimState rigid;
             rigid.parts.push_back({.flags = 4, .object = 0, .parent = -1});
             for (const bb::game::LitWorld::Shadow& s : play->world.shadows()) {
-                const size_t first = actorMeshes.size();
-                bb::poseActor(scene.actorModels[scene.templateModels.at(s.entity)], rigid, {s.pos.x, s.pos.y, s.pos.z}, s.rot,
-                              {s.scale, 0x1000, s.scale}, actorMeshes);
-                for (size_t k = first; k < actorMeshes.size(); ++k) {
-                    actorMeshes[k].late = true;  // PC blended layer 2 (0x44bde9)
-                    for (bb::Vertex& v : actorMeshes[k].vertices) {
-                        const glm::vec3 p{v.pos[0], v.pos[1], v.pos[2]}, q = p + kShadowPull * glm::normalize(eye - p);
-                        v.pos[0] = q.x, v.pos[1] = q.y, v.pos[2] = q.z;
+                // Enhanced: from the owner's shadow of the last tick, as its owner glides (none then / teleport: as is).
+                bb::game::V3 at = s.pos;
+                std::array<int16_t, 3> rot = s.rot;
+                if (lerp)
+                    if (const auto w = std::ranges::find(play->prevShadows, s.owner, &bb::game::LitWorld::Shadow::owner); w != play->prevShadows.end()) {
+                        at = lerpRoot(w->pos, s.pos, alpha, bbtime::kLitJump);
+                        for (size_t k = 0; k < 3; ++k) rot[k] = lerpAngle(w->rot[k], s.rot[k], alpha);
                     }
+                const size_t first = actorMeshes.size();
+                bb::poseActor(scene.actorModels[scene.templateModels.at(s.entity)], rigid, {at.x, at.y, at.z}, rot,
+                              {s.scale, 0x1000, s.scale}, actorMeshes);
+                // 0x44cb90 with the owner: its far value (fog end) for the quad.
+                const uint32_t u = scene.litFogUnit;
+                const float fogEnd = u ? litFog(u, litFar(s.owner >= 0 ? &play->world.actors[size_t(s.owner)] : nullptr, u)) : 0.0f;
+                for (size_t k = first; k < actorMeshes.size(); ++k) {
+                    if (u) actorMeshes[k].fogEnd = fogEnd;
+                    actorMeshes[k].late = true;  // PC blended layer 2 (0x44bde9)
                 }
+                for (size_t k = first; k < actorMeshes.size(); ++k)
+                    for (bb::Vertex& v : actorMeshes[k].vertices) v.pos[0] += shadowShift.x, v.pos[1] += shadowShift.y, v.pos[2] += shadowShift.z;
+                traced(20000 + s.owner, first);
             }
         }
         if (play) {
-            poseHud(c, play->world.hud);
+            poseHud(c, play->world.hud, hudEdge(play->world.S[12] != 0));
             // Pause / help veil (0x44c4b0 -> GL 0x40be10 while S[12] != 0): a screen quad of grey 0.2 at alpha 0.5 over the
             // world, under the HUD and the text; posed like the HUD just behind its deepest elements (z 1500).
             if (play->world.S[12]) {
@@ -1381,7 +1800,28 @@ struct App {
                 }
             }
         }
-        if (tbPlay) poseHud(c, tbPlay->world.hud);
+        if (tbPlay) poseHud(c, tbPlay->world.hud, hudEdge(tbPlay->world.S[9] != 0));
+        if (motion.f)
+            for (const auto& [id, b, e] : motion.marks) {
+                std::vector<glm::vec3> vs;
+                for (size_t k = b; k < e; ++k)
+                    for (const bb::Vertex& v : actorMeshes[k].vertices) vs.emplace_back(v.pos[0], v.pos[1], v.pos[2]);
+                if (vs.empty()) continue;
+                glm::vec3 mid(0.0f);
+                for (const glm::vec3& v : vs) mid += v;
+                mid /= float(vs.size());
+                double rms = 0.0, flow = -1.0;
+                for (const glm::vec3& v : vs) rms += double(glm::dot(v - mid, v - mid));
+                std::vector<glm::vec3>& last = motion.last[id];
+                if (last.size() == vs.size()) {
+                    flow = 0.0;
+                    for (size_t k = 0; k < vs.size(); ++k) flow += double(glm::length(vs[k] - last[k]));
+                    flow /= double(vs.size());
+                }
+                std::println(motion.f, "{} {} {} {:.1f} {:.1f} {:.1f} {:.2f} {:.2f} {}", simTick, motion.sub, id, mid.x, mid.y, mid.z,
+                             std::sqrt(rms / double(vs.size())), flow, vs.size());
+                last = std::move(vs);
+            }
         if constexpr (requires { r.setActorMeshes(actorMeshes, casters); }) r.setActorMeshes(actorMeshes, casters);
         else r.setActorMeshes(actorMeshes);
     }
@@ -1392,7 +1832,7 @@ struct App {
         if constexpr (requires { r.setWaterBodies(waterBodies, 0.0f); }) {
             waterBodies.clear();
             auto body = [&](uint32_t id, auto x, auto y, auto z, float radius, float height) {  // PS1 -> engine axes
-                waterBodies.push_back({id, {float(x), -float(y), -float(z)}, std::clamp(radius * 0.5f, 25.0f, 150.0f), std::max(height, 100.0f)});
+                waterBodies.push_back({id, {float(x), -float(y), -float(z)}, std::clamp(radius * 0.5f, 25.0f, 150.0f), std::max(height, 100.0f), {}});
             };
             auto boxHeight = [](const std::array<int16_t, 6>& b) { return float(b[1] - b[4]); };  // feet (max y) - top (min y)
             if (play) {
@@ -1404,11 +1844,20 @@ struct App {
                         body(uint32_t(i + 1), a.pos.x, a.pos.y, a.pos.z, float(a.radius), boxHeight(a.box));
                 }
             }
-            if (tbPlay) {
+            if (tbPlay) {  // in a TB water zone the game's surface (0x44f550's depth) is the one the body wades / swims in
                 const auto v = tbPlay->view(alpha, lerp);
-                for (uint32_t k = 0; k < 2; ++k) body(k, v.pos[k].x, v.pos[k].y, v.pos[k].z, 120.0f, 300.0f);
+                auto surface = [&](const bb::game::TbActor& a) {
+                    if (const auto y = tbPlay->world.waterSurface(a)) waterBodies.back().surface = -float(*y);
+                };
+                for (uint32_t k = 0; k < 2; ++k) {
+                    body(k, v.pos[k].x, v.pos[k].y, v.pos[k].z, 120.0f, 300.0f);
+                    surface(tbPlay->world.actors[k]);
+                }
                 for (const bb::game::TbActor& e : tbPlay->world.entities)
-                    if (e.active && e.drawn() && e.model && e.uid >= 2) body(e.uid, e.pos.x, e.pos.y, e.pos.z, float(e.radius), boxHeight(e.box));
+                    if (e.active && e.drawn() && e.model && e.uid >= 2) {
+                        body(e.uid, e.pos.x, e.pos.y, e.pos.z, float(e.radius), boxHeight(e.box));
+                        surface(e);
+                    }
             }
             r.setWaterBodies(waterBodies, frameDt);
         }
@@ -1419,7 +1868,15 @@ struct App {
     // the exe's projection (0x408910, focal 400 in 384-line units). Each vertex is rebuilt on this frame's camera ray
     // at depth·k (k = 2·zNear/1000): the same pixels at any FOV, in front of the world (the exe forces the HUD's depth
     // to the near plane).
-    void poseHud(const bb::render::Camera& c, std::span<const bb::game::HudItem> items) {
+    // Enhanced hud_edges (BBLIT-Remaster's HUD policy, by known HUD elements instead of screen geometry): the half-width
+    // the window has beyond the 4:3 view, in the HUD's 384-line units; HUD elements (LiT 0x44b370 slots, TB 0x463ef0 /
+    // 0x462430 sprites) more than 64 units off centre move out by it. Only unpaused gameplay (LiT level 3+; never the
+    // title, pause panels, text boxes or menus, which stay centred).
+    float hudEdge(bool paused) const {
+        if (s.fidelity != Fidelity::Enhanced || !args.cfg.hudEdges || s.frame43 || paused || (play && litLevel < 3)) return 0.0f;
+        return std::max(0.0f, 192.0f * float(r.width()) / float(std::max(1, r.height())) - 256.0f);
+    }
+    void poseHud(const bb::render::Camera& c, std::span<const bb::game::HudItem> items, float edge) {
         const glm::mat4 toWorld = glm::inverse(c.view());
         const float f = 192.0f / std::tan(s.vfovRad() * 0.5f), k = s.zNear * 2.0f / 1000.0f;
         bb::AnimState rigid;
@@ -1428,11 +1885,12 @@ struct App {
             const auto m = scene.templateModels.find(h.tmpl);
             if (!h.shown || m == scene.templateModels.end()) continue;
             const size_t first = actorMeshes.size();
+            const float shift = h.x > 64 ? edge : h.x < -64 ? -edge : 0.0f;
             bb::poseActor(scene.actorModels[m->second], rigid, {0, 0, 0}, h.rot, {h.scaleX, 0x1000, 0x1000}, actorMeshes);
             for (size_t i = first; i < actorMeshes.size(); ++i)
                 for (bb::Vertex& v : actorMeshes[i].vertices) {
                     const float d = std::max(float(h.z) - v.pos[2], 1.0f);  // PS1 z = -engine z
-                    const float sx = 400.0f * v.pos[0] / d + float(h.x), sy = -400.0f * v.pos[1] / d + float(h.y) * 1.6f;
+                    const float sx = 400.0f * v.pos[0] / d + float(h.x) + shift, sy = -400.0f * v.pos[1] / d + float(h.y) * 1.6f;
                     const float dd = d * k;
                     const glm::vec4 w = toWorld * glm::vec4(sx * dd / f, -sy * dd / f, -dd, 1.0f);
                     v.pos[0] = w.x, v.pos[1] = w.y, v.pos[2] = w.z;
@@ -1558,9 +2016,11 @@ struct App {
                         if (i % 4 != 3) t.rgba[i] = uint8_t(std::floor(256.0f * std::pow(float(t.rgba[i]) / 256.0f, gamma)));
                 it->second = t.width && t.height ? r.createImage(t) : 0;
             }
-            if (it->second)
-                r.drawImage(it->second, W * 0.5f + std::trunc(float(sp.x) * sx), H * 0.5f + std::trunc(float(sp.y) * sy),
-                            float(cw) * sx, float(ch) * sy, s.fidelity == Fidelity::Enhanced);
+            if (it->second) {
+                const float edge = hudEdge(tbPlay->world.S[9] != 0) * sx, mid = float(sp.x) + float(cw) * 0.5f;
+                r.drawImage(it->second, W * 0.5f + std::trunc(float(sp.x) * sx) + (mid > 64 ? edge : mid < -64 ? -edge : 0.0f),
+                            H * 0.5f + std::trunc(float(sp.y) * sy), float(cw) * sx, float(ch) * sy, s.fidelity == Fidelity::Enhanced);
+            }
         }
     }
 
@@ -1599,7 +2059,7 @@ struct App {
         if (screen == Screen::Level && play) {
             const bb::game::LitWorld& w = play->world;
             text += std::format("\nPLAY  tick {}  state {} seq {}  anim {}  flags14 {:08x}\nbugs {} {} {}  yaw {}  ground {}  zone {}"
-                                "\ncam eye {} {} {}  yaw {}  zone {}  F1 help  F5 free-fly  F2 fidelity  F4 fog",
+                                "\ncam eye {} {} {}  yaw {}  zone {}  F1 help  F2 sound  F3 music  F4 quit  F5 free-fly  F6 fidelity  F8 fog",
                                 w.ticks, w.p.state, w.p.seq, w.p.anim, w.p.flags14, w.p.pos.x, w.p.pos.y, w.p.pos.z, w.p.yaw,
                                 w.groundY(), w.p.zone, w.cam.eye.x, w.cam.eye.y, w.cam.eye.z, w.cam.yaw, w.camZone);
             if (!r.zoneTable().empty()) {
@@ -1614,12 +2074,12 @@ struct App {
         if (screen == Screen::Level && tbPlay) {
             const bb::game::TbWorld& w = tbPlay->world;
             text += std::format("\nTB PLAY  tick {}  {}  A4 {:02x}  focus {}  cam {}  cooldown {}  music n={}", w.ticks,
-                                w.twoPlayer() ? "2P" : "1P", w.A4, w.focus(), w.camFocus, w.cooldown, w.music);
+                                w.twoPlayer() ? "2P" : "1P", w.GD[0xa4], w.focus(), w.camFocus, w.cooldown, w.music);
             for (const bb::game::TbActor& a : w.actors)
                 text += std::format("\n{} state {} seq {} anim {}  pos {} {} {}  yaw {}  f20 {:08x}  vel {} {} {}",
                                     a.id == 2 ? "bugs" : "taz ", a.rec() ? a.rec()->id : 0, a.seq, a.curAnim, a.pos.x, a.pos.y,
                                     a.pos.z, a.yaw, a.f20, a.vel[0] >> 4, a.vel[1] >> 4, a.vel[2] >> 4);
-            text += std::format("\ncam eye {} {} {}  look {} {} {}  D {}  F1 free-fly  F2 fidelity  F4 fog", w.cam.eye.x,
+            text += std::format("\ncam eye {} {} {}  look {} {} {}  D {}  F1 free-fly  F6 fidelity  F8 fog", w.cam.eye.x,
                                 w.cam.eye.y, w.cam.eye.z, w.cam.look.x, w.cam.look.y, w.cam.look.z, w.cam.dist);
             if (!w.unsupported.empty()) {
                 text += "\nnot interpreted:";
@@ -1734,7 +2194,22 @@ int run(const std::optional<Args>& args) {
             }
         }
 
+        // --playback: bugs.exe loads its /p: file only for a boot into level 0 (TITLE); --record writes at exit.
+        if (!args->record.empty()) {  // the exe parses /p: then /r:, so recording wins
+            app.tape.mode = bb::game::PadTape::Record;
+        } else if (!args->playback.empty()) {
+            app.tape.mode = bb::game::PadTape::Play;
+            if (iequals(level, "TITLE")) {
+                std::ifstream f(args->playback, std::ios::binary);
+                app.tape.data.assign(std::istreambuf_iterator<char>(f), {});
+                if (!f) std::println(stderr, "bbtime: --playback {}: cannot read", args->playback.string());
+            }
+        }
         bb::FixedStep step;
+        if (const char* m = std::getenv("BBTIME_MOTION"); m && std::strchr(m, ':')) {  // see App::MotionTrace
+            app.motion.steps = std::max(1, std::atoi(m));
+            app.motion.f = std::fopen(std::strchr(m, ':') + 1, "w");
+        }
         uint64_t last = SDL_GetTicksNS();
         int frame = 0, musicIdx = app.gameIdx;
         while (app.running) {
@@ -1746,8 +2221,13 @@ int run(const std::optional<Args>& args) {
             app.frameTime += (dt - app.frameTime) * 0.05;
             if (app.autoplayAt < args->autoplay.size() || app.autoplay2At < args->autoplay2.size()) {  // lockstep: 1 tick
                 app.tick(float(step.dt));
-                app.alpha = 1.0f;
                 app.frameDt = float(step.dt);
+                for (int k = 1; k < app.motion.steps; ++k) {  // BBTIME_MOTION: the frames between this tick and the last
+                    app.alpha = float(k) / float(app.motion.steps), app.motion.sub = k;
+                    app.draw();
+                    app.r.present();
+                }
+                app.alpha = 1.0f, app.motion.sub = app.motion.steps;
             } else {
                 for (int n = step.advance(dt); n > 0; --n) app.tick(float(step.dt));
                 app.alpha = step.alpha();
@@ -1757,31 +2237,70 @@ int run(const std::optional<Args>& args) {
             else if (app.screen == Screen::Game) musicIdx = app.gameIdx;
             fs::path track, next;  // menu: highlighted game's track; levels: LitWorld::music (zone table) / TB action 126
             bool paused = false;
+            bb::game::LitWorld::SpeechClip speech;
+            bool tbSpeech = false;  // track = the TB speech clip: played once, its end reported to the world
             if (!args->mute) {
                 // The TB front end never calls PlayMusic (GAMEPLAY_TB §6.3): silent in Original Fidelity; Enhanced keeps
                 // the collection menu's TB track.
                 if (app.screen == Screen::TbFront) {
                     if (app.s.fidelity == Fidelity::Enhanced) track = bbtime::menuTrack(GameId::TimeBusters, args->roots[1]);
                 } else if (app.screen != Screen::Level) track = bbtime::menuTrack(app.games[musicIdx].id, args->roots[musicIdx]);
-                else if (app.tbPlay) track = bbtime::tbLevelTrack(args->roots[1], app.tbPlay->world.music);
-                else if (app.play && (!app.litLoading || app.litLoading->loaded)) {  // silent until the target loaded
+                else if (app.tbPlay) {  // PlayMusic(0x4cca38), stopped in place while paused (0x429180)
+                    const bb::game::TbWorld& w = app.tbPlay->world;
+                    // PlayMusic 0x4291e0 closes the music stream while a speech state runs (S[0x22] != 0), so the
+                    // track restarts from its start afterwards; the speech plays on its own stream (0x42a030), not
+                    // paused by the pause menu, at the same GD+0x98 volume (0x40d440) = the music volume here.
+                    if (w.speechPlaying()) {
+                        track = bbtime::tbSpeechFile(args->roots[1], w.GD[0x93], w.speechClip);
+                        tbSpeech = !track.empty();
+                    } else if (!w.S[0x22]) {
+                        track = bbtime::tbLevelTrack(args->roots[1], w.musicTrack);
+                        paused = w.musicPaused;
+                    }
+                } else if (app.play && (!app.litLoading || app.litLoading->loaded)) {  // silent until the target loaded
                     track = bbtime::litLevelTrack(args->roots[0], app.play->world.music);
                     next = bbtime::litLevelTrack(args->roots[0], app.play->world.musicNext);
                     paused = app.play->world.musicPaused;
+                    // A speech clip takes the music player (0x41e2b0); the track restarts from its start after it.
+                    if (const auto c = app.play->world.speechClip())
+                        if (fs::path f = bbtime::litSpeechFile(args->roots[0], app.play->world.language); !f.empty())
+                            track = std::move(f), next.clear(), speech = *c;
                 }
             }
             const auto modded = [&](const fs::path& t) {  // mod music (music/<game>/<track>.ogg|wav)
                 return bb::modMusic(t.string().starts_with(args->roots[1].string()) ? GameId::TimeBusters : GameId::LostInTime, t);
             };
-            bbtime::playMusic(modded(track), modded(next), paused);
+            // LiT music plays at the config volume's DirectSound attenuation (0x41d5f0, litMusicGain); leaving it for
+            // another track restores the settings' linear music volume (TB front end / collection menu).
+            static bool litGain = false;
+            if (!track.empty() && !args->mute)
+                if (bb::AudioDevice* dev = bbtime::audioDevice()) {
+                    const bool lit = track.string().starts_with(args->roots[0].string());
+                    if (lit) dev->setMusicVolume(bbtime::litMusicGain(app.play ? app.play->world.volume34 : app.args.cfg.musicVolume));
+                    else if (litGain) dev->setMusicVolume(float(bbtime::loadSettings().musicVolume) / 100.0f);
+                    litGain = lit;
+                }
+            if (speech.size) bbtime::playMusic(track, {}, paused, speech.offset, speech.size);
+            else if (tbSpeech) {  // the whole file once; 0x40d9b0 ends S[0x22] 4 when the stream has played out
+                std::error_code ec;
+                bbtime::playMusic(track, {}, false, 0, fs::file_size(track, ec));
+                const bb::AudioDevice* dev = bbtime::audioDevice();
+                app.tbPlay->world.speechEnded = !dev || !dev->musicPlaying();
+            } else bbtime::playMusic(modded(track), modded(next), paused);
             app.draw();
             if (!args->screenshot.empty() && ++frame >= args->frames) {
                 const bool ok = app.r.screenshot(args->screenshot);
-                std::println("bbtime: screenshot {} {} (frame {:.2f} ms)", args->screenshot.string(), ok ? "written" : "FAILED",
-                             app.frameTime * 1000.0);
+                std::println("bbtime: screenshot {} {} (frame {:.2f} ms, app tick {}, LiT world ticks {})", args->screenshot.string(),
+                             ok ? "written" : "FAILED", app.frameTime * 1000.0, app.simTick, app.play ? int(app.play->world.ticks) : -1);
                 app.running = false;
             }
             app.r.present();
+        }
+        if (app.motion.f) std::fclose(app.motion.f);
+        if (!args->record.empty()) {
+            std::ofstream f(args->record, std::ios::binary);  // 0x4095a0 at exit
+            f.write(reinterpret_cast<const char*>(app.tape.data.data()), std::streamsize(app.tape.data.size()));
+            if (!f) std::println(stderr, "bbtime: --record {}: cannot write", args->record.string());
         }
         if (app.pad) SDL_CloseGamepad(app.pad);
         if (app.pad2) SDL_CloseGamepad(app.pad2);

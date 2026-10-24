@@ -159,7 +159,10 @@ def export(path, out):
         tr = struct.unpack("<3i", f[0x10])
         sc = struct.unpack("<i", f[0x12][:4])[0] / 4096  # FUN_004347c0: X word used for all three axes
         rot = struct.unpack("<3h", f[0x11])
-        # ponytail: rotation ignored (every TB 0x20 chunk has 0x1000 x3 = identity, checked by --check)
+        # Tag 0x11 = 3 angles in 4096ths of a turn. Every shipped 0x20 chunk has 0x1000 x3 (a full turn = identity;
+        # --check counts "rot!=identity" over all levels, 0): the loader's rotation is then the identity matrix.
+        if any(r % 0x1000 for r in rot):
+            raise SystemExit(f"{path}: world chunk with non-identity rotation {rot} unsupported")
         for tree, pos, uv, tex, b0, b1 in octree_faces(S[sec][off:off + size], stats):
             faces.append(([tuple(v[i] * sc + tr[i] for i in range(3)) for v in pos], uv, tex, b0))
         summary.append(f"world sec{sec}+{off:#x} size {size:#x} pos {tr} scale {sc} rot {rot} id {f[0x21][:2].hex()}")
@@ -231,7 +234,7 @@ def check(folder):
             refs = []
             if t == 0x20:
                 refs.append(struct.unpack("<II", f[0x24]))
-                agg["rot!=identity"] += struct.unpack("<3h", f[0x11]) != (4096,) * 3
+                agg["rot!=identity"] += any(r % 0x1000 for r in struct.unpack("<3h", f[0x11]))
             elif t == 0x22:
                 refs += [struct.unpack("<II", pl) for tg, pl in tags if tg == 0x24]
                 for tg, pl in tags:

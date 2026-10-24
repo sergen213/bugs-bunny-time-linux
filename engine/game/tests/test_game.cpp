@@ -67,20 +67,105 @@ void testPad() {
     Pad p;
     int pressedTicks = 0;
     for (int t = 0; t < 8; ++t) {
-        padTick(p, {.buttons = PadCross | PadL2});
+        padTick(p, {.buttons = PadCross | PadL2}, false);
         pressedTicks += (p.pressed & PadCross) != 0;
         assert(p.pressed & PadL2);  // level-triggered
     }
     assert(pressedTicks == 3);  // §2.2: ✕ stays pressed for the first 3 ticks
-    padTick(p, {});
-    padTick(p, {.buttons = PadCross});
+    padTick(p, {}, false);
+    padTick(p, {.buttons = PadCross}, false);
     assert(p.pressed & PadCross);  // re-armed after release
-    padTick(p, {.buttons = PadUp});
+    padTick(p, {.buttons = PadUp}, false);
     assert(p.sy == 0x7f && p.sx == 0);
-    padTick(p, {.lx = 0x7f + 49, .ly = 0x80, .analog = true});
+    padTick(p, {.lx = 0x7f + 49, .ly = 0x80, .analog = true}, false);
     assert(p.sx == 0 && !(p.held & PadRight));  // dead zone 50
-    padTick(p, {.lx = 0x7f + 100, .ly = 0x80, .analog = true});
+    padTick(p, {.lx = 0x7f + 100, .ly = 0x80, .analog = true}, false);
     assert(p.sx == 100 && (p.held & PadRight));
+
+    // Remap presets (0x448fa0 / 0x4491c0) = the oracle's words and held words with each physical key held
+    // (local/w13/litin/remap.txt: GD+0x51 poked, level reloaded, f s a d e q r w = □ ○ △ ✕ L1 L2 R1 R2).
+    static constexpr uint16_t kPhys[8] = {PadSquare, PadCircle, PadTriangle, PadCross, PadL1, PadL2, PadR1, PadR2};
+    static constexpr uint16_t kHeld[4][8] = {{128, 32, 16, 64, 4, 1, 8, 2}, {128, 4, 32, 64, 8, 1, 16, 2},
+                                             {4, 8, 16, 128, 32, 1, 64, 2}, {32, 8, 128, 16, 1, 2, 4, 64}};
+    for (uint8_t pr = 0; pr < 4; ++pr) {
+        Pad q;
+        padPreset(q, pr);
+        for (size_t i = 0; i < 8; ++i) {
+            assert(q.remap[i] == kHeld[pr][i]);
+            padTick(q, {.buttons = kPhys[i]}, false);
+            assert(q.held == kHeld[pr][i] && q.raw == kPhys[i]);
+            padTick(q, {.buttons = kPhys[i]}, true);  // paused: no remap
+            assert(q.held == kPhys[i]);
+            padTick(q, {}, false);
+        }
+    }
+    Pad z;
+    padTick(z, {.buttons = PadCross}, false, true);  // level change / scripted player: all zero ...
+    assert(z.held == 0 && z.pressed == 0);
+    padTick(z, {.buttons = PadCross}, true, true);   // ... unless paused
+    assert(z.held == PadCross);
+
+    // Demo stream: {+0x3e, +0x0e, +0x0c, +0x10} per tick, a physical Start adds Select, sticks from the pressed dirs.
+    const std::vector<uint16_t> demo = {PadLeft | PadCross, 0, PadLeft | PadCross, PadLeft | PadCross, PadUp, 7, PadUp, 9};
+    std::span<const uint16_t> left(demo);
+    Pad d;
+    padTick(d, {.buttons = PadStart}, false, false, &left);
+    assert(d.pressed == (PadLeft | PadCross | PadSelect) && d.held == (PadLeft | PadCross | PadSelect) && d.sx == -0x80);
+    padTick(d, {}, false, false, &left);
+    assert(d.pressed == PadUp && d.prev == 7 && d.raw == 9 && d.sy == 0x7f && left.empty());
+    padTick(d, {.buttons = PadCross}, false, false, &left);  // exhausted: zero words
+    assert(d.pressed == 0 && d.held == 0);
+
+    // /r: tape = report bytes 2 / 3 (active-low): the oracle's idle /r:rec1.dat is 4216 x (ff ff); play it back.
+    PadTape rec;
+    rec.mode = PadTape::Record;
+    PadInput a{.buttons = PadCross | PadUp};
+    rec.step(a);
+    PadInput b{};
+    rec.step(b);
+    assert((rec.data == std::vector<uint8_t>{0xef, 0xbf, 0xff, 0xff}) && rec.at == 4);
+    PadTape play{.mode = PadTape::Play, .data = rec.data};
+    PadInput c{.buttons = PadSquare};
+    play.step(c);
+    assert(c.buttons == (PadCross | PadUp));
+    for (int t = 0; t < 3; ++t) c = {.buttons = PadSquare}, play.step(c);  // 1 tick of the file, 2 past its end
+    assert(play.mode == PadTape::Off && c.buttons == 0);
+    c = {.buttons = PadSquare};
+    play.step(c);  // then live
+    assert(c.buttons == PadSquare);
+}
+
+// Pause menu Video / Controls pages (A106-A118, C94) as the oracle (local/w13/litin: desktop 800x600, windowed
+// 640x480: resolution Right Right -> item 5 (1024 x 768: windowed stops on a mode >= the desktop), fog Left -> 1,
+// Apply -> 640 x 480 windowed, fog 1, renderer 2; Keyboard Look <- G, then Crouch <- D swaps with Jump).
+void testMenuConfig() {
+    LitWorld w = synthetic(block({}, {0}), {2600, 0, 2600}, 0);
+    auto A = [&](uint8_t act, uint16_t x, uint16_t y) { w.act({0, 0, 0, act, x, y}, nullptr); };
+    w.modeValid = {false, true, true, true, true, true, false, false};
+    w.deskW = 800, w.deskH = 600;
+    A(108, 0, 3), A(112, 0, 4), A(111, 0, 5), A(113, 0, 6);
+    assert(w.menu[3][2] == 3 && w.menu[4][2] == 2 && w.menu[5][2] == 0 && w.menu[6][2] == 0);
+    A(107, 0, 3), A(107, 0, 3);
+    assert(w.menu[3][2] == 5);
+    A(106, 0, 3), A(107, 0, 3);  // down to 800 x 600 and back
+    assert(w.menu[3][2] == 5);
+    w.menu[4][2] = 1;            // fog Left (A103)
+    A(114, 0, 3), A(115, 0, 4), A(116, 0, 5), A(117, 0, 6), A(118, 0, 3);
+    assert(w.video.width == 640 && w.video.height == 480 && w.video.fullscreen == 0 && w.video.fogDist == 1 &&
+           w.video.renderer == 2 && (w.configChanged & 8));
+
+    auto capture = [&](uint8_t key, int32_t item) {
+        w.menu[2][2] = item;
+        PadInput in{.key = key};
+        w.tick(in);
+        return w.cond({94, 0, 2, 0, 0, 0}, nullptr);
+    };
+    assert(capture(0x22, 0) && w.keyCodes[2] == 0x22 && w.keyNames[2] == "G");      // Look <- G
+    assert(capture(0x20, 1) && w.keyCodes[1] == 0x20 && w.keyCodes[3] == 0x1f);      // Crouch <- D, Jump <- S
+    assert(w.keyNames[1] == "D" && w.keyNames[3] == "S" && !capture(0, 1));
+    w.volume34 = 95;
+    A(122, 0, 0);
+    assert(w.volume34 == 0 && (w.configChanged & 4));
 }
 
 void testJumpArc() {
@@ -96,6 +181,39 @@ void testJumpArc() {
     std::printf("jump: apex %d at tick %d, lands tick %d\n", apex, apexTick, landTick);
     // The rule fires on tick 1 (state 7 chosen after the physics); the arc starts on tick 2.
     assert(apex == 389 && apexTick - 1 == 15 && landTick - 1 == 26);  // §3.3 standard jump
+}
+
+// Enhanced input (BBLIT-Remaster ideas): the jump buffer replays a jump tapped just before landing; the right-stick
+// step turns the camera like L2 / R2 and yields to them; both are off (0) in the exe's behaviour.
+void testEnhancedInput() {
+    const auto land = [](uint8_t buffer, int tapAt) {  // dropped 240: ticks until grounded, then whether he jumped
+        LitWorld w = synthetic(block({}, {0}), {2600, -240, 2600}, 0);
+        w.jumpBuffer = buffer;
+        bool jumped = false;
+        int grounded = -1;
+        for (int t = 0; t < 40; ++t) {
+            w.tick({.buttons = uint16_t(t == tapAt ? PadCross : 0)});
+            if (grounded < 0 && (w.p.flags14 & 2) && w.p.pos.y == 0) grounded = t;
+            jumped |= grounded >= 0 && w.p.state == 7;
+        }
+        return std::pair{grounded, jumped};
+    };
+    const int g = land(0, -1).first;
+    assert(g > 3 && !land(0, -1).second);
+    assert(!land(0, g - 2).second);  // the exe: a tap in the air is lost
+    assert(land(4, g - 2).second);   // buffered: he jumps once grounded
+    assert(!land(4, g - 8).second);  // older than the buffer: lost
+
+    LitWorld w = synthetic(block({}, {0}), {2600, 0, 2600}, 0);
+    for (int t = 0; t < 3; ++t) w.tick({});
+    const int16_t y0 = w.cam.yaw;
+    w.tick({.camStep = 52});
+    assert(int16_t(w.cam.yaw - y0) == 52 && w.cam.lastStep == 52);
+    w.tick({.buttons = PadL2, .camStep = 52});  // L2 wins: +0x26
+    assert(int16_t(w.cam.yaw - y0) == 52 + 0x26);
+    Pad p;
+    padTick(p, {.camStep = 52}, true);  // paused: no step
+    assert(p.camStep == 0);
 }
 
 void testSteps() {
@@ -435,6 +553,80 @@ void testPushL01a(const BzeFile& bze, const Scene& scene) {
     std::printf("L01A pushable block: push 217-301 matches the original (block x 25215 -> 25610)\n");
 }
 
+// L01a crate 234 carried by Bugs vs the original (wave 13, Proton-GE /b04, local/w13/lit/carry/{o_carry.csv,
+// opads.txt}; oracle poke at 103 = before counter 105 here): Up+R1 walks him to it, pick-up move 51 (flagsA 0x20)
+// links it at 225 (flags14 0x800, placed by its own update at 227), held at rest the 0x433380 probe keeps his
+// 0x40000 / its 0x8000 (227-237), Up walks it, pad 0x80 at 361 puts it down (0x1000, state 236 at 387), it slides
+// off the ledge, falls and respawns as a new actor at 601. Every counter 105-1285 of Bugs and 234 matches (rows
+// sampled mid-tick aside).
+void testCarryL01a(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false;
+    w.loadUpdate();
+    auto crate = [&] {  // the respawn (601) is a new actor
+        for (size_t i = 0; i < w.actors.size(); ++i)
+            if (!w.actors[i].dead && w.actors[i].entityId == 234) return i;
+        return size_t(0);
+    };
+    struct At { int cnt; V3 bugs; uint16_t state; uint32_t f14; V3 crate; uint32_t cf14; int cstate; };
+    const At want[] = {{225, {10915, -3056, 26920}, 41, 0x40002, {10765, -3056, 26890}, 0x8800, 1},
+                       {227, {10915, -3056, 26920}, 76, 0x40002, {10840, -3098, 26988}, 0x8000, 129},
+                       {237, {10915, -3056, 26920}, 76, 0x40002, {10843, -3092, 27008}, 0x8000, 129},
+                       {239, {10915, -3056, 26920}, 76, 2, {10848, -3120, 27002}, 0, 129},
+                       {341, {10704, -3056, 27198}, 74, 2, {10660, -3190, 27266}, 0, 129},
+                       {385, {10698, -3056, 27202}, 80, 0x40002, {10768, -3299, 27315}, 0x9000, 129},
+                       {387, {10698, -3056, 27202}, 80, 0x40002, {10768, -3299, 27315}, 0x8000, 236},
+                       {441, {10698, -3056, 27202}, 1, 2, {10012, -2420, 28422}, 0x41, 236},
+                       {519, {10698, -3056, 27202}, 1, 2, {8920, -1843, 30021}, 0x240, 236},
+                       {601, {10698, -3056, 27202}, 1, 2, {10760, -3116, 26880}, 0x200, 2},
+                       {1285, {10698, -3056, 27202}, 1, 2, {10760, -3056, 26880}, 2, 1}};
+    constexpr std::pair<int, uint16_t> pads[] = {{0, 0},     {201, 0x1008}, {231, 0},   {301, 0x1000}, {341, 0},
+                                                 {361, 0x80}, {373, 0},     {401, 0x1000}, {411, 0},  {421, 8},
+                                                 {431, 0},   {473, 8},      {481, 0}};
+    size_t k = 0, pi = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        while (pi + 1 < std::size(pads) && pads[pi + 1].first <= cnt) ++pi;
+        if (cnt == 105) w.p.pos = {10926, -3070, 26699};
+        w.tick({.buttons = pads[pi].second});
+        if (cnt != want[k].cnt) continue;
+        const At& a = want[k++];
+        const size_t ci = crate();
+        const LitActor& c = w.actors[ci];
+        const ActorDef& d = w.defs[size_t(c.def)];
+        assert(w.p.pos == a.bugs && w.p.state == a.state && w.p.flags14 == a.f14 && c.pos == a.crate && c.flags14 == a.cf14 &&
+               c.state >= 0 && d.states[size_t(c.state)].id == a.cstate);
+        assert((w.p.rider == int32_t(ci)) == (cnt >= 225 && cnt < 385));
+    }
+    std::printf("L01a crate 234: pick-up, carry, put-down and respawn match the original (counters 105-1285)\n");
+}
+
+// L02A1 left through its exit volume (8774, -5370, 25056: G[0x29] = 2, next level 10) during the intro, as the oracle
+// (local/w13/lit/l02a2/o_early.txt, Proton-GE /b09, Bugs poked there at counter 3): the cut-scene lock G[0x36] is 31
+// when L02A2 loads and 0 from its first counter (0x431160 clears GD+0x76 with the player's camera reset), so L02A2
+// has no bars; the direct /b10 boot (o_b10.txt) and the late exit (o_from_l02a1.txt, lock shrunk to 0) neither.
+void testExitL02a1(const std::filesystem::path& dir) {
+    const BzeFile b1 = loadBze(dir / "L02A1.bze");
+    const Scene s1 = buildLitScene(b1, "L02A1");
+    LitWorld w = LitWorld::load(b1, &s1);
+    w.sfx.device = false;
+    w.loadUpdate();
+    w.p.pos = {9332, -5470, 25310};
+    for (int t = 0; t < 40 && w.nextLevel < 0; ++t) w.tick({});
+    assert(w.nextLevel == 10 && w.G[0x29] == 2 && w.G[0x36] > 0 && w.G[0x36] < 0x80);
+    const auto globals = w.G;
+    const BzeFile b2 = loadBze(dir / "L02A2.bze");
+    const Scene s2 = buildLitScene(b2, "L02A2");
+    LitWorld v = LitWorld::load(b2, &s2);
+    v.sfx.device = false;
+    v.G = globals;
+    v.loadUpdate();
+    assert(v.G[0x36] == 0);
+    for (int t = 0; t < 60; ++t) v.tick({}), assert(v.G[0x36] == 0 && v.letterbox == 0);
+    assert(v.p.pos == V3(2990, -1260, 2507) && v.p.state == 1);
+    std::printf("L02A1 exit mid-intro -> L02A2: the cut-scene lock is cleared at the load as the original\n");
+}
+
 // L02A1's chain (type 8 at (13039, -5569, 23412), 0x43efc0) and Bugs on it vs the original (RUNTIME_REFERENCE §13,
 // local/wine/compare/litrope/r3.csv, Proton-GE /b09): Bugs poked onto the jetty at counter 301 (the chain starts
 // swinging once active), into the air at the chain at 601; falls (14), grabs it at 605 (31, local height 700), rides
@@ -571,6 +763,72 @@ void testBirdL02a2(const std::filesystem::path& file) {
 // turns toward Bugs and starts its throw (state 225, rand gate 32600) at 201, and projectile 100 appears at 255 in
 // hop state 171 where the original puts it (its first move pushed out of the thrower's box, w9lit7/t_L04A1.txt),
 // moving (−6, −9, −9) a tick like the original.
+// L02A1 intro (/b09, local/wine/compare/w13lit/steer/o_nodes_L02A1.csv): a camera node of a non-camera actor holds
+// the view (0x4b3940 = 0x142, no 0x200) from counter 3 to 265 and every +0x22 timer stands still (Bugs at 2) until
+// 0x44c4b0 stops setting 0x100 (0x42 at 267); then they count again (3 at 269, 19 at 301).
+void testCameraNodeTimersL02a1(const std::filesystem::path& file) {
+    const BzeFile bze = loadBze(file);
+    const Scene scene = buildLitScene(bze, "L02A1");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false;
+    w.loadUpdate();
+    struct Row { int cnt; uint32_t flags; uint16_t timer; };
+    constexpr Row want[] = {{3, 0x142, 2},   {5, 0x142, 2},  {101, 0x142, 2}, {265, 0x142, 2},
+                            {267, 0x42, 2},  {269, 0x40, 3}, {271, 0x40, 4},  {301, 2, 19}};
+    size_t k = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        w.tick({});
+        if (cnt != want[k].cnt) continue;
+        const Row& r = want[k++];
+        if (w.cam.flags != r.flags || w.p.timer != r.timer)
+            std::printf("nodes %d: bbtime flags %x timer %d | orig %x %d\n", r.cnt, w.cam.flags, w.p.timer, r.flags, r.timer);
+        assert(w.cam.flags == r.flags && w.p.timer == r.timer);
+    }
+    std::printf("L02A1 intro camera node: view flags and stopped timers match the original (counters 3-301)\n");
+}
+
+// Checkpoint across a level change (local/wine/compare/w13lit/steer/ckpt.txt): L01A's start trigger sets 0x4b2460 to
+// (23700, -640, 9655) yaw 4096; GD+0 poked to 18 (L02C2) with 0x4b39bc = 1 loads L02C2, which has no writer, and the
+// original keeps L01A's values there for the whole sampled play (the app carries them: carryCheckpoint).
+void testCheckpointCarry(const std::filesystem::path& dir) {
+    const BzeFile a = loadBze(dir / "L01a.bze");
+    const Scene sa = buildLitScene(a, "L01A");
+    LitWorld w = LitWorld::load(a, &sa);
+    w.sfx.device = false;
+    w.loadUpdate();
+    for (int t = 0; t < 50; ++t) w.tick({});
+    assert(w.checkpoint() == (V3{23700, -640, 9655}) && w.checkpointYaw() == 4096);
+    const BzeFile b = loadBze(dir / "L02C2.bze");
+    const Scene sb = buildLitScene(b, "L02C2");
+    LitWorld v = LitWorld::load(b, &sb);
+    v.sfx.device = false;
+    assert(v.checkpoint() == V3{} && v.checkpointYaw() == 0);  // no writer at the load: the boot value without a carry
+    v.carryCheckpoint(w.checkpoint(), w.checkpointYaw());
+    v.loadUpdate();
+    for (int t = 0; t < 300; ++t) {
+        v.tick({});
+        assert(v.checkpoint() == (V3{23700, -640, 9655}) && v.checkpointYaw() == 4096);
+    }
+    std::printf("checkpoint carried from L01A into L02C2 as the original\n");
+}
+
+// L04A1 A17 zone message (0x42cba0): with Bugs in zone 30 the level logic posts zone 31 every tick; the queue
+// 0x4b2480 holds {31} at every oracle sample (local/wine/compare/w13lit/steer/zq_L04A1.txt, counters 107-2051), cleared
+// before each tick's behaviours (0x447d40). render.test_zones checks the walk flags zone 31's portal by it.
+void testZoneQueueL04a1(const std::filesystem::path& file) {
+    const BzeFile bze = loadBze(file);
+    const Scene scene = buildLitScene(bze, "L04A1");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false;
+    w.loadUpdate();
+    for (int t = 0; t < 120; ++t) {
+        w.tick({});
+        assert(w.p.zone == 30 && w.zoneMessages == std::vector<uint16_t>{31});
+    }
+    std::printf("L04A1 A17 zone queue {31} matches the original\n");
+}
+
 void testThrowerL04a1(const std::filesystem::path& file) {
     const BzeFile bze = loadBze(file);
     const Scene scene = buildLitScene(bze, "L04A1");
@@ -706,8 +964,61 @@ void testSeesawL01a(const BzeFile& bze, const Scene& scene) {
         const Row& r = want[k++];
         assert(w.p.pos == r.pos && w.p.state == r.state && w.p.flags14 == r.f14 && w.actors[s].rot[2] == r.roll && (w.p.platform >= 0) == r.riding);
         assert(r.cnt <= 165 || w.p.local.x == r.lx);
+        if (r.cnt == 165) {  // 0x44b4f0's first pass: actor shadows on the platforms' top planes as the oracle's 0x4efac0
+            // records (local/w13/lit/shadow/o_seesaw_drop.txt: +0x68 scale, +0x78 rot, +0x80 pos, +0x34 = the platform)
+            const auto sh = w.shadows();
+            auto has = [&](V3 at, int32_t scale, std::array<int16_t, 3> rot) {
+                return std::ranges::any_of(sh, [&](const LitWorld::Shadow& x) { return x.pos == at && x.scale == scale && x.rot == rot; });
+            };
+            assert(has({20180, -2710, 7070}, 2048, {4096, 1024, 0}) && has({21050, -2229, 7910}, 2612, {4096, 2104, 4096}) &&
+                   has({20990, -1600, 9005}, 3616, {0, 4096, 0}));
+            assert(sh[0].owner == -1 && sh[0].pos.y == -2710 && sh[0].scale == (-2742 + 2710) * 4 + 0x1000 &&
+                   sh[0].rot == (std::array<int16_t, 3>{4096, 1024, 0}));  // Bugs falling onto the seesaw: on its top plane
+        }
     }
-    std::printf("L01A seesaw: tilt, slide, fall-off match the original (counters 165-301)\n");
+    std::printf("L01A seesaw: tilt, slide, fall-off and the shadows on platforms match the original (counters 165-301)\n");
+}
+
+// Stick steering while riding (0x43a880 attached branch, +0xc4 = the platform's coordinate): the L01A seesaw ride of
+// testSeesawL01a with Left held from counter 173 to 213 and Right from 225 to 257 (oracle local/wine/compare/w13lit/
+// steer/o_steer.csv, RUNTIME_REFERENCE §18): no lean, the turn goes to the local yaw (+0x19e, −1024 on boarding =
+// his yaw − the seesaw's), his yaw is the chain heading; he walks off its end at 203 and turns on the ground after.
+void testSeesawSteerL01a(const BzeFile& bze, const Scene& scene) {
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false;
+    w.loadUpdate();
+    struct Row { int cnt; V3 pos; int16_t yaw; uint16_t state; int16_t localYaw; };
+    constexpr Row want[] = {
+        {167, {20150, -2707, 7205}, 0, 14, -1024}, {169, {20150, -2683, 7192}, 0, 1, -1024}, {171, {20150, -2659, 7179}, 0, 1, -1024}, {173, {20150, -2633, 7166}, 0, 5, -1024},
+        {175, {20150, -2607, 7157}, 356, 5, -673}, {177, {20156, -2581, 7155}, 620, 5, -413}, {179, {20171, -2556, 7153}, 812, 5, -220}, {181, {20195, -2530, 7149}, 951, 5, -77},
+        {183, {20226, -2501, 7140}, 1052, 5, 30}, {185, {20262, -2468, 7126}, 1124, 5, 110}, {187, {20301, -2430, 7108}, 1176, 5, 170}, {189, {20342, -2385, 7086}, 1210, 5, 214},
+        {191, {20384, -2334, 7064}, 1232, 5, 246}, {193, {20427, -2314, 7034}, 1251, 5, 267}, {195, {20471, -2293, 7002}, 1261, 5, 279}, {197, {20516, -2271, 6968}, 1265, 5, 283},
+        {199, {20561, -2248, 6934}, 1263, 5, 281}, {201, {20606, -2226, 6900}, 1256, 5, 273}, {203, {20651, -2203, 6866}, 1248, 5, 264}, {205, {20696, -2179, 6849}, 1237, 7, 264},
+        {207, {20733, -2218, 6835}, 1224, 7, 264}, {209, {20762, -2257, 6826}, 1214, 7, 264}, {211, {20791, -2296, 6817}, 1206, 7, 264}, {213, {20820, -2333, 6808}, 1200, 7, 264},
+        {215, {20820, -2369, 6808}, 1196, 7, 264}, {217, {20820, -2403, 6808}, 1193, 7, 264}, {219, {20820, -2435, 6808}, 1191, 7, 264}, {221, {20820, -2464, 6808}, 1189, 7, 264},
+        {223, {20820, -2464, 6808}, 1188, 7, 264}, {225, {20820, -2456, 6808}, 1699, 7, 264}, {227, {20819, -2440, 6800}, 2082, 7, 264}, {229, {20812, -2416, 6787}, -1727, 7, 264},
+        {231, {20798, -2384, 6774}, -1511, 7, 264}, {233, {20779, -2346, 6763}, -1349, 7, 264}, {235, {20756, -2300, 6755}, -1228, 7, 264}, {237, {20730, -2248, 6750}, -1137, 7, 264},
+        {239, {20703, -2190, 6748}, -1069, 7, 264}, {241, {20675, -2126, 6748}, -1018, 7, 264}, {243, {20646, -2058, 6749}, -980, 7, 264}, {245, {20616, -1986, 6752}, -951, 7, 264},
+        {247, {20586, -1912, 6756}, -929, 7, 264}, {249, {20556, -1836, 6761}, -913, 7, 264}, {251, {20525, -1760, 6766}, -901, 7, 264}, {253, {20494, -1690, 6772}, -892, 7, 264},
+        {255, {20463, -1620, 6778}, -885, 7, 264}, {257, {20432, -1600, 6784}, -880, 7, 264}, {259, {20427, -1600, 6782}, -876, 7, 264}, {261, {20419, -1600, 6782}, -873, 7, 264},
+        {263, {20411, -1600, 6783}, -871, 7, 264}, {265, {20404, -1600, 6782}, -869, 7, 264}, {267, {20399, -1600, 6782}, -868, 7, 264}, {269, {20395, -1600, 6782}, -867, 7, 264},
+        {271, {20392, -1600, 6782}, -866, 1, 264}, {273, {20390, -1600, 6782}, -863, 1, 264}, {275, {20389, -1600, 6782}, -863, 1, 264},
+    };
+    size_t k = 0;
+    int bad = 0;
+    for (int t = 0; k < std::size(want); ++t) {
+        const int cnt = 2 * t + 3;
+        if (cnt == 153) w.p.pos = {20150, -2780, 7205};
+        w.tick({.buttons = uint16_t(cnt >= 173 && cnt <= 213 ? PadLeft : cnt >= 225 && cnt <= 257 ? PadRight : 0)});
+        if (cnt != want[k].cnt) continue;
+        const Row& r = want[k++];
+        const bool ok = w.p.pos == r.pos && w.p.yaw == r.yaw && w.p.state == r.state && (r.cnt > 201 || w.p.localYaw == r.localYaw);
+        if (!ok && bad++ < 40)
+            std::printf("steer %d: bbtime (%d,%d,%d) yaw %d st %d ly %d | orig (%d,%d,%d) yaw %d st %d ly %d\n", r.cnt, w.p.pos.x, w.p.pos.y,
+                        w.p.pos.z, w.p.yaw, w.p.state, w.p.localYaw, r.pos.x, r.pos.y, r.pos.z, r.yaw, r.state, r.localYaw);
+    }
+    assert(bad == 0);
+    std::printf("L01A seesaw steering: local-yaw turn, chain heading and walk-off match the original (counters 167-275)\n");
 }
 
 // Health 0 -> death state (HUD 0x44acc0), clip end -> respawn at the checkpoint with health 6 (§3.6). L01a's
@@ -787,6 +1098,7 @@ void sweep(const std::filesystem::path& dir) {
         }
         ++loaded;
         actors += int(w.actors.size());
+        assert(w.demo.empty());  // no PC LiT BZE carries a demo stream (chunk 0x47 tag 0x48; DEMO* levels are PS1-only)
         // 900 ticks (was 240, which missed late items such as L02A2 Bugs' anim-17 events naming the absent template
         // 508 at tick 379): the app smoke's `--autoplay 'U*200,L*150,UX*20'`, then run right kicking.
         for (int t = 0; t < 900; ++t)
@@ -999,6 +1311,7 @@ void probeEnemy(const BzeFile& bze, const Scene& scene) {
                             a.timer, a.flags18, a.wander, a.type, a.anim, a.animState.frame, a.animState.countdown);
                 if (a.handSet) std::printf(":h%d,%d,%d", a.hand.x, a.hand.y, a.hand.z);  // +0x58
                 if (a.parent >= 0) std::printf(":p%u", w.actors[size_t(a.parent)].entityId);  // +0x70 parent
+                else if (a.parent == -2) std::printf(":pB");                                     // carried by Bugs
                 if (!a.animState.parts.empty())  // root part rot y / flags (w9lit5 poke_trace r token)
                     std::printf(":r%d/%x", a.animState.parts[0].rot[1], a.animState.parts[0].flags);
             }
@@ -1012,6 +1325,11 @@ void probeEnemy(const BzeFile& bze, const Scene& scene) {
             std::printf(" L%d,%d,%d P%d", w.p.local.x, w.p.local.y, w.p.local.z, w.p.platform);  // +0x1a4.. / +0x70
         }
         if (std::getenv("PROBE_RATE")) std::printf(" R%d/%d", w.rate().first, w.rate().second);  // 0x4b3b8c / 0x4b3c44
+        if (const char* g = std::getenv("PROBE_G")) std::printf(" G%s=%d cf%x", g, w.G[size_t(std::strtol(g, nullptr, 16)) & 0xff], w.cam.flags);
+        if (std::getenv("PROBE_SHADOW"))  // shadows() (0x44bb50 records: owner entity, pos, scale, rot)
+            for (const LitWorld::Shadow& sh : w.shadows())
+                std::printf(" S%d:%d,%d,%d:%d:%d,%d,%d", sh.owner >= 0 ? int(w.actors[size_t(sh.owner)].entityId) : -1, sh.pos.x, sh.pos.y,
+                            sh.pos.z, sh.scale, sh.rot[0], sh.rot[1], sh.rot[2]);
         std::printf("\n");
     }
 }
@@ -1113,13 +1431,68 @@ void testGateLs01(const std::filesystem::path& dir) {
     std::printf("LS01 clock-gate children collapse under anim 270 and show 1x clock for era 1 as the original\n");
 }
 
+// LS01 texture links and rand (wave 13; Proton-GE /b03, local/w13/lit/rand/{ls01_a.pkl.gz,ls01_alias.pkl.gz}): the
+// only rand() caller in LS01 is 0x4455e0's probability gate of type-2 actor 333 (2 draws a tick until one passes);
+// the flashing time-machine lights and the vortex are texture links 231 … 442 that the type-2 / type-20 actors write
+// into the alias table 0x4e5e80 (0x438830). Every counter 3–3001: rand seed and the 13 aliases (original texture
+// ids) hashed (FNV-1a over counter, seed, ids) = the oracle's digest; spot checks at the side-by-side counters.
+void testLinksLs01(const std::filesystem::path& dir) {
+    const BzeFile bze = loadBze(dir / "LS01.bze");
+    const Scene scene = buildLitScene(bze, "LS01");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false, w.level = 3;
+    w.loadUpdate();
+    constexpr uint16_t kLinks[] = {231, 256, 280, 295, 307, 313, 321, 331, 333, 365, 389, 390, 442};
+    const auto texId = [&](uint16_t link) {
+        const auto a = std::ranges::find(scene.textureAnims, link, &TextureAnim::linkId);
+        const auto r = w.textureLinks.find(link);
+        assert(a != scene.textureAnims.end() && r != w.textureLinks.end() && !a->records.empty());
+        const std::string& n = scene.textures[size_t(a->records[r->second % a->records.size()])].name;
+        return uint32_t(std::stoul(n.substr(n.rfind('/') + 1)));
+    };
+    uint64_t h = 0xcbf29ce484222325;
+    const auto mix = [&](uint32_t v) {
+        for (int k = 0; k < 4; ++k) h = (h ^ ((v >> (8 * k)) & 0xff)) * 0x100000001b3;
+    };
+    for (int t = 0; 2 * t + 3 <= 3001; ++t) {
+        w.tick({});
+        const int cnt = 2 * t + 3;
+        mix(uint32_t(cnt)), mix(w.rand_.seed);
+        for (const uint16_t l : kLinks) mix(texId(l));
+        if (cnt == 683) assert(w.rand_.seed == 0x0914bb87 && texId(231) == 470 && texId(256) == 478 && texId(331) == 495);
+        if (cnt == 1063) assert(w.rand_.seed == 0x3d8499cb && texId(231) == 471 && texId(280) == 483 && texId(321) == 493);
+    }
+    assert(h == 0x63f3576835023838);
+    std::printf("LS01 rand stream and texture links (time-machine lights, vortex) match the original every counter to 3001\n");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPad();
     testJumpArc();
+    testEnhancedInput();
     testSteps();
     testFall();
     testLogic();
+    testMenuConfig();
+    {  // window keys F2 / F3 (0x40e270): volume 0 <-> the kept one (100 when the kept one is below 1); F3 stops the
+       // stream and restarts the stopped track
+        LitWorld w;
+        w.sfx.device = false;
+        w.music = 7;
+        w.volume30 = 60;
+        w.soundKey();
+        assert(w.volume30 == 0 && w.volume30Kept == 60);
+        w.soundKey();
+        assert(w.volume30 == 60);
+        w.volume30 = 0, w.volume30Kept = 0;
+        w.soundKey();
+        assert(w.volume30 == 100);
+        w.musicKey();
+        assert(w.volume34 == 0 && w.volume34Kept == 100 && w.music == 0);
+        w.musicKey();
+        assert(w.volume34 == 100 && w.music == 7);
+    }
     const char* env = std::getenv("BBTIME_DATA");
     if (!env || !*env) { std::printf("BBTIME_DATA unset: real-data checks skipped\n"); return 0; }
     const std::filesystem::path data = env;
@@ -1144,18 +1517,35 @@ int main() {
     testHud(bze, scene);
     testEnemyL01a(bze, scene);
     testPushL01a(bze, scene);
+    testCarryL01a(bze, scene);
+    testExitL02a1(file.parent_path());
     testRopeL02a1(file.parent_path() / "L02A1.bze");
     testFloatL01d1(file.parent_path() / "L01d1.bze");
     testBirdL02a2(file.parent_path() / "L02A2.bze");
+    testZoneQueueL04a1(file.parent_path() / "L04A1.bze");
+    testCheckpointCarry(file.parent_path());
+    testCameraNodeTimersL02a1(file.parent_path() / "L02A1.bze");
     testThrowerL04a1(file.parent_path() / "L04A1.bze");
     testCartL04e(file.parent_path() / "l04e.bze");
     testDeath(bze, scene);
     testShakeL01a(bze, scene);
     testSeesawL01a(bze, scene);
+    testSeesawSteerL01a(bze, scene);
     testRateL03c1(file.parent_path());
     testFocusL03acom(file.parent_path() / "L03ACOM.bze");
     testCarriedLs01(file.parent_path());
     testGateLs01(file.parent_path());
+    {  // LB02 (/b53) move list in memory (Wine, local/w13/lit/lb02_moves.txt): 26 nodes 28 apart, head = move 2; the
+       // trigger-0x2000 "move" at head + 2 (state 1's first move id) reads u16 +6 = 2, byte +8 = 2 (no 0x40).
+        const BzeFile b = loadBze(file.parent_path() / "LB02.bze");
+        const Scene sc = buildLitScene(b, "LB02");
+        const LitWorld w = LitWorld::load(b, &sc);
+        assert(w.moveImage.size() == 26 * 28 && w.moves[0].id == 2 && w.states[0].id == 1 && w.states[0].moves[0] == 2);
+        assert(w.moveImage[8] == 2 && w.moveImage[9] == 0 && w.moveImage[10] == 2);
+        constexpr uint8_t node5[24] = {0x98, 0, 0x7f, 0, 2, 8, 0x9d, 0, 1, 0, 0, 0xc0};  // move 152 as read under Wine
+        assert(std::equal(std::begin(node5), std::end(node5), w.moveImage.begin() + 5 * 28 + 4));
+    }
+    testLinksLs01(file.parent_path());
     {  // L04B3 actor 98 hops onto pillar 57 and rides it (actor contact 0x433500, flagsB/flags8 riders), turns there
        // through its local yaw (local/wine/compare/w9lit6/o_L04B3.csv: every counter 3-341 equal for 98 / 57 / 269);
        // its anim-233 event spawns ball 100 at its hand, whose first move (x, x >> 16, y) is pushed out of 98's box

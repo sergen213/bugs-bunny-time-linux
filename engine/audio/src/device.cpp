@@ -63,10 +63,11 @@ void AudioDevice::queue(unsigned buffer) {
     alSourceQueueBuffers(musicSrc_, 1, &buffer);
 }
 
-void AudioDevice::playMusic(const std::filesystem::path& xa, bool loop) {
+void AudioDevice::playMusic(const std::filesystem::path& xa, bool loop, uint64_t offset, uint64_t size) {
     if (!ctx_) return;
     stopMusic();
     music_.emplace(xa);
+    if (size) music_->clip(offset, size);
     loop_ = loop;
     for (unsigned b : musicBufs_) queue(b);
     alSourcef(musicSrc_, AL_GAIN, musicGain_);
@@ -114,8 +115,11 @@ void AudioDevice::playSfx(const AiffSound& s) {
 void AudioDevice::sfx(const SfxCmd& c) {
     if (!ctx_) return;
     const auto it = keyed_.find(c.key);
-    if (c.op == SfxCmd::Volume) {
-        if (it != keyed_.end()) alSourcef(it->second.src, AL_GAIN, dsGain(c.volume));
+    if (c.op == SfxCmd::Volume || c.op == SfxCmd::Pause || c.op == SfxCmd::Resume) {
+        if (it == keyed_.end()) return;
+        if (c.op == SfxCmd::Volume) alSourcef(it->second.src, AL_GAIN, dsGain(c.volume));
+        else if (c.op == SfxCmd::Pause) alSourcePause(it->second.src);
+        else alSourcePlay(it->second.src);  // from the paused position
         return;
     }
     if (it != keyed_.end()) {
@@ -160,7 +164,7 @@ void AudioDevice::update() {
     auto finished = [](Voice v) {
         ALint st = 0;
         alGetSourcei(v.src, AL_SOURCE_STATE, &st);
-        if (st == AL_PLAYING) return false;
+        if (st == AL_PLAYING || st == AL_PAUSED) return false;
         drop(v.src, v.buf);
         return true;
     };

@@ -88,8 +88,9 @@ std::filesystem::path installedArtifact(const std::filesystem::path& installRoot
 // across the hand-off (the inner AppImage runtime overwrites APPIMAGE).
 inline constexpr const char* kOriginEnv = "BBTIME_ORIGIN_APPIMAGE";
 // The user's AppImage this launcher was started from: kOriginEnv, else APPIMAGE unless it lies inside installRoot,
-// else (hand-off from a pre-0.10.1 launcher without kOriginEnv) the first ancestor process whose APPIMAGE is outside
-// installRoot. Empty when not started from an AppImage.
+// else (kHandoffEnv set: hand-off from a pre-0.10.1 launcher without kOriginEnv) the AppImage file still mounted by a
+// FUSE child of this process or an ancestor (argv[0] absolute, outside installRoot, AppImage magic "AI\x02" at byte 8).
+// Empty when not started from an AppImage.
 std::filesystem::path originAppImage(const std::filesystem::path& installRoot);
 // Replaces `origin` in place by the AppImage `self` (copy beside it + rename, mode kept, symlinks resolved), so every
 // menu entry / desktop file / manager record pointing at it now starts `self`. Only for a hand-off (origin older than

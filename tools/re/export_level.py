@@ -109,7 +109,7 @@ def model_faces(d, base, stats):
 
 
 def transform(pos, tr, scale):
-    # ponytail: rotation ignored (all LiT world chunks use 0x1000 = 360 deg); add RotMatrix if needed
+    # Rotation is identity in every LiT world chunk (checked where the chunk is read, as level.cpp does).
     return tuple(pos[i] * scale + tr[i] for i in range(3))
 
 
@@ -155,25 +155,26 @@ def main():
 
     tex_refs, world, actors = [], [], []
     if kind == "tb":
-        # ponytail: TB tag lengths are not tabulated yet; locate the texture chunk '2c 28' + tags '29'
-        # (bblit2 FUN_004347c0) by pattern. Geometry uses another format (MODELS.md §10) -> textures only.
-        p = s1.find(b"\x2c\x28\x29") + 2
-        while p > 1 and s1[p] == 0x29:
-            o, v = struct.unpack_from("<II", s1, p + 1)
-            tex_refs.append((o, v & 0xfff))
-            p += 9
+        # TB section 1 is walked by tb_sec1's tag-length tables (bblit2 FUN_004347c0): texture chunk 0x28, tags 0x29
+        # {offset, id} into the section read last. Geometry uses another format (tb_world.py, MODELS.md §10).
+        import tb_world
+        S, chunks = tb_world.level(a.bze)
+        tex_refs = [(o, v & 0xfff, S[sec]) for t, _, tags, sec in chunks if t == 0x28
+                    for o, v in (struct.unpack("<II", pl) for tg, pl in tags if tg == 0x29)]
     for off, k, t, tags in (sec1.walk(s1) if kind == "lit" else []):
         if k.startswith("unknown"):
             summary.append(f"sec1 walk stopped: {k} at {off:#x}")
             break
         if t == 0x29:
-            tex_refs += [struct.unpack("<II", pl) for tg, pl in tags if tg == 0x2a]
+            tex_refs += [struct.unpack("<II", pl) + (s3,) for tg, pl in tags if tg == 0x2a]
         elif t == 0x20:
             d = dict(tags)
             o, n = struct.unpack("<II", d[0x24])
             tr = struct.unpack("<3i", d.get(0x10, bytes(12)))
             sc = struct.unpack("<i", d.get(0x12, b"\0\x10\0\0")[:4])[0] / 4096
             rot = struct.unpack("<3h", d.get(0x11, b"\0\x10" * 3))
+            if any(r % 0x1000 for r in rot):
+                raise SystemExit(f"world chunk @sec1+{off:#x}: non-identity rotation {rot} unsupported")
             world.append((off, o, n, tr, sc, rot))
         elif t == 0x22:
             for tg, pl in tags:
@@ -182,9 +183,9 @@ def main():
 
     # textures
     texsizes, thumbs, modes = {}, [], {}
-    for o, tid in tex_refs:
+    for o, tid, sec in tex_refs:
         try:
-            im, info = decode_tim(s3, o)
+            im, info = decode_tim(sec, o)
         except ValueError as e:  # mode 3 (24-bit): FUN_00420d10 rejects it too
             summary.append(f"texture {tid} @sec3+{o:#x}: {e}")
             continue

@@ -43,7 +43,14 @@ bool inBox(const LitActor& a, const V3& q, int32_t grow, int32_t up, int32_t dow
            ly >= a.box[4] - a.inflate - up && ly <= a.box[1] + a.inflate + down;
 }
 
-// 0x433380's point test: q within the +0x30 pre-test radius of o, then in o's yaw frame inside its box grown by inflate + 4
+// q − o's position turned into o's frame: 0x407b90 of (0x1000 − rot) (Rz·Ry·Rx), applied to the s16 vector (0x4081c0).
+V3 toLocal(const LitActor& o, int32_t x, int32_t y, int32_t z) {
+    Mat m;
+    rotMatrixZYX(m, 0x1000 - o.rot[0], 0x1000 - o.yaw, 0x1000 - o.rot[2]);
+    return apply16(m, {x, y, z});
+}
+
+// 0x433380's point test: q within the +0x30 pre-test radius of o, then in o's frame inside its box grown by inflate + 4
 // horizontally (heights not grown).
 bool pointInBox(const LitActor& o, const V3& q) {
     const auto& b = o.box;
@@ -51,7 +58,7 @@ bool pointInBox(const LitActor& o, const V3& q) {
     const int32_t dx = int16_t(q.x - o.pos.x), dy = int16_t(q.y - o.pos.y), dz = int16_t(q.z - o.pos.z);
     const int32_t g = o.inflate + 4;
     if (uint32_t(dz * dz + dx * dx) > o.radius2) return false;
-    const V3 l = rotY(int16_t(0x1000 - o.yaw), dx, dy, dz);
+    const V3 l = toLocal(o, dx, dy, dz);
     return b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= l.y && l.y <= b[1];
 }
 
@@ -78,6 +85,31 @@ std::optional<V3> partOriginQ12(const AnimState& st, size_t i, const V3& pos, co
         k = size_t(p.parent);
     }
     return local;
+}
+
+// The matrix of part i's coordinate chain as 0x4393e0's f3 0x20 builds it: identity, then MulMatrix 0x408490
+// (M = level · M, s16 Q12, each product >> 12) of every level from the part up to the actor root (RotMatrix · Scale as
+// partOriginQ12).
+static Mat partMatrixQ12(const AnimState& st, size_t i, const std::array<int16_t, 3>& rot, const std::array<int32_t, 3>& scale) {
+    Mat out;
+    auto level = [&](const std::array<int32_t, 3>& r, const std::array<int32_t, 3>& s) {
+        Mat l;
+        rotMatrixXYZ(l, r[0], r[1], r[2]);
+        for (size_t k = 0; k < 9; ++k) l.m[k] = int16_t((l.m[k] * s[k % 3]) >> 12);
+        Mat m;
+        for (size_t r0 = 0; r0 < 3; ++r0)
+            for (size_t c = 0; c < 3; ++c)
+                m.m[r0 * 3 + c] = int16_t((l.m[r0 * 3] * out.m[c] + l.m[r0 * 3 + 1] * out.m[3 + c] + l.m[r0 * 3 + 2] * out.m[6 + c]) >> 12);
+        out.m = m.m;
+    };
+    for (size_t k = i, n = 0; k < st.parts.size() && n <= st.parts.size(); ++n) {
+        const TodPart& p = st.parts[k];
+        level(p.rot, p.scale);
+        if (p.parent == -1) { level({rot[0], rot[1], rot[2]}, scale); break; }
+        if (p.parent < 0 || size_t(p.parent) >= st.parts.size()) break;
+        k = size_t(p.parent);
+    }
+    return out;
 }
 
 LitActor LitWorld::instantiate(size_t i) const {
@@ -143,8 +175,9 @@ int LitWorld::spawn(uint16_t entityId, const V3& pos, int16_t yaw) {
 // countdown = ticks[0]; at the last frame with countdown 0 a once-clip (mode 2) ends (0x100, or keeps returning
 // 0x200 with 0x800 = hold), others restart; else countdown 0 advances a frame (countdown = its ticks), then
 // countdown -= 1 (u8) and the last frame sets 0x2000. Runtime: L01A's type-2 ambient sprites hold frame 0 (anim 134,
-// mode 0x802) and count 2, 1, 0 then hold (anim 1, 3 ticks).
-static uint32_t flipbookTick(AnimState& st, const std::vector<uint8_t>& list, uint16_t anim, uint32_t mode) {
+// mode 0x802) and count 2, 1, 0 then hold (anim 1, 3 ticks). `shown` receives the record of the frame shown this tick
+// (0x438770 runs between the wrap and the advance; with flags8 0x20 it writes the actor's texture link, 0x438830).
+static uint32_t flipbookTick(AnimState& st, const std::vector<uint8_t>& list, uint16_t anim, uint32_t mode, uint16_t& shown) {
     mode &= 0xffff;
     if (mode & AnimStop) { st.flags = 0x100; return AnimStopped; }
     if ((mode & AnimResume) && (st.flags & AnimPause)) st.flags &= ~AnimPause;
@@ -169,6 +202,7 @@ static uint32_t flipbookTick(AnimState& st, const std::vector<uint8_t>& list, ui
         st.countdown = ticksOf(0);
         st.flags |= 0x1000;
     }
+    shown = list[size_t(st.frame) * 2 % list.size()];
     if (st.countdown == 0) st.countdown = ticksOf(++st.frame);
     --st.countdown;
     if (st.frame == st.last) st.flags |= 0x2000;
@@ -180,8 +214,9 @@ static uint32_t flipbookTick(AnimState& st, const std::vector<uint8_t>& list, ui
 // flag3 0x08, an attach point in this frame (+0x68) unless flag3 0x40; cond -> action) run. Runtime: L01A Bugs' idle
 // fidget anim 72 sets G[176] = 3 on its first frame (A19), which starts the type-2 prop actors' state 361 (counter 89).
 // Event flags (f2 / f3): f2 0x40 frees the carried actor (+0x6c); f2 1 spawns `id` attached at the hand (carried
-// unless f3 0x80); f2 2 / f3 4 / f3 2 spawn `id` at the hand (ponytail: the hand part's own rotation added by f3 4 / 2
-// is not tracked); f2 0x20 puts the carried actor down at the hand; f2 4 grabs Bugs (hand inside his box or f3 0x10):
+// unless f3 0x80); f2 2 / f3 4 / f3 2 spawn `id` at the hand with the actor's rotation (0x448d40 copies +0xdc), f3 4
+// adding the hand part's rot y to its yaw and f3 2 its rot x to its pitch (no PC level has such an event: `game` scan);
+// f2 0x20 puts the carried actor down at the hand; f2 4 grabs Bugs (hand inside his box or f3 0x10):
 // attached at the hand (offset kept unless f2 0x80), state `id`, flags14 4; f2 8 lets him go facing away (state
 // `id`, health − step +0x16); f3 1 forces Bugs into state `id` facing away (flags14 0x2000000).
 uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, uint32_t mode, std::vector<AnimFx>& fx,
@@ -214,26 +249,27 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
     const bool handSet = self ? self->handSet : p.handSet;
     const V3 hand = handSet ? (self ? self->hand : p.hand) : me.pos;
     const int32_t meIdx = self ? int32_t(self - actors.data()) : kParentBugs;
-    int32_t* rider = self ? &self->rider : nullptr;
-    // 0x4376f0: an actor put down / spawned at the hand keeps its horizontal offset from me as far as walls allow.
-    auto traceOut = [&](Mover& c) {
-        V3 q = me.pos;
-        int32_t dx = c.pos.x - me.pos.x, dz = c.pos.z - me.pos.z;
+    int32_t* rider = self ? &self->rider : &p.rider;  // +0x6c
+    const std::array<int16_t, 3> meRot = self ? self->rot : std::array<int16_t, 3>{0, p.yaw, p.lean};  // +0xdc
+    // 0x4376f0: an actor put down / spawned at the hand keeps its horizontal offset from `from` as far as walls allow.
+    auto traceOut = [&](Mover& c, const Mover& from) {
+        V3 q = from.pos;
+        int32_t dx = c.pos.x - from.pos.x, dz = c.pos.z - from.pos.z;
         Ground g;
-        g.zone = me.zone;
+        g.zone = from.zone;
         hf.trace(q, dx, dz, g);
-        c.pos.x = me.pos.x + dx;
-        c.pos.z = me.pos.z + dz;
+        c.pos.x = from.pos.x + dx;
+        c.pos.z = from.pos.z + dz;
     };
     for (const AnimFx::Event& e : it->events) {
         if ((e.frame != frame && !(e.f3 & 8)) || (!handSet && !(e.f3 & 0x40)) || (e.item.cond && !cond(e.item, self))) continue;
         if (e.item.act) act(e.item, self);
-        if ((e.f2 & 0x40) && rider && *rider >= 0) actors[size_t(*rider)].flags14 |= 0x100;
+        if ((e.f2 & 0x40) && *rider >= 0) actors[size_t(*rider)].flags14 |= 0x100;
         if (e.f2 & 1) {
             if (const int k = spawn(e.id, me.pos, me.yaw); k >= 0) {
-                if (self) self->flags18 |= 0x800;
+                me.flags18 |= 0x800;
                 attach(actors[size_t(k)], meIdx, true);
-                if (!(e.f3 & 0x80) && rider) {
+                if (!(e.f3 & 0x80)) {
                     if (*rider >= 0) actors[size_t(*rider)].flags14 |= 0x100;
                     *rider = k;
                 }
@@ -243,35 +279,59 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
             if (!kind) continue;
             if (const int k = spawn(e.id, hand, me.yaw); k >= 0) {
                 LitActor& c = actors[size_t(k)];
+                c.rot[0] = meRot[0], c.rot[2] = meRot[2];
                 c.zone = me.zone;
-                if (kind & 0xff00) traceOut(c);  // f3 4 / 2 (0x4376f0)
-                // f2 2 without f3 0x20: the spawn takes the hand part's scale (0x4393e0: +0xcc = *(+0x68)->+0x44;
-                // runtime: L04B3 ball 100's explosion 8 at scale (10240, 8192), w9lit8/o_back.csv counter 1013).
-                // ponytail: f3 0x20's hand-matrix orientation (flagsC 0x20) is not modelled.
-                else if (const int hp = self ? self->handPart : st.attachPart; handSet && !(e.f3 & 0x20) && hp >= 0 && size_t(hp) < st.parts.size())
-                    c.scale = st.parts[size_t(hp)].scale;
+                const int hp = self ? self->handPart : st.attachPart;
+                const TodPart* part = handSet && hp >= 0 && size_t(hp) < st.parts.size() ? &st.parts[size_t(hp)] : nullptr;
+                if (kind & 0xff00) {  // f3 4 / 2 (0x4376f0), then the hand part's rot y / x
+                    traceOut(c, me);
+                    if (part && kind == 0x400) c.yaw = int16_t(c.yaw + int16_t(part->rot[1]));
+                    if (part && kind == 0x200) c.rot[0] = int16_t(c.rot[0] + int16_t(part->rot[0]));
+                } else if (part && !(e.f3 & 0x20)) {
+                    // f2 2 without f3 0x20: the spawn takes the hand part's scale (0x4393e0: +0xcc = *(+0x68)->+0x44;
+                    // runtime: L04B3 ball 100's explosion 8 at scale (10240, 8192), w9lit8/o_back.csv counter 1013).
+                    c.scale = part->scale;
+                } else if (part) {
+                    // f3 0x20: its matrix +0x80 = the hand coordinate chain's (MulMatrix 0x408490 from the hand part up
+                    // to the root), flagsC 0x20 keeps it (the 1930s levels' gun shots: type-31 templates 130 / 131 /
+                    // 225 fly along the gun barrel instead of aiming at Bugs).
+                    c.mat = self ? partMatrixQ12(st, size_t(hp), {self->rot[0], coordYaw(*self), self->rot[2]}, self->scale)
+                                 : partMatrixQ12(st, size_t(hp), {0, p.yaw, p.lean}, {4096, 4096, 4096});
+                    c.flagsC |= 0x20;
+                }
                 if (!self) c.flagsC |= 0x20000;
             }
         }
-        if ((e.f2 & 0x20) && rider && *rider >= 0) {
+        if ((e.f2 & 0x20) && *rider >= 0) {
             LitActor& c = actors[size_t(*rider)];
             c.parent = -1;
+            c.parentPart = -1;
             c.flags14 = (c.flags14 & ~0x800u) | 0x1000;
             c.pos = hand;
             c.zone = me.zone;
-            c.rot = self->rot;
+            c.rot = meRot;
             c.yaw = me.yaw;
             *rider = -1;
-            traceOut(c);
+            traceOut(c, me);
+            if (!self) c.flagsC |= 0x20000;
         }
         if (self && (e.f2 & 4) && !(p.flags14 & 0x3000000) && ((e.f3 & 0x10) || handHitsPlayer(hand))) {
             if (p.carrier >= 0 && actors[size_t(p.carrier)].rider == -2) actors[size_t(p.carrier)].rider = -1;
             if (p.rope >= 0) dropRope();
             p.platform = -1;
+            if (p.rider >= 0) {  // what he carries is put down where it is, his rotation, the grabber's zone
+                LitActor& c = actors[size_t(p.rider)];
+                c.zone = me.zone;
+                c.rot = {0, p.yaw, p.lean};
+                c.yaw = p.yaw;
+                dropCarried();
+                traceOut(c, p);
+            }
             p.local = (e.f2 & 0x80) ? V3{} : V3{p.pos.x - hand.x, p.pos.y - hand.y, p.pos.z - hand.z};
             p.pos = hand;
             p.carrier = meIdx;
             p.carrierPart = attachPart(meIdx, true);
+            p.localYaw = 0;
             p.state = e.id;
             p.seq = 0;
             p.anim = 0;
@@ -290,7 +350,7 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
             p.state = e.id;
             p.seq = 0;
             p.anim = 0;
-            traceOut(p);
+            traceOut(p, me);
             if (self->step >= 0) G[1] = uint8_t(G[1] - defs[size_t(self->def)].steps[size_t(self->step)].w[1]);
             p.flags14 &= 0xfdffffdb;
         }
@@ -325,26 +385,30 @@ uint32_t LitWorld::animate(LitActor& a, uint16_t anim, uint32_t mode) {
                     a.radius = uint16_t(g + hi);
                     a.radius2 = uint32_t(a.radius) * a.radius;
                 }
-                return flipbookTick(a.animState, list, anim, mode);
+                uint16_t shown = 0xffff;
+                const uint32_t r = flipbookTick(a.animState, list, anim, mode, shown);
+                if (shown != 0xffff && (a.flags8 & 0x20) && d.link >= 0) textureLinks[uint16_t(d.link)] = shown;
+                return r;
             }
     }
-    const uint32_t r = scene_ && d.model >= 0 ? todTick(scene_->actorModels[size_t(d.model)], a.animState, anim, mode, d.animFx, &a) : AnimMissing;
-    if (r != AnimMissing) {
+    if (scene_ && d.model >= 0) {
+        const uint32_t r = todTick(scene_->actorModels[size_t(d.model)], a.animState, anim, mode, d.animFx, &a);
         AnimState& st = a.animState;
-        if (st.boxSet) {  // packet 9 (+0x48..+0x54, +0x2e, +0x30)
+        if (r != AnimMissing && st.boxSet) {  // packet 9 (+0x48..+0x54, +0x2e, +0x30)
             a.box = st.box;
             a.radius = st.radius;
-            const int32_t r = a.inflate + st.radius;
-            a.radius2 = uint32_t(r * r);
+            const int32_t k = a.inflate + st.radius;
+            a.radius2 = uint32_t(k * k);
         }
-        return r;
+        return r;  // a clip id the actor has no asset for: animTick's 0x400 / then finished, as 0x4393e0
     }
-    // ponytail: no TOD for this id (no model / sprite-only actor): frame 0 on the starting tick, then finished, so
-    // frame-0 and clip-end item gates each fire once (the exe's 0x4393e0 / 0x438970 timing is not reproduced).
-    if (anim) { a.animState.frame = 0, a.animState.countdown = 0, a.animState.flags = 0; return AnimPlaying; }
-    a.animState.frame = 0xffff;
-    a.animState.flags |= 0x2000;
-    return AnimFinished;
+    // No asset for the clip in either path (0x4393e0 / 0x438970 start: +0x18 = 0x100, return 0x400; then finished,
+    // 0x200 with hold 0x800). Without any role-7 model asset 0x4393e0 dereferences the null asset-list hit (an exe crash
+    // path); the `game` sweep reaches neither case in any PC level.
+    AnimState& st = a.animState;
+    if (mode & AnimStop) { st.flags = 0x100; return AnimStopped; }
+    if (mode & 0xb) { st.flags = 0x100; return AnimMissing; }
+    return (st.flags & AnimHold) ? AnimPlaying : AnimFinished;
 }
 
 // Script start / state switch: state `stateId` at step 0; the animation restarts unless the new step has mode
@@ -362,25 +426,31 @@ void LitWorld::startScript(LitActor& a, uint16_t stateId) {
 
 // ---- attached actors: the 0x440120 coordinate chain (+0x7c coordinate, +0xc4 super, +0x70 parent, +0x11c local) ----
 
-// A point given in the parent coordinate, in the world: its root (+0x7c: position, yaw; ponytail: its x/z rotation
-// is not applied) or, at the hand part `part` (the parent's +0x68 when attached), that part's matrix through the
-// animated part chain (Bugs: his hand point, turned by his yaw). `yaw` gets the coordinate's heading (0x440120: atan2
-// of its z axis).
+// A point given in the parent coordinate, in the world: its root (+0x7c: position and RotMatrix 0x407a50 of its
+// rotation, the yaw through its own chain) or, at the hand part `part` (the parent's +0x68 when attached), that part's
+// matrix through the animated part chain (Bugs too: his part list under (0, yaw, lean)). `yaw` gets the coordinate's
+// heading (0x440120: atan2 of its z axis).
+std::optional<V3> LitWorld::partPoint(int32_t parent, int16_t part, const V3& q) const {
+    if (part < 0) return std::nullopt;
+    if (parent == kParentBugs) return partOriginQ12(p.animState, size_t(part), p.pos, {0, p.yaw, p.lean}, {4096, 4096, 4096}, q);
+    const LitActor& c = actors[size_t(parent)];
+    return partOriginQ12(c.animState, size_t(part), c.pos, {c.rot[0], coordYaw(c), c.rot[2]}, c.scale, q);
+}
+
+std::optional<V3> LitWorld::parentPoint(const LitActor& a, const AnimState& pose) const {
+    if (a.parent == -1 || a.parentPart < 0) return std::nullopt;
+    if (a.parent == kParentBugs) return partOriginQ12(pose, size_t(a.parentPart), p.pos, {0, p.yaw, p.lean}, {4096, 4096, 4096});
+    const LitActor& c = actors[size_t(a.parent)];
+    return partOriginQ12(pose, size_t(a.parentPart), c.pos, {c.rot[0], coordYaw(c), c.rot[2]}, c.scale);
+}
+
 V3 LitWorld::frameWorld(int32_t parent, int16_t part, const V3& l, int16_t* yaw) const {
-    if (parent >= 0) {
-        const LitActor& c = actors[size_t(parent)];
-        if (part >= 0) {
-            auto at = [&](const V3& q) {
-                return partOriginQ12(c.animState, size_t(part), c.pos, {c.rot[0], coordYaw(c), c.rot[2]}, c.scale, q);
-            };
-            if (const auto o = at(l)) {
-                if (yaw) {
-                    const auto o0 = at({}), oz = at({0, 0, 0x1000});
-                    *yaw = int16_t(ratan2(oz->x - o0->x, oz->z - o0->z));
-                }
-                return *o;
-            }
+    if (const auto o = partPoint(parent, part, l)) {
+        if (yaw) {
+            const auto o0 = partPoint(parent, part, {}), oz = partPoint(parent, part, {0, 0, 0x1000});
+            *yaw = int16_t(ratan2(oz->x - o0->x, oz->z - o0->z));
         }
+        return *o;
     }
     const Mover& m = parent == kParentBugs ? static_cast<const Mover&>(p) : actors[size_t(parent)];
     // An attached parent's coordinate matrix: its own parent's frame turned by its matrix yaw (current once its tail
@@ -391,7 +461,9 @@ V3 LitWorld::frameWorld(int32_t parent, int16_t part, const V3& l, int16_t* yaw)
         frameWorld(c.parent, c.parentPart, {}, &my);
         my = int16_t(my + c.matYaw);
     }
-    const V3 o = part >= 0 && parent == kParentBugs && p.handSet ? p.hand : m.pos, w = rotY(my, l.x, l.y, l.z);
+    Mat rm;
+    rotMatrixXYZ(rm, parent == kParentBugs ? 0 : actors[size_t(parent)].rot[0], my, parent == kParentBugs ? p.lean : actors[size_t(parent)].rot[2]);
+    const V3 o = m.pos, w = apply(rm, l);
     if (yaw) *yaw = my;
     return {o.x + w.x, o.y + w.y, o.z + w.z};
 }
@@ -407,16 +479,18 @@ int16_t LitWorld::coordYaw(const LitActor& c) const {
 }
 
 std::optional<std::array<float, 9>> LitWorld::parentFrame(const LitActor& a) const {
-    if (a.parent < 0 || a.parentPart < 0) return std::nullopt;
-    const LitActor& c = actors[size_t(a.parent)];
-    const std::array<int16_t, 3> rot{c.rot[0], coordYaw(c), c.rot[2]};
-    const auto o = partOriginQ12(c.animState, size_t(a.parentPart), c.pos, rot, c.scale);
+    if (a.type == 31 && (a.flagsC & 0x20)) {  // its kept +0x80 alone (the caller draws it with rot 0, scale 1)
+        std::array<float, 9> m{};
+        for (size_t k = 0; k < 9; ++k) m[k] = float(a.mat.m[k]) / 4096.0f;
+        return m;
+    }
+    const auto o = a.parent != -1 ? partPoint(a.parent, a.parentPart, {}) : std::nullopt;
     if (!o) return std::nullopt;
     std::array<float, 9> m{};
     for (int j = 0; j < 3; ++j) {  // column j: the part's image of a 4096-long axis j
         V3 e{};
         (j == 0 ? e.x : j == 1 ? e.y : e.z) = 0x1000;
-        const V3 v = *partOriginQ12(c.animState, size_t(a.parentPart), c.pos, rot, c.scale, e);
+        const V3 v = *partPoint(a.parent, a.parentPart, e);
         m[size_t(j)] = float(v.x - o->x) / 4096.0f;
         m[size_t(3 + j)] = float(v.y - o->y) / 4096.0f;
         m[size_t(6 + j)] = float(v.z - o->z) / 4096.0f;
@@ -424,8 +498,9 @@ std::optional<std::array<float, 9>> LitWorld::parentFrame(const LitActor& a) con
     return m;
 }
 
+// The part +0x68 points to now (Bugs: his last packet-10 part while his move has one; cleared with each state).
 int16_t LitWorld::attachPart(int32_t parent, bool hand) const {
-    return !hand ? -1 : parent == kParentBugs ? 0 : actors[size_t(parent)].handPart;
+    return !hand ? -1 : parent == kParentBugs ? (p.handSet ? p.animState.attachPart : int16_t(-1)) : actors[size_t(parent)].handPart;
 }
 
 // Item 0x20000000 / spawn 0x80 / item 0x1000: c's coordinate becomes a child of the parent's (local identity; at its
@@ -469,6 +544,7 @@ void LitWorld::detach(LitActor& a) {
 void LitWorld::actorsTick() {
     if (actors.capacity() < actors.size() + 256) actors.reserve(actors.size() + 512);  // spawn headroom (see spawn())
     spawned_.clear();
+    zoneMessages.clear();  // 0x4b39de = 0 before the behaviours
     glyphs.clear();  // 0x4b373c sprite list restarts with each update
     // Activation reference: the camera eye, Bugs while the eye components sum to 0 (load update; 0x447d40).
     const V3 ref = cam.eye.x + cam.eye.y + cam.eye.z != 0 ? cam.eye : p.pos;
@@ -492,7 +568,10 @@ void LitWorld::actorsTick() {
             // zone-gated start director fires on the 2nd tick, counter 5). Without a renderer (zoneTable unset)
             // every zone counts as visible afterwards.
             if ((a.act3c & 1) && a.visible &&
-                (ticks <= 1 || (zoneTable && std::ranges::find(*zoneTable, a.zone) == zoneTable->end()))) {
+                (ticks <= 1 || (zoneTable && [&] {
+                     const auto e = std::ranges::find(*zoneTable, a.zone, &std::pair<int16_t, bool>::first);
+                     return e == zoneTable->end() || (e->second && !(a.flags8 & 0x10000));
+                 }()))) {
                 a.visible = false;  // the exe clears the draw bit (+4 & 2) on both paths (0x447d40)
                 a.flags18 |= 0x100;
                 if (!(a.act3c & 0x40)) continue;
@@ -520,13 +599,16 @@ void LitWorld::actorsTick() {
     // Paused (S[12] != 0: 1 pause menu, 2 resuming, 3 help): only actors with flagsC 0x40000000 run (pause/help
     // menus and the overlays they spawn), the player and camera stand still (0x447d40).
     const bool paused = S[12] != 0;
+    // A camera node of a non-camera actor (flags 0x100 without 0x200) stops the +0x22 timers except type 0x20 and the
+    // node's own actor (flags18 0x1000); the paused path always counts (0x447d40).
+    const bool nodeView = (cam.flags & 0x300) == 0x100;
     auto one = [&](size_t i) {
         if (paused && !(actors[i].flagsC & 0x40000000)) return;
         if (!(actors[i].flags14 & 0x100)) behaviour(i);
         LitActor& a = actors[i];
         // Non-type-14 children are drawn through the chain (no behaviour of theirs moves them).
         if (a.parent != -1 && a.type != 14 && !(a.flags14 & 0x100)) followParent(a, {});
-        ++a.timer;
+        if (paused || !nodeView || a.type == 0x20 || (a.flags18 & 0x1000)) ++a.timer;
         if (a.flags14 & 0x100) {
             a.dead = true;  // freed by 0x447a50 (0x41f5d0 releases its flag-0x10 voices)
             sfx.releaseOwned(emitter(&a));
@@ -535,6 +617,7 @@ void LitWorld::actorsTick() {
             if (p.platform == int(i)) { p.platform = -1; p.flags14 &= ~0x14u; }
             if (p.rope == int(i)) dropRope();
             detach(a);
+            if (p.rider == int(i)) p.rider = -1;  // 0x447a50: the parent's +0x6c
             // Its slot is reused by spawns: its children see the parent's flags14 0x100 now (0x440120: dropped,
             // or killed with flags18 0x400).
             for (LitActor& c : actors)
@@ -557,22 +640,22 @@ void LitWorld::actorsTick() {
     // Carried (attached coordinate, 0x11c local offset zero): Bugs' world position is the carrier's as of his own
     // update, i.e. before a carrier in the rest list moves -> one tick behind it (runtime: L01a walk-in, Bugs z =
     // carrier z - 25 each tick). His own movement does not apply while attached.
-    // Grabbed by an animation event (0x4393e0 f2 4): at the carrier's hand part plus the kept offset (ponytail: the
-    // offset is turned by the carrier's yaw, not the part matrix).
+    // Grabbed by an animation event (0x4393e0 f2 4): his coordinate +0x18c holds the world offset to the hand as its
+    // translation under super = the hand coordinate, so GsGetLws turns that offset by the hand part's whole chain
+    // (frameWorld through partOriginQ12). The event needs +0x68 set (no PC grab event carries f3 0x40: `game` scan).
     if (p.carrier >= 0 && actors[size_t(p.carrier)].dead) p.carrier = -1;
     const bool held = p.carrier >= 0;
     // World yaw = the coordinate chain's: the carrier's, or its hand part's matrix (runtime: CCMERLIN's walk to the
     // castle hangs Bugs on a type-14 part animated across the level; +0xde reads −660 throughout, the carrier's 0).
-    int16_t heldYaw = 0;
-    const V3 heldAt = held ? frameWorld(p.carrier, p.carrierPart, p.local, &heldYaw) : V3{};
+    const V3 heldAt = held ? frameWorld(p.carrier, p.carrierPart, p.local) : V3{};
     if (held) {
         p.pos = heldAt;
-        p.yaw = heldYaw;
+        p.yaw = attachedHeading(0x1000);  // + his local yaw (0 from the attach; the attached steering turns it)
         p.zone = actors[size_t(p.carrier)].zone;
     }
     if (!paused) {
         playerTick();
-        ++p.timer;
+        if (!nodeView) ++p.timer;
     }
     if (held) p.pos = heldAt;
     run(rest);
@@ -618,9 +701,31 @@ void LitWorld::behaviour(size_t i) {
         }
         return;
     }
-    case 3: case 7: case 11: case 15: case 17: case 20: case 21: case 30: case 33: case 35: return;  // no-op / texture link
+    case 20: {  // 0x445500 texture-link flipbook: the first class-8 asset's records, start +0x50, hold byte +0x54
+        LitActor& a = actors[i];
+        const ActorDef& d = defs[size_t(a.def)];
+        AnimState& st = a.animState;
+        const auto write = [&] { if (d.link >= 0) textureLinks[uint16_t(d.link)] = st.frame; };  // 0x438830 (record = frame)
+        if (!a.boxInit) {
+            a.boxInit = true;
+            a.flags18 |= 0x80;
+            st.last = uint16_t(d.spriteFrames - 1);
+            st.frame = uint16_t(a.box[3]);
+            st.ticksPerFrame = st.countdown = uint8_t(a.box[5]);
+            write();
+        }
+        if (st.countdown == 0) {
+            st.countdown = st.ticksPerFrame;
+            if (++st.frame > st.last) st.frame = 0;
+            write();
+        }
+        --st.countdown;
+        return;
+    }
+    case 34: heldItem(i); return;
+    case 3: case 7: case 11: case 15: case 17: case 21: case 30: case 33: case 35: return;  // no-op
     default: {
-        // 10 tagger, 34 attached:
+        // 10 tagger:
         LitActor& a = actors[i];
         const ActorDef& d = defs[size_t(a.def)];
         unsupported.insert(std::format("actor type {}", a.type));
@@ -1136,10 +1241,16 @@ void LitWorld::type14(size_t i) {
         } else if ((a.flags8 & 0x8000000) || (fb & 0x100) || (a.flags8 & 0x10000000) || (fb & 0x100000)) {
             const Mover* tgt = &p;
             int16_t top = boxTop();
-            if (!(a.flags8 & 0x8000000) && !(fb & 0x100)) {  // ponytail: live-list order stands in for 0x4b39ac's
-                const int k = findActor(uint16_t(st->w[1]));
-                tgt = k >= 0 ? &actors[size_t(k)] : nullptr;
-                if (tgt) top = actors[size_t(k)].box[4];
+            if (!(a.flags8 & 0x8000000) && !(fb & 0x100)) {
+                // The first actor of the collision list 0x4b39ac with entity id w[1] not being freed (L03A's 715 and
+                // L03C's 53 name ids that 4 / 2 entities share; Bugs never: no step names his id).
+                tgt = nullptr;
+                for (const size_t k : collide_)
+                    if (actors[k].entityId == uint16_t(st->w[1]) && !(actors[k].flags14 & 0x100)) {
+                        tgt = &actors[k];
+                        top = actors[k].box[4];
+                        break;
+                    }
             }
             if (tgt && st->w[0]) {
                 const int32_t dx = int16_t(tgt->pos.x - a.pos.x), dz = int16_t(tgt->pos.z - a.pos.z);
@@ -1294,6 +1405,7 @@ void LitWorld::type14(size_t i) {
                             p.carrier = int32_t(i);
                             p.carrierPart = attachPart(int32_t(i), a.handSet);
                             p.local = {};
+                            p.localYaw = 0;
                             p.pos = frameWorld(p.carrier, p.carrierPart, p.local);
                             p.platform = p.rope = -1;
                             turnErr_ = -1;
@@ -1534,7 +1646,8 @@ void LitWorld::cameraDirector(size_t i) {
         if (it.item.cond && !cond(it.item, &a)) continue;
         if (f & 0x4000) cam.flags |= 8;
         if (f & 0x8010) {
-            // ponytail: neither 0x20 nor 0x40 reuses the exe's stale scratch target; treated as no target (skip)
+            // Neither 0x20 nor 0x40: the exe reads the target left at 0x4efac0+4 by whichever routine used that shared
+            // scratch last; no PC camera-director item has the gate without 0x20 / 0x40 (`game` scan), skipped here.
             const int k = (f & 0x20) ? -1 : (f & 0x40) ? findActor(uint16_t(it.p2)) : -2;
             if (k == -2 || ((f & 0x20) == 0 && k < 0)) continue;
             const uint32_t dd = uint32_t(dist(k < 0 ? p.pos : actors[size_t(k)].pos, a.pos, f & 0x100));
@@ -1620,7 +1733,6 @@ void LitWorld::cameraDirector(size_t i) {
 
 void LitWorld::platform(size_t i, uint32_t mode) {
     LitActor& a = actors[i];
-    const int16_t yaw0 = a.yaw;
     const bool ridden = p.platform == int(i);
     if (a.state < 0) {  // first call
         a.state = 0;
@@ -1730,7 +1842,7 @@ void LitWorld::platform(size_t i, uint32_t mode) {
     }
     if (ridden) {  // the rider is a child coordinate of the platform: world = platform matrix · local (0x43f520 mode 8)
         p.pos = platformWorld();
-        p.yaw = int16_t(p.yaw + (a.yaw - yaw0));
+        p.yaw = attachedHeading(0x1000);
     }
     const ActorDef& d = defs[size_t(a.def)];
     for (const ActorItem& it : d.items) {  // gated list: first firing item stops unless 0x8000
@@ -1793,6 +1905,77 @@ void LitWorld::spriteEffect(size_t i) {
     }
 }
 
+// ---- type 34 held item (0x446990) ----
+
+// Spawned attached (anim event f2 1, e.g. at Bugs' hand: his +0x6c). States as type 14: the first call starts state
+// 2 (else 1); +0x17e names the state (Bugs' rules set it through their +0x0c command); an empty / past-the-end step
+// starts state 1 (flags14 &= 0xf9ffffdf). A step with flagsA 0x20000 hits the first flags8-0x80 collision actor whose
+// position its box holds (0x433190: its full rotation, grown by its inflation, heights overlapping): flags14
+// 0x2000000, contact ids both ways, damage = step +0x16. Clip end -> next step (flagsA 4: freed). The coordinate chain
+// gives its position / heading (actorsTick followParent); let go (+0x70 = 0) it is freed.
+void LitWorld::heldItem(size_t i) {
+    LitActor& a = actors[i];
+    const ActorDef& d = defs[size_t(a.def)];
+    const PlayerState* s1 = stateById(d, 1);
+    if (a.state < 0) {
+        a.flags18 |= 0x80;
+        const PlayerState* s = stateById(d, 2) ? stateById(d, 2) : s1;
+        if (!s) { a.flags14 |= 0x100; return; }  // the exe dereferences the missing state
+        a.state = int16_t(s - d.states.data());
+        a.seq = 0;
+    }
+    const int16_t sid = a.seq <= 4 ? d.states[size_t(a.state)].moves[a.seq] : int16_t(-16);
+    if (sid == -16 || a.seq > 4) {
+        if (!s1) { a.flags14 |= 0x100; return; }
+        a.state = int16_t(s1 - d.states.data());
+        a.seq = 0;
+        a.flags14 &= 0xf9ffffdf;
+        a.anim = 0;
+        a.step = stepById(d, s1->moves[0]);
+    } else {
+        a.step = stepById(d, sid);
+    }
+    if (a.step < 0) { a.flags14 |= 0x100; return; }
+    const ActorStep& st = d.steps[size_t(a.step)];
+    if (st.flagsA & 0x20000) {
+        Mat m;
+        rotMatrixZYX(m, 0x1000 - a.rot[0], 0x1000 - a.yaw, 0x1000 - a.rot[2]);
+        const auto& b = a.box;
+        const int32_t g = a.inflate;
+        for (const size_t k : collide_) {
+            LitActor& o = actors[k];
+            const int32_t ki = int32_t(k);
+            if (!(o.flags8 & 0x80) || o.def < 0 || defs[size_t(o.def)].cls != 2 || k == i || a.parent == ki || a.rider == ki ||
+                o.parent == int32_t(i))
+                continue;
+            const auto& ob = o.box;
+            if (!(ob[0] | ob[1] | ob[2] | ob[3] | ob[4] | ob[5])) continue;
+            const int32_t dx = int16_t(o.pos.x - a.pos.x), dy = int16_t(o.pos.y - a.pos.y), dz = int16_t(o.pos.z - a.pos.z);
+            if (uint32_t(dz * dz + dx * dx) > a.radius2) continue;
+            const V3 l = apply16(m, {dx, dy, dz});
+            if (b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= ob[1] + l.y &&
+                ob[4] + l.y <= b[1]) {
+                o.flags14 |= 0x2000000;
+                o.contact = a.entityId;
+                a.contact = o.entityId;
+                o.damage = st.w[1];
+                break;
+            }
+        }
+    }
+    if (a.anim == st.anim) {
+        if (animate(a, 0, 0) == AnimFinished) {
+            a.anim = 0;
+            if (st.flagsA & 4) { a.flags14 |= 0x100; return; }
+            ++a.seq;
+        }
+    } else {
+        animate(a, st.anim, uint16_t(st.mode));
+        a.anim = st.anim;
+    }
+    if (a.parent == -1) a.flags14 |= 0x100;
+}
+
 // ---- type 31 projectile (0x446d10) ----
 
 // First call: unless flagsC 0x20020 it pitches toward Bugs' middle (rx = −atan2(dy, horizontal distance), dy to his
@@ -1823,7 +2006,8 @@ void LitWorld::projectile(size_t i) {
     }
     if (a->timer > 0x3c) { a->flags14 |= 0x100; return; }
     Mat m;
-    rotMatrixZYX(m, a->rot[0], a->yaw, a->rot[2]);
+    if (a->flagsC & 0x20) m = a->mat;  // kept (0x446d10 skips 0x407b90 / ScaleMatrix)
+    else rotMatrixZYX(m, a->rot[0], a->yaw, a->rot[2]);
     V3 v = apply(m, {0, 0, speed});
     V3 q = a->pos;
     Ground r;
@@ -1860,46 +2044,96 @@ void LitWorld::projectile(size_t i) {
 // Runs in the platform group (flags8 8), i.e. before Bugs: it applies the push he wrote last tick (+0x40/+0x44,
 // playerContacts) and hands back what it could not move by tracing him with (moved − pushed). +0x17c (tag 0x1d):
 // 1 / 2 allow X / Z, 0x100 / 0x200 forbid − / +, 0x40 never move (Bugs pushed back), 0x80 keep on the floor
-// (cancel when a corner or the centre would drop > 200), 0x20 flags14 4. Each corner of its box (grown by inflate/4,
-// in its yaw frame) traces the X and then the Z move; unless flagsC 0x80 the leading face is traced for a wall. No
-// animation (runtime: L01A block, csv/litpush_L01A.csv). Not ported: the 0x432fe0 (mask 0x20000) carrier trigger,
-// its own 0x433500 push against other solids, the free mode 0x17c & 4 and its trigger list +0xfc (no LiT block
-// uses 4; the others are not exercised by the captures).
+// (cancel when a corner or the centre would drop > 200), 0x20 flags14 4, 4 free mode. First call: the box scaled by
+// its scale (ScaleMatrix 0x408060 + ApplyRotMatrix). Not pushed this tick, it still moves when a solid (0x432fe0
+// mask 0x20000) overlaps it (push 0: its own 0x433500 push takes it out, Bugs moving along by the result); otherwise
+// its push sound (+0x1e, global loop bit 0x4b39d0 & 1, id 0x4b2160) is released once it stood (flags18 0x8000).
+// Moving: its own 0x433500 push (mask 0x2690a: contact flags14 0x40000000, contact ids; a non-sensor takes the pushed
+// allowed axes). Normal mode: each corner of its box (grown by inflate/4, in its frame) traces the X and then the Z
+// move; unless flagsC 0x80 the leading face is traced for a wall; the push sound starts while it moves (mode 1) and
+// is released when it stops (mode 2). Free mode (4; no LiT block uses it): the move traced at once from the low and
+// then the high corner of the allowed axes, Bugs moved by (moved − pushed) untraced, no sound. Then its trigger list
+// +0xfc (tag 0x31; none in the PC data): the first item whose flags14 gate (+8) passes and whose condition holds runs.
+// Tail: gravity, zone triggers with flags8 0x1000000 (L04A2 806 / 807). No animation (runtime: L01A block,
+// csv/litpush_L01A.csv).
 void LitWorld::pushable(size_t i) {
     LitActor& a = actors[i];
     const uint16_t f = uint16_t(a.param);
-    if (!a.boxInit) {  // first call: the part list for drawing (0x448980); the box stays the tag box
+    const ActorDef& d = defs[size_t(a.def)];
+    if (!a.boxInit) {  // first call: the part list for drawing (0x448980)
         a.boxInit = true;
         a.flags18 |= 0x80;
-        const ActorDef& d = defs[size_t(a.def)];
         if (d.idleAnim && a.animState.parts.empty()) animate(a, d.idleAnim, AnimOnce);
         a.box = d.box;
+        for (size_t k = 0; k < 6; ++k) a.box[k] = int16_t((int16_t(a.scale[k % 3]) * a.box[k]) >> 12);
         a.radius = d.radius;
         a.radius2 = uint32_t(d.radius) * d.radius;
         if (f & 0x20) a.flags14 |= 4;
     }
+    auto tail = [&] {
+        LitActor& b = actors[i];
+        V3 w{};
+        Ground r;
+        moveActor(b, w, r, b.box[4]);  // gravity (0x437390 with no move)
+        b.pos.y += w.y;
+        b.pushX = b.pushZ = 0;
+        b.flags14 &= 0xffff5fff;
+        if (b.flags8 & 0x1000000) zoneTriggers(b, &b);
+    };
     if (f & 0x40) {
         p.pos.x -= a.pushX;
         p.pos.z -= a.pushZ;
-    } else if ((a.flags14 & 0x8000) && (p.flags14 & 0x4000) && !(f & 4)) {
-        const int32_t g = int16_t(a.inflate >> 2), half = a.inflate >> 1;
-        const V3 lo = rotY(a.yaw, a.box[0] - g, a.box[1], a.box[2] - g), hi = rotY(a.yaw, a.box[3] + g, a.box[4], a.box[5] + g);
-        auto allow = [&](int32_t d, uint16_t bit) {
-            return (!(f & bit) || ((f & 0x100) && d < 0) || ((f & 0x200) && d > 0)) ? 0 : d;
-        };
-        int32_t dx = allow(a.pushX, 1), dz = allow(a.pushZ, 2);
-        auto trace = [&](int32_t x, int32_t z, int32_t& tx, int32_t& tz, Ground& r) {
-            V3 q{x, a.pos.y, z};
-            r = Ground{};
-            r.zone = a.zone;
-            hf.trace(q, tx, tz, r);
-            return q.y;
-        };
-        auto floorCheck = [&](Ground& r, int32_t y) {  // 0x80: a floor more than 200 below cancels the move
-            if (!(f & 0x80)) return;
-            if ((r.kind & KindFloor) && r.hoff + y - a.pos.y > 200) r.kind |= KindOpen;
-            if (r.kind & KindOpen) dx = dz = 0;
-        };
+        return tail();
+    }
+    if (!((a.flags14 & 0x8000) && (p.flags14 & 0x4000)) && overlapActor(a, int32_t(i), a.parent, a.rider, a.box, 0x20000) < 0) {
+        if (a.flags18 & 0x8000) {
+            a.flags18 &= ~0x8000u;
+            if (loopSounds_ & 1) loopSounds_ &= ~1u, playSound(&a, pushSound_, 2);
+        }
+        return tail();
+    }
+    const int32_t g = int16_t(a.inflate >> 2), half = a.inflate >> 1;
+    Mat m;
+    rotMatrixXYZ(m, a.rot[0], a.yaw, a.rot[2]);
+    const V3 lo = apply16(m, {a.box[0] - g, a.box[1], a.box[2] - g}), hi = apply16(m, {a.box[3] + g, a.box[4], a.box[5] + g});
+    auto allow = [&](int32_t v, uint16_t bit) {
+        return (!(f & bit) || ((f & 0x100) && v < 0) || ((f & 0x200) && v > 0)) ? 0 : v;
+    };
+    int32_t dx = allow(a.pushX, 1), dz = allow(a.pushZ, 2);
+    auto ownPush = [&] {  // 0x433500 mask 0x2690a (the normal mode sets +0x70 = Bugs around it: no candidate changes)
+        V3 w{int16_t(dx), 0, int16_t(dz)};
+        const int c = contactPush(a, int32_t(i), a.inflate, a.radius, a.box, 0x2690a, w);
+        if (c < 0) return;
+        LitActor& o = actors[size_t(c)];
+        o.flags14 |= 0x40000000;
+        o.contact = a.entityId;
+        a.contact = o.entityId;
+        if (o.flags8 & 0x2000000) return;
+        if (f & 1) dx = int16_t(w.x);
+        if (f & 2) dz = int16_t(w.z);
+    };
+    auto floorCheck = [&](Ground& r, int32_t y) {  // 0x80: a floor more than 200 below cancels the move
+        if (!(f & 0x80)) return;
+        if ((r.kind & KindFloor) && r.hoff + y - a.pos.y > 200) r.kind |= KindOpen;
+        if (r.kind & KindOpen) dx = dz = 0;
+    };
+    auto floorAhead = [&] {
+        if (!(f & 0x80)) return;
+        V3 q{a.pos.x + dx, a.pos.y, a.pos.z + dz};
+        Ground r;
+        r.zone = a.zone;
+        hf.groundAt(q, r);
+        floorCheck(r, q.y);
+    };
+    auto trace = [&](int32_t x, int32_t z, int32_t& tx, int32_t& tz, Ground& r) {
+        V3 q{x, a.pos.y, z};
+        r = Ground{};
+        r.zone = a.zone;
+        hf.trace(q, tx, tz, r);
+        return q.y;
+    };
+    if (!(f & 4)) {
+        ownPush();
         for (const auto& [cx, cz] : {std::pair{lo.x, lo.z}, {hi.x, lo.z}, {lo.x, hi.z}, {hi.x, hi.z}}) {
             Ground r;
             int32_t tx = dx, tz = 0;
@@ -1925,16 +2159,16 @@ void LitWorld::pushable(size_t i) {
                 if (r.kind & KindBlocked) dz = 0;
             }
         }
-        if (f & 0x80) {
-            V3 q{a.pos.x + dx, a.pos.y, a.pos.z + dz};
-            Ground r;
-            r.zone = a.zone;
-            hf.groundAt(q, r);
-            floorCheck(r, q.y);
-        }
+        floorAhead();
+        pushSound_ = uint16_t(a.reg);
         a.pos.x += dx;
         a.pos.z += dz;
         a.flags18 |= 0x8000;
+        if (!dx && !dz) {
+            if (loopSounds_ & 1) loopSounds_ &= ~1u, playSound(&a, pushSound_, 2);
+        } else if (!(loopSounds_ & 1)) {
+            loopSounds_ |= 1, playSound(&a, pushSound_, 1);
+        }
         V3 q = p.pos;
         int32_t bx = dx - a.pushX, bz = dz - a.pushZ;
         Ground r;
@@ -1942,24 +2176,35 @@ void LitWorld::pushable(size_t i) {
         hf.trace(q, bx, bz, r);
         p.pos.x += bx;
         p.pos.z += bz;
+    } else {
+        const int32_t ox = (f & 1) ? lo.x : 0, oz = (f & 2) ? lo.z : 0;
+        ownPush();
+        for (const auto& [cx, cz] : {std::pair{ox, oz}, {(f & 1) ? hi.x : 0, (f & 2) ? hi.z : 0}}) {
+            Ground r;
+            trace(a.pos.x + cx, a.pos.z + cz, dx, dz, r);
+        }
+        floorAhead();
+        a.pos.x += dx;
+        a.pos.z += dz;
+        p.pos.x += dx - a.pushX;
+        p.pos.z += dz - a.pushZ;
     }
-    V3 w{};
-    Ground r;
-    moveActor(a, w, r, a.box[4]);  // gravity (0x437390 with no move)
-    a.pos.y += w.y;
-    a.pushX = a.pushZ = 0;
-    a.flags14 &= 0xffff5fff;
+    for (const ActorItem& it : d.items) {
+        if (it.mask14 && !(actors[i].flags14 & it.mask14)) continue;
+        if (it.item.cond && !cond(it.item, &actors[i])) continue;
+        if (it.item.act) act(it.item, &actors[i]);
+        break;
+    }
+    tail();
 }
 
 // ---- Bugs vs actor boxes ----
 
-// 0x433500 (mask 0x9a690a) as used by 0x43a880, approximated: the first active collision-list actor whose box
-// (yaw frame, inflated by +0x20 and Bugs' half-width) contains Bugs' next position is the contact. Platforms
-// (flags8 8) are boarded from above (feet less than 100 below the top), pickups/touchables (0x2802, 0x20100) get
-// flags14 0x8000 "touched", landing on an actor sets its 0x80 (stomp, + hit 0x4000000 when its step is
-// stomp-vulnerable flagsB 0x8000; flagsB 0x10000000 makes Bugs bounce); solids only deflect the move through
-// boxPush (0x433500 face push; runtime: Bugs walking into 932 at counters 897-931 is never stopped). Not ported: the
-// contact choice between several actors, the vertical result, the re-trace of the pushed move, pushables, swimming.
+// 0x433500 (mask 0x9a690a) as used by 0x43a880 (contactPush): platforms (flags8 8) are boarded from above (feet less
+// than 100 below the top), pickups/touchables (0x2802, 0x20100) get flags14 0x8000 "touched", landing on an actor
+// sets its 0x80 (stomp, + hit 0x4000000 when its step is stomp-vulnerable flagsB 0x8000; flagsB 0x10000000 makes
+// Bugs bounce); solids only deflect the move through boxPush (runtime: Bugs walking into 932 at counters 897-931 is
+// never stopped); the pushed x and z are re-traced against the walls; pushables and floating as below.
 // 0x433500's face push for Bugs vs actor o (radius pre-test, vertical overlap, then the 4 corners + centre of his
 // inflated box moved by w, in o's yaw frame, against o's box grown by its inflation; the face is picked by the
 // sector of his position around o's box centre). Each corner past that face counts as a contact and, unless o is a
@@ -2031,13 +2276,13 @@ bool LitWorld::linkedToBugs(size_t i, bool fromBugs) const {
 // chain holds s (Bugs: linkedToBugs). Each face push (boxPush) replaces the x/z move (halved with the move so far
 // when a contact exists and the candidate is not solid 0x20000). The contact kept: the nearest (s's next position,
 // x/z), platforms (flags8 8) first, solids over the rest; when it is not solid the solids get a second pass. Returns
-// it with w.y = its box top − s's y in its frame (0x433500's +0x78), -1 none (w unchanged). Bugs also touches a
-// platform he overlaps from above without a corner hit (ponytail: stands in for 0x433500's box-corner-in-quad pass).
+// it with w.y = its box top − s's y in its frame (0x433500's +0x78), -1 none (w unchanged). When no corner is past a
+// face the exe copies s's corners as a quad for a corner-in-quad test whose call is compiled out: its result word
+// 0x4b3d78 is set to 0 (xor ebp, ebp at 0x433eaa), so that candidate is always skipped (0x433ec9 -> 0x4341df).
 int LitWorld::contactPush(const Mover& s, int32_t si, int32_t inflate, int32_t radius, const std::array<int16_t, 6>& box,
                           uint32_t mask, V3& w) {
     const bool bugs = si == kParentBugs;
     const V3 at{s.pos.x + w.x, 0, s.pos.z + w.z};
-    const V3 q{s.pos.x + w.x, s.pos.y + w.y, s.pos.z + w.z};
     int best = -1;
     uint32_t bestD = ~0u;
     int32_t bestTop = 0;
@@ -2059,11 +2304,7 @@ int LitWorld::contactPush(const Mover& s, int32_t si, int32_t inflate, int32_t r
             }
             V3 wp = w;
             int32_t top = 0;
-            if (!boxPush(s, inflate, radius, box, o, wp, &top)) {
-                if (!bugs || !(o.flags8 & 8) || !inBox(o, q, kPlayerHalf, 0, -boxTop())) continue;
-                wp = w;
-                top = o.pos.y + o.box[4] - q.y;
-            }
+            if (!boxPush(s, inflate, radius, box, o, wp, &top)) continue;
             const bool solid = o.flags8 & 0x20000;
             if (best < 0 || solid) {
                 w.x = wp.x, w.z = wp.z;
@@ -2084,6 +2325,35 @@ int LitWorld::contactPush(const Mover& s, int32_t si, int32_t inflate, int32_t r
     return best;
 }
 
+int LitWorld::overlapActor(const Mover& s, int32_t si, int32_t sp, int32_t sr, const std::array<int16_t, 6>& sb,
+                           uint32_t mask) const {
+    for (const size_t k : collide_) {  // 0x4b39ac order
+        const LitActor& o = actors[k];
+        const int32_t ki = int32_t(k);
+        if (!(o.flags8 & mask) || o.def < 0 || defs[size_t(o.def)].cls != 2 || ki == si || ki == sp || ki == sr || o.parent == si)
+            continue;
+        const auto& b = o.box;
+        if (!(b[0] | b[1] | b[2] | b[3] | b[4] | b[5])) continue;  // 0x407890
+        const int32_t dx = int16_t(s.pos.x - o.pos.x), dy = int16_t(s.pos.y - o.pos.y), dz = int16_t(s.pos.z - o.pos.z);
+        if (uint32_t(dz * dz + dx * dx) > o.radius2) continue;
+        const V3 l = toLocal(o, dx, dy, dz);
+        const int32_t g = o.inflate;
+        if (b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= sb[1] + l.y && sb[4] + l.y <= b[1])
+            return ki;
+    }
+    return -1;
+}
+
+int LitWorld::pointHit(const V3& q, uint32_t mask, uint32_t exclude, int32_t si) const {
+    for (const size_t k : collide_) {
+        const LitActor& o = actors[k];
+        if ((o.flags8 & mask) && o.def >= 0 && defs[size_t(o.def)].cls == 2 && int32_t(k) != si && !(o.flags8 & exclude) &&
+            pointInBox(o, q))
+            return int(k);
+    }
+    return -1;
+}
+
 int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
     if (p.platform >= 0) {  // riding: the move goes to his platform-local coordinate (0x434230 runs after it)
         const LitActor& pl = actors[size_t(p.platform)];
@@ -2098,6 +2368,7 @@ int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
     V3 wp = w;
     const int ci = contactPush(p, kParentBugs, playerInflate_, p.animState.radius, p.animState.box, 0x9a690a, wp);
     if (ci < 0) return -1;
+    if (!(moveFlagsA & 0x20)) pickup_ = ci;  // 0x4b3c00 (not while picking up)
     {
         const size_t i = size_t(ci);
         LitActor& a = actors[i];
@@ -2137,6 +2408,7 @@ int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
             p.local = apply(inv, {int16_t(p.pos.x - a.pos.x + w.x), int16_t(p.pos.y - a.pos.y), int16_t(p.pos.z - a.pos.z + w.z)});
             p.local.y = a.box[4] + 4;
             p.platform = int(i);
+            p.localYaw = int16_t(p.yaw - a.yaw);  // +0x19e = his +0xde − the platform's
             p.pos.y = a.pos.y + a.box[4] + 4;
             w.y = 0;
             p.flags14 = (p.flags14 & 0xfffffdf4) | 0x14;  // the fall phase +0x108 is kept (runtime: L01A seesaw fall-off)
@@ -2150,15 +2422,8 @@ int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
             // with flagsA 0x4000000 then pushes: his move goes to the block (+0x40/+0x44, 0x445a60 moves it and hands
             // back what it could not), flags14 0x4000; otherwise the face push stops him.
             const V3 o = rotY(p.yaw, 0, 0, 150);
-            const V3 probe{p.pos.x + o.x, p.pos.y - 50, p.pos.z + o.z};
-            const LitActor* ahead = nullptr;
-            for (const LitActor& b : actors)
-                if (b.active && !b.dead && b.def >= 0 && defs[size_t(b.def)].cls == 2 && (b.flags8 & 0x4000) &&
-                    !(b.flags8 & 0x2000000) && pointInBox(b, probe)) {
-                    ahead = &b;
-                    break;
-                }
-            const bool facing = ahead == &a && lz != 0;
+            const int ahead = pointHit({p.pos.x + o.x, p.pos.y - 50, p.pos.z + o.z}, 0x4000, 0x2000000, kParentBugs);
+            const bool facing = ahead == ci && lz != 0;
             if (facing) p.flags14 |= 0x20000;
             a.flags14 |= 0x8000;
             if ((moveFlagsA & 0x4000000) && facing) {
@@ -2167,7 +2432,7 @@ int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
             } else {
                 w.x = wp.x, w.z = wp.z;
             }
-        } else if (a.flags8 & 0x2802) {
+        } else if (p.rider < 0 && (a.flags8 & 0x2802)) {  // not while carrying (the carried one is skipped above)
             p.flags14 |= 0x40000;
             a.flags14 |= 0x8000;
             sidePush(stomp());
@@ -2182,25 +2447,42 @@ int LitWorld::playerContacts(V3& w, uint32_t moveFlagsA, int16_t lz) {
     }
 }
 
-// Bugs' attacks (0x43a880): move flagsA 0x800000 body overlap (0x432fe0, approximated: centre inside the target
-// box) and 0x10000 hand point (0x433380: his +0x58 attach point, TOD packet 10 of the last applied frame). Each takes
-// the first flags8-0x80 collision actor it finds; a type-14 one is hit only when its step is vulnerable (flagsA
-// 0x4000). Effect: target flags14 0x4000000, damage 1 (runtime: L01A kick on 932 at counter 1097, health 9999).
+// Bugs' attacks (0x43a880): move flagsA 0x800000 body overlap (0x432fe0 mask 0x80: his position in the target's box)
+// and 0x10000 hand point (0x433380 mask 0x80: his +0x58 attach point, TOD packet 10 of the last applied frame). A
+// type-14 target is hit only when its step is vulnerable (flagsA 0x4000): flags14 0x4000000, damage 1, its contact 1
+// (runtime: L01A kick on 932 at counter 1097, health 9999). Hitting with the hand while carrying hits with the
+// carried actor: flags14 0x6000000, damage = its step +0x16 (1 without a step), contact = its id.
 void LitWorld::playerAttacks(const PlayerMove& mv) {
-    auto hit = [&](LitActor* a) {
-        if (!a || (a->type == 14 && (a->step < 0 || !(defs[size_t(a->def)].steps[size_t(a->step)].flagsA & 0x4000)))) return;
-        a->flags14 |= 0x4000000;
-        a->damage = 1;
-        a->contact = 1;
-        p.contact = a->entityId;
+    auto vulnerable = [&](const LitActor& a) {
+        return a.type != 14 || (a.step >= 0 && (defs[size_t(a.def)].steps[size_t(a.step)].flagsA & 0x4000));
     };
-    auto first = [&](auto&& test) -> LitActor* {
-        for (LitActor& a : actors)
-            if (a.active && !a.dead && a.def >= 0 && defs[size_t(a.def)].cls == 2 && (a.flags8 & 0x80) && test(a)) return &a;
-        return nullptr;
-    };
-    if (mv.flagsA & 0x800000) hit(first([&](const LitActor& a) { return inBox(a, {p.pos.x, p.pos.y - 100, p.pos.z}, 0, 0, 0); }));
-    if ((mv.flagsA & 0x10000) && p.handSet) hit(first([&](const LitActor& a) { return pointInBox(a, p.hand); }));
+    if (mv.flagsA & 0x800000) {
+        const int support = p.carrier >= 0 ? p.carrier : p.rope >= 0 ? p.rope : p.platform;
+        std::array<int16_t, 6> box = p.animState.box;
+        box[4] = boxTop();
+        if (const int k = overlapActor(p, kParentBugs, support, p.rider, box, 0x80); k >= 0 && vulnerable(actors[size_t(k)])) {
+            LitActor& a = actors[size_t(k)];
+            a.flags14 |= 0x4000000;
+            a.damage = 1;
+            a.contact = 1;
+            p.contact = a.entityId;
+        }
+    }
+    if ((mv.flagsA & 0x10000) && p.handSet)
+        if (const int k = pointHit(p.hand, 0x80, 0, kParentBugs); k >= 0 && vulnerable(actors[size_t(k)])) {
+            LitActor& a = actors[size_t(k)];
+            if (p.rider < 0) {
+                a.flags14 |= 0x4000000;
+                a.damage = 1;
+                a.contact = 1;
+            } else {
+                const LitActor& c = actors[size_t(p.rider)];
+                a.flags14 |= 0x6000000;
+                a.damage = c.step >= 0 ? defs[size_t(c.def)].steps[size_t(c.step)].w[1] : 1;
+                a.contact = c.entityId;
+            }
+            p.contact = a.entityId;
+        }
 }
 
 } // namespace bb::game

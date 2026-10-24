@@ -20,6 +20,12 @@ Download `bbtime-X.Y.Z-x86_64.AppImage` from the [releases](https://github.com/s
 (x86-64, glibc 2.39 or newer), `chmod +x` it and start it. In the launcher, **Import original games…** and point it
 at the installed or mounted games, then **Play**.
 
+In a level: Esc pauses (LiT: the game's pause menu; Backspace / the gamepad's Back leave to the collection menu).
+Lost in Time keeps bugs.exe's window keys: F1 help, F2 sound on/off, F3 music on/off, F4 quit; F5 is bbtime's debug
+free-fly camera. Time Busters: F1 toggles the debug free camera. Both: F6 Original Fidelity / Enhanced, F7 diagnostics
+overlay, F8 fog, F11 fullscreen. Settings (`~/.config/bbtime/settings.ini`, e.g. `lit_language`, `tb_language`,
+`lit_pad_preset`, `lit_fog_distance`): [`docs/LAUNCHER.md`](docs/LAUNCHER.md).
+
 ## Build
 
 C++26 (GCC 14+), CMake ≥ 3.30, Ninja, SDL3, Qt 6.4+ (launcher), Vulkan + `glslc`, libepoxy, OpenAL, glm,

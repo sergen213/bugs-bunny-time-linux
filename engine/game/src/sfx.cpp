@@ -111,7 +111,7 @@ bool Sfx::playing(uint16_t id, int32_t emitter) const {
 std::array<uint8_t, 2> Sfx::levels(const Voice& v, const SfxEntry& e, const Where& where, const V3& eye,
                                    const V3& target) const {
     V3 pos;
-    if (where(v.emitter, pos)) return {100, 100};  // a player: 0x6464
+    if (where(v.emitter, e.flags, pos)) return {100, 100};  // a player: 0x6464
     std::array<uint8_t, 2> lv = sfxLevels(pos, eye, target, tb && (e.flags & 0x4000) ? e.maxDist : 0x1000, tb);
     if (e.flags & 0x200)
         for (uint8_t& x : lv) x = uint8_t(std::min(x + e.add, 0x7f));
@@ -119,9 +119,13 @@ std::array<uint8_t, 2> Sfx::levels(const Voice& v, const SfxEntry& e, const Wher
 }
 
 void Sfx::volumeAll(uint16_t blob, bool loop, int32_t vol) {  // SetVolume on the blob's 10 buffers
-    const auto& cp = copies_[blob];
+    auto& cp = copies_[blob];
     for (uint8_t c = 0; c < 10; c += loop ? 2 : 1)
-        if (cp[c].kind || (loop && cp[c + 1].kind)) cmds.push_back({SfxCmd::Volume, blob * 10u + c, nullptr, 0, vol, 0});
+        if (cp[c].kind || (loop && cp[c + 1].kind)) {
+            cp[c].vol = vol;
+            if (loop) cp[c + 1].vol = vol;
+            cmds.push_back({SfxCmd::Volume, blob * 10u + c, nullptr, 0, vol, 0});
+        }
 }
 
 void Sfx::mix(const V3& eye, const V3& target, const Where& where) {
@@ -131,7 +135,7 @@ void Sfx::mix(const V3& eye, const V3& target, const Where& where) {
     for (Loop& l : loops_) {
         Copy& a = copies_[l.blob][l.pair];
         const AiffSound* s = sound(l.blob);
-        if (l.looping || !s || uint64_t(now_ - a.start) * a.rate < uint64_t(s->loopStart) * 30) continue;
+        if (l.looping || !s || a.kind != 1 || uint64_t(now_ - a.start) * a.rate < uint64_t(s->loopStart) * 30) continue;
         a.kind = 0, copies_[l.blob][l.pair + 1].kind = 2, l.looping = true;
     }
     for (Voice& v : voices) {
@@ -168,7 +172,7 @@ void Sfx::mix(const V3& eye, const V3& target, const Where& where) {
                 if (c < 10) loops_.push_back({uint16_t(blob), c, v.emitter, false});
             }
             if (c == 10) continue;
-            cp[c] = {1, now_, uint64_t(s->frames()) * 30, rate};
+            cp[c] = {1, now_, uint64_t(s->frames()) * 30, rate, vol, sfxPan(v.lv)};
             cmds.push_back({SfxCmd::Play, blob * 10u + c, s, rate, vol, sfxPan(v.lv)});
         } else if (v.state & 2) {  // release
             if (!loop) {
@@ -200,6 +204,44 @@ void Sfx::mix(const V3& eye, const V3& target, const Where& where) {
             }
         }
     }
+}
+
+// The device plays a looping instance from one source keyed by its first copy; a kind-2 copy is always the second.
+void Sfx::pauseAll() {
+    if (!device || !paused_.empty()) return;
+    for (size_t b = 0; b < copies_.size(); ++b)
+        for (uint8_t c = 0; c < 10; ++c) {
+            Copy& k = copies_[b][c];
+            if (!busy(k)) continue;
+            cmds.push_back({SfxCmd::Pause, uint32_t(b) * 10u + (k.kind == 2 ? c - 1u : c)});
+            k.len = k.kind == 1 ? k.len - uint64_t(now_ - k.start) * k.rate : 0, k.kind = 3;  // Stop keeps the position
+            if (paused_.empty() || paused_.back() != b) paused_.push_back(uint16_t(b));
+        }
+}
+
+void Sfx::resumeAll() {
+    if (!device) return;
+    for (const uint16_t b : paused_) {  // copy 0 of a one-shot blob: on from where it stopped, else from the start
+        const AiffSound* s = sound(b);
+        Copy& k = copies_[b][0];
+        if (!s || s->loopEnd || busy(k)) continue;
+        if (k.kind == 3) {
+            k.kind = 1, k.start = now_;
+            cmds.push_back({SfxCmd::Resume, b * 10u});
+        } else {
+            k = {1, now_, uint64_t(s->frames()) * 30, s->rate, k.vol, k.pan};  // TB buffers play at the file rate
+            cmds.push_back({SfxCmd::Play, b * 10u, s, s->rate, k.vol, k.pan});
+        }
+    }
+    for (const Loop& l : loops_)  // looping instances: the copy it was on
+        if (Copy& k = copies_[l.blob][l.looping ? l.pair + 1 : l.pair]; k.kind == 3) {
+            k.kind = l.looping ? 2 : 1, k.start = now_;
+            cmds.push_back({SfxCmd::Resume, l.blob * 10u + l.pair});
+        }
+    for (size_t b = 0; b < copies_.size(); ++b)  // the other stopped copies stay silent until reused
+        for (uint8_t c = 0; c < 10; ++c)
+            if (copies_[b][c].kind == 3) copies_[b][c].kind = 0, cmds.push_back({SfxCmd::Stop, uint32_t(b) * 10u + c});
+    paused_.clear();
 }
 
 } // namespace bb::game

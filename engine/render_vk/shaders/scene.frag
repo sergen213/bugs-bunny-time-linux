@@ -22,7 +22,9 @@ layout(push_constant) uniform P {
                     // LIT / MV only: bit 2 receives sun shadows, bit 3 receives ambient occlusion, bit 4 alpha-blended,
                     // bit 5 reactive (sprites, animated textures: their texels change without motion);
                     // bit 6: PC ABR 0/1/3 (bugs.exe 0x420d10 modes 0/1/3, see kFs3D), alpha-blended;
-                    // LIT only: bit 7 Enhanced stylised water (shadeWater)
+                    // LIT only: bit 7 Enhanced stylised water (shadeWater);
+                    // bit 12: Enhanced UVs clamped half a texel inside (non-tiling translucent mesh: no wrap seam);
+                    // bit 13: Enhanced fog colour = the backdrop copy (fogColorScale.rgb: bindless slot, 1 / size)
     uint tex;
     uint samp;
     float texGamma; // != 1: PC texel curve floor(256·(c/256)^g) on the 0..255 texel (Settings::texGamma)
@@ -30,9 +32,10 @@ layout(push_constant) uniform P {
     uint material;  // packHalf2x16(reflection strength, roughness), 0 = not reflective
 #endif
 } pc;
-layout(location = 0) in vec2 vUv;
+layout(location = 0) centroid in vec2 vUv;  // MSAA (Enhanced): not extrapolated outside the covered triangle
 layout(location = 1) in vec4 vCol;
 layout(location = 2) in float vDist;
+layout(location = 7) in float vHeight;  // world y (Enhanced ground haze)
 layout(location = 0) out vec4 oCol;
 #ifdef MV
 layout(location = 5) in vec4 vCur;
@@ -280,7 +283,9 @@ float waterSun(vec3 p) {
 }
 
 // Screen-space mirror ray over the opaque copy: marches r from p until it passes behind the copied depth; a hit within
-// the step's thickness returns its colour (a = 1, faded at the screen edges), else a = 0 (off screen, occluded).
+// the step's thickness returns its colour (a = 1, faded at the screen edges), else a = 0 (off screen, occluded). With a
+// background layer (L.water.w >= 2: TB sky domes, drawn before a depth clear) a ray that hits nothing sees it at
+// infinity: the copy at r's vanishing point, where nothing nearer was drawn (depth 1).
 vec4 waterSsr(vec3 p, vec3 r, float dist) {
     float t = 0.03 * dist + 20.0;
     for (int i = 0; i < 28; ++i, t *= 1.22) {
@@ -294,6 +299,13 @@ vec4 waterSsr(vec3 p, vec3 r, float dist) {
         if (distance(p + r * t, L.eye.xyz) - distance(worldAt(uv, d), L.eye.xyz) > 0.3 * t + 2.0 * kWU) break; // behind a thin object
         vec2 e = min(uv, 1.0 - uv);
         return vec4(copyColor(uv), smoothstep(0.0, 0.06, min(e.x, e.y)));
+    }
+    if (L.water.w > 1.5) {
+        vec4 c = pc.viewProj * vec4(r, 0.0);
+        if (c.w > 0.0) {
+            vec2 uv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5), e = min(uv, 1.0 - uv);
+            if (min(e.x, e.y) > 0.0 && copyDepth(uv) >= 1.0) return vec4(copyColor(uv), smoothstep(0.0, 0.06, min(e.x, e.y)));
+        }
     }
     return vec4(0.0);
 }
@@ -371,9 +383,9 @@ vec3 shadeWater(vec3 p, float light) {
     // Stylised wave light: crests catch the sky, troughs darken (readable from above, where Fresnel is ~0.02). Driven by
     // the curvature (a high-pass), so whole-pond sloshing and a wake's raised wedge stay a tilt and the fronts read as
     // lines. Crests go half to the sky gradient, so they do not carry the hard edges of the reflection.
-    // Cartoon (L.water.w = 1, Water::Cartoon): the same water toon-shaded: crisp crest lines, hard glints, solid foam
+    // Cartoon (L.water.w = 1 or 3, Water::Cartoon): the same water toon-shaded: crisp crest lines, hard glints, solid foam
     // with a white rim along every shore, and the colour posterised into a few luminance bands (hue kept).
-    bool toon = L.water.w > 0.5;
+    bool toon = mod(L.water.w, 2.0) > 0.5;
     float bend = -100.0 * kWU * wave.w;
     float crest = sign(bend) * (toon ? smoothstep(0.9, 1.1, abs(bend)) : smoothstep(0.4, 3.0, abs(bend))) * edge;
     c = mix(c, crest > 0.0 ? (toon ? vec3(0.9) * lightC : mix(refl, sky, 0.5)) : c * 0.4, (toon ? 0.8 : 0.6) * abs(crest));
@@ -401,8 +413,16 @@ vec3 shadeWater(vec3 p, float light) {
 }
 #endif
 
+vec2 backdropSize() { return vec2(textureSize(sampler2D(uTex[uint(pc.fogColorScale.r)], uSamp[3]), 0)); }
+vec3 backdrop(vec2 uv) { return textureLod(sampler2D(uTex[uint(pc.fogColorScale.r)], uSamp[3]), uv, 0.0).rgb; }
+
 void main() {
-    vec4 t = texture(sampler2D(uTex[pc.tex], uSamp[pc.samp]), vUv);
+    vec2 uv = vUv;
+    if ((pc.flags & 4096u) != 0u) {
+        vec2 h = 0.5 / vec2(textureSize(sampler2D(uTex[pc.tex], uSamp[pc.samp]), 0));
+        uv = clamp(uv, h, 1.0 - h);
+    }
+    vec4 t = texture(sampler2D(uTex[pc.tex], uSamp[pc.samp]), uv);
     float luma = floor(dot(t.rgb * 255.0, vec3(0.299, 0.587, 0.114)) + 1e-3) / 255.0;
     vec4 vc = vCol;
     if ((pc.flags & 64u) != 0u) {
@@ -416,10 +436,17 @@ void main() {
     if ((pc.flags & 2u) != 0u) c = vec4(0.0, 0.0, 0.0, luma * vCol.a);
     c.rgb = min(c.rgb * pc.fogColorScale.a, vec3(1.0));
     if (c.a < pc.alphaRef) discard;
+    vec3 fogC = (pc.flags & 1u) != 0u ? vec3(0.0) : pc.fogColorScale.rgb;
+    // Enhanced: the backdrop (sky) behind this pixel, copied before the world (fogColorScale.r = its slot).
+    if ((pc.flags & 8193u) == 8192u) fogC = backdrop(gl_FragCoord.xy / backdropSize());
 #ifdef LIT
     if ((pc.flags & 128u) != 0u) {
         // The level's baked light on the water (vertex colour x scene colour scale) sets its scattered colour, foam and glints.
         c = vec4(shadeWater(vWorld, clamp(max(vCol.r, max(vCol.g, vCol.b)) * pc.fogColorScale.a, 0.3, 1.0)), 1.0);
+        // Over a background layer (TB sky dome) the water fades into the dome behind it, not the fog colour: the sea
+        // runs on into the dome's own sea band without a seam from any height.
+        vec2 uv = gl_FragCoord.xy * L.water.yz;
+        if (L.water.w > 1.5 && copyDepth(uv) >= 1.0) fogC = textureLod(sampler2D(uTex[L.waterSlots.x], uSamp[3]), uv, 0.0).rgb;
     } else if ((pc.flags & 4u) != 0u || pc.material != 0u) {
         vec3 ng = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         if (dot(ng, L.eye.xyz - vWorld) < 0.0) ng = -ng; // face normal toward the viewer (two-sided cards included)
@@ -433,10 +460,25 @@ void main() {
 #endif
     }
 #endif
-    if (pc.fog.y > pc.fog.x) {
+    if ((pc.flags & 16384u) != 0u) {
+        // Enhanced ground haze (BBLIT-Remaster M5b): the backdrop's horizon colour in this column (5 taps) over geometry
+        // below the layer's top, growing from 1800 to 7500 away (BBLIT constants: 1200 thick); on the background the
+        // band 0..5 degrees below the horizon (the sky under the distant cliffs).
+        vec2 uv = gl_FragCoord.xy / backdropSize();
+        float hv = (pc.flags & 32768u) != 0u ? pc.fog.x : pc.fogColorScale.b;
+        vec3 hc = vec3(0.0);
+        for (int i = -2; i <= 2; ++i) hc += backdrop(vec2(clamp(uv.x + 0.04 * float(i), 0.0, 1.0), clamp(hv - 0.01, 0.0, 1.0)));
+        hc *= 0.2;
+        float k = float((pc.flags >> 16) & 127u) / 100.0;
+        if ((pc.flags & 32768u) != 0u) k *= smoothstep(0.0, pc.fog.y, uv.y - hv);
+        else k *= clamp((pc.fogColorScale.g - vHeight) / 1200.0, 0.0, 1.0) * clamp((vDist - 1800.0) / (7500.0 - 1800.0), 0.0, 1.0);
+        if ((pc.flags & 1u) != 0u) c.rgb *= 1.0 - k;
+        else c.rgb = mix(c.rgb, hc, k);
+    }
+    if (pc.fog.y > pc.fog.x && (pc.flags & 32768u) == 0u) {
         float f = clamp((pc.fog.y - vDist) / (pc.fog.y - pc.fog.x), 0.0, 1.0);
         if ((pc.flags & 64u) != 0u) c.a *= f;
-        else c.rgb = mix((pc.flags & 1u) != 0u ? vec3(0.0) : pc.fogColorScale.rgb, c.rgb, f);
+        else c.rgb = mix(fogC, c.rgb, f);
     }
     oCol = c;
 #ifdef MV

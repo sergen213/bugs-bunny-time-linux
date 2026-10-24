@@ -100,17 +100,46 @@ void inspectBze(ManifestFile& mf, std::vector<uint8_t> bytes) {
     }
 }
 
+// Length of the well-formed UTF-8 sequence at s[i] (RFC 3629: no overlongs, surrogates or > U+10FFFF), 0 if none.
+size_t utf8Len(std::string_view s, size_t i) {
+    const auto b = [&](size_t k) { return i + k < s.size() ? uint8_t(s[i + k]) : 0; };
+    const auto cont = [&](size_t k) { return (b(k) & 0xc0) == 0x80; };
+    const uint8_t c = b(0);
+    if (c < 0x80) return 1;
+    if (c >= 0xc2 && c <= 0xdf) return cont(1) ? 2 : 0;
+    if (c >= 0xe0 && c <= 0xef) {
+        const uint8_t lo = c == 0xe0 ? 0xa0 : 0x80, hi = c == 0xed ? 0x9f : 0xbf;
+        return b(1) >= lo && b(1) <= hi && cont(2) ? 3 : 0;
+    }
+    if (c >= 0xf0 && c <= 0xf4) {
+        const uint8_t lo = c == 0xf0 ? 0x90 : 0x80, hi = c == 0xf4 ? 0x8f : 0xbf;
+        return b(1) >= lo && b(1) <= hi && cont(2) && cont(3) ? 4 : 0;
+    }
+    return 0;
+}
+
+// JSON string. Paths are raw bytes on Linux: a byte outside well-formed UTF-8 is written as \u00XX (read back as
+// U+00XX, its Latin-1 meaning), so the output is always valid JSON and every byte stays visible.
 void jsonString(std::string& o, std::string_view s) {
     o += '"';
-    for (unsigned char c : s) {
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = uint8_t(s[i]);
+        const size_t n = utf8Len(s, i);
         if (c == '"' || c == '\\') o += {'\\', char(c)};
-        else if (c < 0x20) o += std::format("\\u{:04x}", c);
-        else o += char(c);  // ponytail: assumes UTF-8 paths; raw non-UTF-8 bytes would make invalid JSON
+        else if (c < 0x20 || n == 0) o += std::format("\\u{:04x}", c);
+        else o.append(s, i, n);
+        i += n ? n : 1;
     }
     o += '"';
 }
 
 } // namespace
+
+std::string jsonQuote(std::string_view s) {
+    std::string o;
+    jsonString(o, s);
+    return o;
+}
 
 Manifest scanInstall(const std::filesystem::path& root) {
     namespace fs = std::filesystem;

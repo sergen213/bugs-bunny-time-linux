@@ -229,7 +229,7 @@ ActorModel buildTbActorModel(const Scene& s, std::span<const uint8_t> m) {
 
     std::map<std::string, int32_t> texByName;
     for (size_t i = 0; i < s.textures.size(); ++i) texByName.emplace(s.textures[i].name, int32_t(i));
-    std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf;
+    std::map<std::tuple<uint32_t, int32_t, int32_t, Blend, bool>, size_t> meshOf;
     const size_t nC = le16(m, ph), nD = le16(m, ph + 2), nA = m[ph + 4], nB = m[ph + 5];
     const size_t oB = le16(m, ph + 6), oC = le16(m, ph + 8), oD = le16(m, ph + 10);
     const std::tuple<size_t, size_t, size_t, int> groups[] = {{0xc, nA, 0x24, 3}, {oB, nB, 0x24, 4}, {oC, nC, 0x28, 3}, {oD, nD, 0x28, 4}};
@@ -239,11 +239,11 @@ ActorModel buildTbActorModel(const Scene& s, std::span<const uint8_t> m) {
             le16(m, r + size - 2);  // bounds
             const uint8_t b0 = m[r], b1 = m[r + 1];
             const uint32_t id = le16(m, r + 2) & 0xfff;
-            int32_t tex = -1;
+            int32_t tex = -1, anim = -1;
             if (auto it = texByName.find(std::format("{}/tex/{}", s.level, id)); it != texByName.end()) tex = it->second;
             else
-                for (const TextureAnim& a : s.textureAnims)
-                    if (a.linkId == id) tex = a.frames[a.startFrame];
+                for (size_t k = 0; k < s.textureAnims.size(); ++k)  // linked: the alias as the world's faces (fallback start frame)
+                    if (const TextureAnim& a = s.textureAnims[k]; a.linkId == id) tex = a.frames[a.startFrame], anim = int32_t(k);
             if (tex < 0) continue;  // alias 0: not drawn (as world prims, TEXTURE_GAP.md §1)
             uint32_t idx[4];
             for (size_t k = 0; k < 4; ++k) idx[k] = b1 & 0x80 ? le16(m, r + 0x20 + 2 * k) : m[r + 0x20 + k];
@@ -262,11 +262,12 @@ ActorModel buildTbActorModel(const Scene& s, std::span<const uint8_t> m) {
                 }
             } else if (s.textures[size_t(tex)].hasAlpha) blend = Blend::AlphaTest;
             const uint32_t obj = anySlot && idx[0] < owner.size() && owner[idx[0]] >= 0 ? uint32_t(owner[idx[0]]) : 0;
-            auto [it, fresh] = meshOf.try_emplace({obj, tex, blend, bool(b1 & 0x10)}, am.meshes.size());
+            auto [it, fresh] = meshOf.try_emplace({obj, tex, anim, blend, bool(b1 & 0x10)}, am.meshes.size());
             if (fresh) {
                 ActorMesh& nm = am.meshes.emplace_back();
                 nm.object = obj;
                 nm.mesh.texture = tex;
+                nm.mesh.textureAnim = anim;
                 nm.mesh.blend = blend;
                 nm.mesh.twoSided = b1 & 0x10;
             }

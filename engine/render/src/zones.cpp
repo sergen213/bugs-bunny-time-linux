@@ -33,15 +33,17 @@ bool walkZones(const std::vector<WorldZone>& zones, const glm::mat4& vp, const Z
     if (!has(cam)) return false;
     drawn.assign(zones.size(), 0);
     // One 0x40fe90 pass: draws `zone`; a pass at depth 0 restarts the table with entry 0 = the camera zone. Portals that
-    // pass the tests add their zone once (flag = zone's depth limit +0xb5 below the walk depth; the A17 message-queue
-    // exclusion 0x4b2480 is not ported). The exe's table holds 24 entries.
+    // pass the tests add their zone once, flagged when the walk depth passes the zone's limit +0xb5 or when the A17
+    // queue holds the portal's u32 at +0x10 (zone id, high half 0). Their screen rects (+4..+0x10) are never read. The
+    // exe's table holds 24 entries.
     auto walk = [&](int16_t zone, int depth, int maxDepth) {
         if (depth == 0) table.assign(1, {cam, false});
         drawn[size_t(zone)] = 1;
         for (const ZonePortal& p : zones[size_t(zone)].portals) {
             if (outside(p.quad, vp)) continue;
             if (std::ranges::any_of(table, [&](const ZoneEntry& e) { return e.zone == int16_t(p.to); })) continue;
-            if (table.size() < 24) table.push_back({int16_t(p.to), maxDepth < depth + 1});
+            const bool queued = p.toHi == 0 && std::ranges::find(view.messages, p.to) != view.messages.end();
+            if (table.size() < 24) table.push_back({int16_t(p.to), maxDepth < depth + 1 || queued});
         }
     };
     walk(cam, 0, 1);

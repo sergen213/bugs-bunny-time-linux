@@ -45,6 +45,7 @@ TbCollision TbCollision::parse(std::span<const uint8_t> block) {
     m.half = h;
     m.centre = {in.s16(0x14) + h, in.s16(0x16) - h, in.s16(0x18) + h};  // 0x445d00: corner + (h, -h, h)
     m.poff_ = poff;
+    m.soff_ = soff;
     if (voff < poff || soff < voff) throw FormatError("tb collision: table order");
     for (uint32_t i = 0; i < ns; ++i) {
         const size_t p = soff + 12 * i;
@@ -61,6 +62,7 @@ TbCollision TbCollision::parse(std::span<const uint8_t> block) {
         pl.r = in.s16(p + 0x12);
         pl.nv = in.u16(p + 0x16) & 0x7fff;
         pl.edge = uint32_t(m.edges.size());
+        pl.off = p;
         if (pl.surf >= ns) throw FormatError(std::format("tb collision: polygon at 0x{:x} surface {} >= {}", p, pl.surf, ns));
         for (uint16_t k = 0; k < pl.nv; ++k) {
             const size_t q = p + 0x18 + 8 * k;
@@ -182,114 +184,6 @@ std::optional<TbHit> TbCollision::query(const V3& p0, const V3& dv, int32_t radi
         else break;
     }
     return best;
-}
-
-void TbCollision::gather(const V3& c, int32_t R, uint32_t actor10, int32_t skip, std::vector<int32_t>& out) const {
-    // 0x4460c0: centre leaf, then the six face points and eight corners of the sphere's box.
-    std::vector<int32_t> nodes;
-    auto add = [&](int32_t x, int32_t y, int32_t z) {
-        const TbCube cb = locate({x, y, z});
-        if (cb.node >= 0 && std::ranges::find(nodes, cb.node) == nodes.end()) nodes.push_back(cb.node);
-    };
-    add(c.x, c.y, c.z);
-    for (int a = 0; a < 3; ++a)
-        for (int s : {-R, R}) add(c.x + (a == 0) * s, c.y + (a == 1) * s, c.z + (a == 2) * s);
-    for (int k = 0; k < 8; ++k) add(c.x + (k & 1 ? R : -R), c.y + (k & 4 ? R : -R), c.z + (k & 2 ? R : -R));
-    const size_t first = out.size();
-    for (int32_t node : nodes) {
-        const auto lst = leaf(node);
-        for (size_t k = 0; k + 1 < lst.size(); k += 2) {
-            const int32_t pi = at(uint16_t(lst[k] | lst[k + 1] << 8));
-            if (pi < 0 || pi == skip || std::find(out.begin() + std::ptrdiff_t(first), out.end(), pi) != out.end()) continue;
-            const TbPoly& P = polys[size_t(pi)];
-            if (!tbMoverPasses(surfaces[P.surf].flags, actor10)) continue;
-            if (std::abs(P.d + dot3(P.n, c.x, c.y, c.z)) > (int64_t(R) << 14)) continue;
-            const int64_t dx = c.x - P.c[0], dy = c.y - P.c[1], dz = c.z - P.c[2], rr = int64_t(P.r) + R;
-            if (dx * dx + dy * dy + dz * dz > rr * rr) continue;
-            bool ok = true;
-            for (uint32_t e = P.edge; ok && e < P.edge + P.nv; ++e) {
-                const V3& V = verts[edges[e].v];
-                ok = dot3(edges[e].e, c.x, c.y, c.z) - (int64_t(R) << 14) <= dot3(edges[e].e, V.x, V.y, V.z);
-            }
-            if (ok) out.push_back(pi);
-        }
-    }
-}
-
-void TbCollision::sweep(V3& centre, V3 motion, Shape shape, uint32_t actor10, std::vector<Contact>& contacts) const {
-    struct D3 { double x, y, z; };
-    auto dotd = [](const D3& a, const D3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
-    D3 c{double(centre.x), double(centre.y), double(centre.z)}, m{double(motion.x), double(motion.y), double(motion.z)};
-    const double r = shape.r, hs = shape.half;
-    std::vector<int32_t> cand;
-    const double len = std::sqrt(dotd(m, m));
-    gather(centre, int32_t(len) + shape.r + shape.half + 50, actor10, -1, cand);
-    auto unitN = [&](const TbPoly& P) { return D3{P.n[0] / 16384.0, P.n[1] / 16384.0, P.n[2] / 16384.0}; };
-    // Signed distance of the shape's lowest point along N (capsule: the segment end nearest the plane).
-    auto dist = [&](const TbPoly& P, const D3& p) {
-        const D3 N = unitN(P);
-        return dotd(N, p) + P.d / 16384.0 - std::abs(N.y) * hs;
-    };
-    auto inside = [&](const TbPoly& P, const D3& q, double widen) {
-        for (uint32_t e = P.edge; e < P.edge + P.nv; ++e) {
-            const D3 E{edges[e].e[0] / 16384.0, edges[e].e[1] / 16384.0, edges[e].e[2] / 16384.0};
-            const V3& V = verts[edges[e].v];
-            if (dotd(E, q) - dotd(E, {double(V.x), double(V.y), double(V.z)}) > widen) return false;
-        }
-        return true;
-    };
-    auto touch = [&](int32_t pi) {
-        if (std::ranges::none_of(contacts, [&](const Contact& k) { return k.poly == pi; })) contacts.push_back({polys[size_t(pi)].n, pi});
-    };
-    auto onPlane = [&](const TbPoly& P, const D3& p, double s) {  // contact point of the lowest shape point
-        const D3 N = unitN(P);
-        const double y = p.y + (N.y < 0 ? hs : -hs);
-        return D3{p.x - N.x * s, y - N.y * s, p.z - N.z * s};
-    };
-    // De-penetration first (front side only; flag 0x200 one-way surfaces only when approaching).
-    for (int pass = 0; pass < 2; ++pass)
-        for (int32_t pi : cand) {
-            const TbPoly& P = polys[size_t(pi)];
-            if (P.n == std::array<int16_t, 3>{}) continue;
-            const double s = dist(P, c);
-            if (s < 0 || s >= r || !inside(P, onPlane(P, c, s), r)) continue;
-            const D3 N = unitN(P);
-            if ((surfaces[P.surf].flags & 0x200) && dotd(N, m) >= 0) continue;
-            c = {c.x + N.x * (r - s), c.y + N.y * (r - s), c.z + N.z * (r - s)};
-            touch(pi);
-        }
-    std::vector<D3> normals;
-    for (int iter = 0; iter < 4 && dotd(m, m) > 1e-6; ++iter) {
-        double tBest = 2.0;
-        int32_t hit = -1;
-        for (int32_t pi : cand) {
-            const TbPoly& P = polys[size_t(pi)];
-            if (P.n == std::array<int16_t, 3>{}) continue;
-            const D3 N = unitN(P);
-            const double vn = dotd(N, m);
-            if (vn >= 0) continue;
-            const double s0 = dist(P, c), s1 = s0 + vn;
-            if (s0 < r - 0.5 || s1 >= r) continue;
-            const double t = std::clamp((s0 - r) / (s0 - s1), 0.0, 1.0);
-            const D3 p{c.x + m.x * t, c.y + m.y * t, c.z + m.z * t};
-            if (t < tBest && inside(P, onPlane(P, p, r), r)) tBest = t, hit = pi;
-        }
-        if (hit < 0) {
-            c = {c.x + m.x, c.y + m.y, c.z + m.z};
-            break;
-        }
-        const D3 N = unitN(polys[size_t(hit)]);
-        const double t = std::max(0.0, tBest - 1e-3);
-        c = {c.x + m.x * t, c.y + m.y * t, c.z + m.z * t};
-        m = {m.x * (1 - t), m.y * (1 - t), m.z * (1 - t)};
-        const double vn = dotd(N, m);
-        m = {m.x - N.x * vn, m.y - N.y * vn, m.z - N.z * vn};
-        touch(hit);
-        for (const D3& o : normals)
-            if (dotd(o, m) < -1e-6) m = {0, 0, 0};  // pushed into two contact normals: crease stop
-        normals.push_back(N);
-    }
-    centre = {int32_t(std::lround(c.x)), int32_t(std::lround(c.y)), int32_t(std::lround(c.z))};
 }
 
 } // namespace bb::game

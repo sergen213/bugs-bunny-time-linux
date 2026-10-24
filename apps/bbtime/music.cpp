@@ -65,22 +65,32 @@ bb::AudioDevice* audioDevice() {
     return dev->ok() ? dev.get() : nullptr;
 }
 
-void playMusic(const fs::path& track, const fs::path& next, bool paused) {
+fs::path litSpeechFile(const fs::path& gameRoot, int language) {
+    return find(gameRoot, {"Datas", "speeches", std::format("Speech{:02}.xa", language)});
+}
+
+fs::path tbSpeechFile(const fs::path& gameRoot, int language, int clip) {
+    return find(gameRoot, {"Datas", "SPEECH", std::format("{:02}", language), std::format("Speech{}.xa", clip)});
+}
+
+void playMusic(const fs::path& track, const fs::path& next, bool paused, uint64_t offset, uint64_t size) {
     static fs::path wanted, playing;  // the caller's track; the stream (wanted, or `next` after it ended)
-    auto start = [](const fs::path& t, bool loop) {
+    static std::pair<uint64_t, uint64_t> range;  // the caller's clip of `track`
+    auto start = [&](const fs::path& t, bool loop) {
         if (bb::AudioDevice* d = audioDevice()) {
             try {
-                d->playMusic(t, loop);
+                d->playMusic(t, loop, t == track ? offset : 0, t == track ? size : 0);
                 std::println("bbtime: music {}", t.string());
             } catch (const std::exception& e) {
                 std::println(stderr, "bbtime: music {}: {}", t.string(), e.what());
             }
         }
     };
-    if (track != wanted) {
+    if (track != wanted || range != std::pair{offset, size}) {
         wanted = playing = track;
+        range = {offset, size};
         if (dev) dev->stopMusic();
-        if (!track.empty()) start(track, next.empty() || next == track);
+        if (!track.empty()) start(track, !size && (next.empty() || next == track));
     }
     if (!dev) return;
     dev->pauseMusic(paused);

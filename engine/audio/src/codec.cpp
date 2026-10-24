@@ -88,8 +88,15 @@ XaStream::XaStream(const std::filesystem::path& p, XaLayout layout) : layout_(la
     }
     f_.open(p, std::ios::binary | std::ios::ate);
     if (!f_) throw std::runtime_error("cannot open " + p.string());
-    bytes_ = uint64_t(f_.tellg());
+    bytes_ = end_ = uint64_t(f_.tellg());
     f_.seekg(0);
+}
+
+void XaStream::clip(uint64_t offset, uint64_t size) {
+    if (pcm_.rate) return;
+    begin_ = std::min(offset, bytes_);
+    end_ = std::min(bytes_, begin_ + size);
+    rewind();
 }
 
 size_t XaStream::read(size_t maxBytes, std::vector<int16_t>& out) {
@@ -105,9 +112,11 @@ size_t XaStream::read(size_t maxBytes, std::vector<int16_t>& out) {
         pcmPos_ = f;
         return layout_ == XaLayout::Stereo ? n : (n + 1) / 2;
     }
+    maxBytes = size_t(std::min<uint64_t>(maxBytes, end_ - pos_));
     buf_.resize(maxBytes);
     f_.read(reinterpret_cast<char*>(buf_.data()), std::streamsize(maxBytes));
     const size_t n = size_t(f_.gcount());
+    pos_ += n;
     decodeXa(std::span(buf_).first(n), layout_, st_, out);
     return n;
 }
@@ -116,7 +125,8 @@ void XaStream::rewind() {
     pcmPos_ = 0;
     if (pcm_.rate) return;
     f_.clear();
-    f_.seekg(0);
+    f_.seekg(std::streamoff(begin_));
+    pos_ = begin_;
     st_[0] = st_[1] = {};
 }
 

@@ -62,7 +62,7 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   launcher's "Shadows (Vulkan)"; default `rt_ao`): `map` = 4 cascaded 2048² shadow maps (every GPU); `rt` = ray-query
   shadows; `rt_ao` = plus ray-traced ambient occlusion (6 cosine rays, 210 units, closest-hit falloff). `rt`/`rt_ao`
   fall back to `map` without `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` (or with `BBTIME_VK_NO_RT=1`); the
-  diagnostics overlay (F3) shows the probe and the mode drawn.
+  diagnostics overlay (F7) shows the probe and the mode drawn.
 - **Sun**: 55° high, behind the level's opening camera (its yaw at the first frame after the level upload) and 35°
   to its right, so the opening view is front-lit and shadows fall away from the camera. Shadowed surfaces keep 55 % of
   their baked vertex colour; the shading only darkens (faces turned from the sun count as shadowed, soft terminator).
@@ -120,7 +120,12 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
   of a filled sea are also drawn as the original over the stylised water, so their glow lines stay (VIQ01 cliffs).
   No fill for layers with ground under them that are not an open sea (L02B1 / L02B2 strips, L03C lagoon, TB pools) or
   with a static layer at that height, the game's own surface whose gaps are deliberate (CCMERLIN / Merlin moat:
-  drawbridge). Where nothing was drawn under the water (copy depth = clear) the bed is taken far along the view ray. The
+  drawbridge). TB water zones (the exe's 0x1000 trigger zones, `0x44f550`, `Scene::waterZones` from
+  `TbWorld::waterZoneTops`) get their own fill: a zone whose top rectangle holds a level water-layer triangle (centroid
+  inside the zone, within 100 units of its top) joins the fill at the zone top — the surface the game measures depth
+  and swims from — even where the data only has scattered additive patches (Granny pond; wake
+  `local/shots/w13/side_granny_wake.png`); zones without layers there (kill / trigger volumes over pits) get none, and
+  without a sea fill the zone fill takes the tint of the layers at its height. Where nothing was drawn under the water (copy depth = clear) the bed is taken far along the view ray. The
   opaque + alpha-tested scene is copied (colour, depth; MSAA: depth resolved sample 0) and the water drawn opaque over
   it: absorption teal→deep blue over the refracted bed — or the original's colour: an opaque surface's hue (texture
   mean × vertex colour) at no less than its brightness, its dominant channel absorbed least (AZCASG05 lavender stream,
@@ -197,6 +202,28 @@ contexts; the renderer owns every image.
 
   Screenshots (quality comparison, overlay FPS, walking capture real / generated / real / cross-fade):
   `local/shots/w9vk2/`.
+
+## Enhanced: BBLIT-Remaster ideas (wave 14)
+
+Ideas and constants from BBLIT-Remaster (MIT, InLineR495), a renderer/input mod of LiT bugs.exe 1.6; no code copied.
+Original Fidelity is unaffected (pixel-identical `--no-hud` pairs, `local/shots/w14/orig/`).
+
+- Pose interpolation (`bb::interpolatePose`): only while a clip really counts a frame down, and the frame-lead only
+  within one clip; attached actors move with the parent part's interpolated origin (`LitWorld::parentPoint`);
+  shadows lerp from the owner's shadow of the last tick (`Play/TbPlay::prevShadows`); LiT teleports over 1500
+  (`kLitJump`) and camera cuts over 4500 snap. Check: `BBTIME_MOTION=4:file` + `tools/re/motion_check.py`
+  (LS01 / L01A / ARCA01 Enhanced mean evenness 0.25-0.29 against 1.0 in Original, no collapses; 15 Hz clips glide
+  every tick; traces in `local/w14/motion/`).
+- Right-stick camera, jump buffer, HUD edges: `test_game` testEnhancedInput.
+- Fog to the backdrop (Vulkan): the background layer (TB domes, LiT type-9 sky in Enhanced) is copied before the
+  world (`Renderer::copyColor`, scene.frag bit 13) and fog fades into it. GL keeps black.
+- Ground haze (Vulkan, `haze` %, BBLIT [level4/5/7/8]): L01A, L01B, L01D1, L01D2; top 800 above Bugs' feet eased
+  τ 1.5 s, 1200 thick, 1800..7500 far, backdrop horizon colour, 0..5° band below the horizon on the background.
+- `title_logo` (TITLE entity 20 scaled toward the eye), `push_r` (type-5 stone drawn out of Bugs' cylinder, ≤ 120).
+- Not taken: the portal margin (no hole in 109 A/B frames on L01A / L02A1 against `BBTIME_LIT_ALL_ZONES`: the walk
+  uses each frame's own camera), distant pop-in fade (far drawing already shows far actors; the only fades were at
+  level start), raw STP (PC data lacks the bits). Far drawing cannot start SFX (far actors are not ticked); no
+  stray actor at the L03A docks (`local/shots/w14/enh/far_L03A_*.png`: only water-wake pixels differ).
 
 ## Known caveats
 

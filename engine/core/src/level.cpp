@@ -89,7 +89,7 @@ struct Builder {
     int16_t zone = -1;                      // world model: its chunk's zone id (tag 0x21), -1 = none
 
     // Face texture id -> texture index (>= 0), texture link (-2 - anim index), or -1 = alias 0: the original resolves
-    // ids through the alias table DAT_004e5e80 and never draws bucket 0 (TEXTURE_GAP.md §1).
+    // ids through the alias table 0x4e5e80 and never draws bucket 0 (TEXTURE_GAP.md §1).
     int32_t resolve(uint32_t id) {
         if (auto it = tex.find(id); it != tex.end()) return it->second;
         if (auto it = links.find(id); it != links.end()) {
@@ -200,7 +200,7 @@ struct Builder {
                     // Portal (0x40fe90): object-table corner indices, target zone. Cell / hull rejects would skip portals
                     // inside their record range, but no LiT portal lies inside one (all 1527 in 79 levels), so not modelled.
                     if (t == 0x10 && world && zone >= 0) {
-                        ZonePortal pt{in.u16(p + 16), {}};
+                        ZonePortal pt{in.u16(p + 16), in.u16(p + 18), {}};
                         bool ok = true;
                         for (size_t i = 0; i < 4; ++i) {
                             const uint16_t vi = in.u16(p + 8 + 2 * i);
@@ -471,6 +471,11 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             else f.pcBlend = Blend::Additive, f.pcAlpha = 64;
         }
     }
+    // Fog unit (0x42e7a0 case '=': chunk 0x3b tag 0x3d s16 @0 / 4, C division) -> 0x4b38a0.
+    for (const ScriptItem& it : script.items)
+        if (it.kind == ScriptItem::Kind::Chunk && it.code == 0x3b)
+            for (const ScriptTag& t : it.tags)
+                if (t.id == 0x3d && t.data.size() >= 2) s.litFogUnit = uint16_t(int16_t(t.data[0] | t.data[1] << 8) / 4);
     // Overlay font: the first class-8 sprite asset listed (tag 0x0f) by template entity 68 (0x44ccd0 / 0x44e310 take
     // the actor's first asset with +0x4e == 8). Every record is a whole TIM at u, v = 0 (63/63 levels, Inferred
     // from the data: w, h = TIM size).
@@ -535,8 +540,8 @@ Scene buildLitScene(const BzeFile& bze, const std::string& level) {
             TextureAnim an;
             an.linkId = uint16_t(t.data[0] | t.data[1] << 8);
             for (uint16_t fid : *src)
-                if (auto x = b.tex.find(fid); x != b.tex.end()) an.frames.push_back(x->second);
-                else ++linkFrameErrors;
+                if (auto x = b.tex.find(fid); x != b.tex.end()) an.frames.push_back(x->second), an.records.push_back(x->second);
+                else ++linkFrameErrors, an.records.push_back(-1);
             if (an.frames.empty()) continue;
             if (flip) {
                 an.startFrame = box.empty() ? 0 : uint32_t(box[0] | box[1] << 8) % an.frames.size();
