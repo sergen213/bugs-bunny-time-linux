@@ -64,6 +64,22 @@ bool walkZones(const std::vector<WorldZone>& zones, const glm::mat4& vp, const Z
         walk(e.zone, gen, zones[size_t(e.zone)].depth);
     }
     if (skip != cam && table.size() < 24) table.push_back({cam, false});
+    // Enhanced: draw-only generations past the depth limit (BBLIT-Remaster room_depth 3 = stock 1 + 2), from the
+    // zones the limit flagged; zones queued by A17 stay hidden. The table is left as the exe's.
+    const auto queued = [&](uint16_t z) { return std::ranges::find(view.messages, z) != view.messages.end(); };
+    std::vector<uint16_t> front;
+    if (view.drawDepth)
+        for (const ZoneEntry& e : table)
+            if (e.flagged && has(e.zone) && !queued(uint16_t(e.zone)) && !drawn[size_t(e.zone)]) front.push_back(uint16_t(e.zone));
+    for (int g = 0; g < view.drawDepth && !front.empty(); ++g) {
+        for (const uint16_t z : front) drawn[z] = 1;
+        std::vector<uint16_t> next;
+        for (const uint16_t z : front)
+            for (const ZonePortal& p : zones[z].portals)
+                if (has(p.to) && !drawn[p.to] && !queued(p.to) && std::ranges::find(next, p.to) == next.end() && !outside(p.quad, vp))
+                    next.push_back(p.to);
+        front = std::move(next);
+    }
     return true;
 }
 

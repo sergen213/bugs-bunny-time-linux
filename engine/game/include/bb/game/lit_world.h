@@ -189,7 +189,7 @@ struct LitActor : Mover {
     int16_t matYaw = 0;            // local yaw in the coordinate matrix +0x80: rebuilt after the world yaw is read (one tick behind)
     Mat mat;                       // +0x80 rotation kept while flagsC 0x20 (an f3 0x20 hand spawn, 0x4393e0; type 31 flies along it)
     bool visible = true;           // +4 bit 2 (cleared when culled)
-    bool far = false;              // hidden only by the +0x3e distance (+0x3c & 0x42): Enhanced still draws it
+    bool far = false;              // hidden only by the +0x3e distance (+0x3c & 0x42) or zone visibility (& 1): Enhanced still draws it
     bool active = false;           // linked into the active list this tick
     bool dead = false;             // flags14 0x100 handled: freed
     V3 hand;                       // +0x58 attach point (TOD packet 10 part origin, world); valid when handSet (+0x68)

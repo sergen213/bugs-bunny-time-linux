@@ -591,7 +591,7 @@ void LitWorld::actorsTick() {
                      const auto e = std::ranges::find(*zoneTable, a.zone, &std::pair<int16_t, bool>::first);
                      return e == zoneTable->end() || (e->second && !(a.flags8 & 0x10000));
                  }()))) {
-                a.visible = false;  // the exe clears the draw bit (+4 & 2) on both paths (0x447d40)
+                a.visible = false, a.far = true;  // the exe clears the draw bit (+4 & 2) on both paths (0x447d40); Enhanced draws it where its zone is drawn
                 a.flags18 |= 0x100;
                 if (!(a.act3c & 0x40)) continue;
             }

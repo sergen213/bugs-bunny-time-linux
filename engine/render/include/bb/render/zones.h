@@ -15,6 +15,9 @@ struct ZoneView {
     int16_t camZone = -1, playerZone = -1;
     bool cameraNode = false;
     std::vector<uint16_t> messages;
+    // Enhanced draw distance (BBLIT-Remaster room_depth): zones up to this many portal generations past a zone's
+    // depth limit +0xb5 are drawn too. Drawing only: the table (actor activation) stays the exe's.
+    uint8_t drawDepth = 0;
 };
 
 // Visible-zone table 0x4b3460 entry: zone id, flag word bit 0 (walk depth exceeded or zone queued by A17: neither

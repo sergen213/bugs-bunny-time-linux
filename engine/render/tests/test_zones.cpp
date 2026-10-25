@@ -71,6 +71,13 @@ int main() {
         assert(t.size() == p.table.size());
         for (size_t i = 0; i < t.size(); ++i) assert(t[i].zone == p.table[i].first && t[i].flagged == p.table[i].second);
     }
+    {  // Enhanced drawDepth: the depth-flagged zone 4 is drawn, the table (actor activation) stays the exe's
+        const Probe& p = probes[1];
+        const glm::mat4 vp = projection(kOriginalVFovRad, 4.0f / 3.0f, 10.0f, 60000.0f) *
+                             glm::lookAt(glm::vec3(p.eye.x, -p.eye.y, -p.eye.z), glm::vec3(p.look.x, -p.look.y, -p.look.z), glm::vec3(0, 1, 0));
+        assert(walkZones(s.zones, vp, {2, 2, false, {}}, t, drawn) && !drawn[4]);
+        assert(walkZones(s.zones, vp, {2, 2, false, {}, 2}, t, drawn) && drawn[4] && t.size() == 3 && t[2].zone == 4 && t[2].flagged);
+    }
     // L04A1 (/b29, local/wine/compare/w13lit/steer/zq_L04A1.txt): Bugs in zone 30, its logic posts zone 31 by A17 every
     // tick (queue 0x4b2480 = {31}); the portal to 31 adds it flagged (31 neither drawn nor walked), and the table
     // without the queue would have listed it unflagged.
@@ -92,6 +99,9 @@ int main() {
         assert(walkZones(s4.zones, vp, {30, 30, false, {31}}, t, drawn));
         assert(t.size() == p.table.size());
         for (size_t i = 0; i < t.size(); ++i) assert(t[i].zone == p.table[i].first && t[i].flagged == p.table[i].second);
-        if (t.size() == 2) assert(drawn[31] == 0 && walkZones(s4.zones, vp, {30, 30, false, {}}, t, drawn) && !t[1].flagged && drawn[31]);
+        if (t.size() == 2) {
+            assert(walkZones(s4.zones, vp, {30, 30, false, {31}, 2}, t, drawn) && drawn[31] == 0);  // queued: hidden at any depth
+            assert(walkZones(s4.zones, vp, {30, 30, false, {}}, t, drawn) && !t[1].flagged && drawn[31]);
+        }
     }
 }

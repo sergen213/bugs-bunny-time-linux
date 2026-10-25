@@ -3,6 +3,17 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.12.3 — 2026-10-25 (LiT hub return after Quit, Enhanced zone draw distance)
+
+- LiT: quitting a level back to the hub no longer leaves Merlin stuck in front of another era. The ticks of a level
+  before its first drawn frame treated every zone as visible, so on the hub's return through a Stone Age door the
+  1930s hub's door director woke too and a second Merlin took over the camera there (the save prompt over the wrong
+  background, then no way out). Those ticks now read the zone walk of the starting view, like a drawn frame.
+- LiT Enhanced draw distance (as BBLIT-Remaster's `room_depth` 3): zones up to two portal steps past the original's
+  depth limit are drawn, so rooms and terrain further down a level no longer pop in at the next portal. Characters
+  and items beyond their activation range or in those zones are drawn (frozen) only where their zone is drawn.
+  Game logic still sees the original's zones. Test `render.test_zones`.
+
 ## 0.12.2 — 2026-10-25 (LiT era travel from the time machine)
 
 - LiT: travelling to an era from the Nowhere time machine works again. After the vortex fly-out the hub script moves

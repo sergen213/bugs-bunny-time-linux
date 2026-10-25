@@ -493,6 +493,28 @@ struct App {
                 if (!k.array && k.yaw >= 0) w.p.yaw = int16_t(k.yaw);
             }
     }
+    // The visible-zone table the next tick's +0x3c & 1 actor test reads (0x447d40): each zone's first entry.
+    static std::optional<std::vector<std::pair<int16_t, bool>>> litZoneTable(const std::vector<bb::render::ZoneEntry>& table) {
+        if (table.empty()) return std::nullopt;
+        std::vector<std::pair<int16_t, bool>> zt;
+        for (const bb::render::ZoneEntry& e : table)
+            if (std::ranges::find(zt, e.zone, &std::pair<int16_t, bool>::first) == zt.end()) zt.emplace_back(e.zone, e.flagged);
+        return zt;
+    }
+    // A level's ticks before its first drawn frame read the table of the view at hand, not "every zone" (LitWorld
+    // without a table): LS01 entered back through an era door woke zone 4's door director too, whose second Merlin
+    // took the camera to the 1930s hub and never let go.
+    void primeLitZones() {
+        if (!play || play->freeFly || play->world.zoneTable || scene.zones.empty()) return;
+        const bb::game::LitWorld& w = play->world;
+        const bool box = (s.fidelity == Fidelity::Original && s.pillarbox) || s.frame43;
+        const float aspect = box || r.height() == 0 ? 4.0f / 3.0f : float(r.width()) / float(r.height());
+        const glm::mat4 vp = bb::render::projection(s.vfovRad(), aspect, s.zNear, s.zFar) * play->camera(1.0f, false).view();
+        std::vector<bb::render::ZoneEntry> table;
+        std::vector<uint8_t> drawn;
+        bb::render::walkZones(scene.zones, vp, {w.camZone, w.p.zone, (w.cam.flags & 0x300) != 0, w.zoneMessages}, table, drawn);
+        play->world.zoneTable = litZoneTable(table);
+    }
     bool frontEnd = false;                // session started from a game's original front end: leaving returns to Main
     std::vector<uint32_t> fontImages;     // per Scene::overlayFont entry (0 = missing), built by drawOverlayText
     Fidelity fontFidelity = Fidelity::Original;
@@ -1035,11 +1057,11 @@ struct App {
             play->world.jumpBuffer = s.fidelity == Fidelity::Enhanced ? uint8_t(args.cfg.jumpBuffer) : 0;  // lit_world.h
             if (litEnter) {  // 0x4065e0 after the load: the second unrendered tick (counter 5; loadUpdate stood for the
                 litEnter = false;  // load pass and counter 3), update 1 of the fade in, then tick + draw (counter 7)
-                litPoke(play->world), play->tick(input());
+                primeLitZones(), litPoke(play->world), play->tick(input());
                 play->world.fadeIn(1, 0x100);
                 play->world.fadeTick();
             }
-            litPoke(play->world), play->tick(input());
+            primeLitZones(), litPoke(play->world), play->tick(input());
             litSync(play->world);
             pumpSfx(play->world.sfx);
             // 0x407190: title requests 4/5 + the Savedata read (a game started: its GAME_DATA image), then save (6).
@@ -1401,7 +1423,8 @@ struct App {
             // Debug: BBTIME_LIT_ALL_ZONES=1 draws every zone (A/B against the walk).
             static const bool allZones = std::getenv("BBTIME_LIT_ALL_ZONES");
             if (play && !freeCamera() && !allZones)
-                r.setZoneView({play->world.camZone, play->world.p.zone, (play->world.cam.flags & 0x300) != 0, play->world.zoneMessages});
+                r.setZoneView({play->world.camZone, play->world.p.zone, (play->world.cam.flags & 0x300) != 0, play->world.zoneMessages,
+                               uint8_t(lerp && !s.frame43 ? 2 : 0)});  // Enhanced: BBLIT-Remaster room_depth 3
             else
                 r.setZoneView({});
             {  // Texture links (LiT 0x4e5e80 aliases, TB class-2 link entities): the world's record, else the clock
@@ -1416,15 +1439,7 @@ struct App {
             r.drawScene(c, s);
             if constexpr (requires { r.underwater(); })  // Enhanced water: muffled under the surface (Vulkan)
                 if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->setUnderwater(r.underwater());
-            if (play) {  // the table the next tick's +0x3c & 1 actor test reads: each zone's first entry
-                std::optional<std::vector<std::pair<int16_t, bool>>> zt;
-                if (!r.zoneTable().empty()) {
-                    zt.emplace();
-                    for (const bb::render::ZoneEntry& e : r.zoneTable())
-                        if (std::ranges::find(*zt, e.zone, &std::pair<int16_t, bool>::first) == zt->end()) zt->emplace_back(e.zone, e.flagged);
-                }
-                play->world.zoneTable = std::move(zt);
-            }
+            if (play) play->world.zoneTable = litZoneTable(r.zoneTable());  // what the next tick's +0x3c & 1 test reads
             if (play || tbPlay) {
                 if (tbPlay) drawTbBoxes();  // letterbox bars + text-box rects, under the glyphs (0x464c30 / 0x4662f0)
                 if (play) drawLitBars();
@@ -1606,6 +1621,8 @@ struct App {
                     for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].background = true;  // first; fog fades into it
                 if (const uint32_t u = scene.litFogUnit)
                     for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].fogEnd = litFog(u, litFar(&a, u));
+                if (!a.visible)  // drawn only for the Enhanced distance: not over a zone the walk does not draw
+                    for (size_t k = first; k < actorMeshes.size(); ++k) actorMeshes[k].zone = a.zone;
                 traced(int(ai), first);
                 const auto moved = [&](auto&& f) {
                     for (size_t k = first; k < actorMeshes.size(); ++k)
@@ -1672,6 +1689,7 @@ struct App {
                 bb::Mesh& m = actorMeshes.emplace_back();
                 const bool pc = s.fidelity == bb::render::Fidelity::Original;  // PC GL texture mode (scene.h SpriteFrame)
                 m.name = "sprite", m.texture = f.texture, m.blend = pc ? f.pcBlend : f.blend, m.twoSided = true;
+                if (!a.visible) m.zone = a.zone;  // Enhanced distance draw: only over a drawn zone
                 m.indices = {2, 3, 1, 2, 1, 0};
                 using Corner = std::array<float, 4>;  // view dx, dy, u, v
                 for (const Corner& q : {Corner{-hw, y0 + h, 0, 0}, Corner{hw, y0 + h, 1, 0}, Corner{-hw, y0, 0, 1}, Corner{hw, y0, 1, 1}}) {
