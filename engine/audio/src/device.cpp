@@ -1,9 +1,11 @@
 // OpenAL playback: streamed .xa music + one-shot AIFF sound effects, pumped from the main loop.
 #include "bb/audio.h"
 
+#define AL_ALEXT_PROTOTYPES  // EFX entry points (OpenAL Soft exports them)
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <AL/alext.h>
+#include <AL/efx.h>
 
 #include <algorithm>
 #include <cmath>
@@ -35,6 +37,12 @@ AudioDevice::AudioDevice() {
     }
     alGenSources(1, &musicSrc_);
     alGenBuffers(kBuffers, musicBufs_);
+    if (alcIsExtensionPresent(dev_, "ALC_EXT_EFX")) {
+        alGetError();
+        alGenFilters(1, &lowpass_);
+        alFilteri(lowpass_, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+        if (alGetError() != AL_NO_ERROR) alDeleteFilters(1, &lowpass_), lowpass_ = 0;
+    }
 }
 
 AudioDevice::~AudioDevice() {
@@ -44,6 +52,7 @@ AudioDevice::~AudioDevice() {
     stopSfx();
     alDeleteSources(1, &musicSrc_);
     alDeleteBuffers(kBuffers, musicBufs_);
+    if (lowpass_) alDeleteFilters(1, &lowpass_);
     alcMakeContextCurrent(nullptr);
     alcDestroyContext(ctx_);
     alcCloseDevice(dev_);
@@ -95,6 +104,21 @@ void AudioDevice::setMusicVolume(float gain) {
 }
 
 void AudioDevice::setSfxVolume(float gain) { sfxGain_ = std::clamp(gain, 0.0f, 1.0f); }
+
+// The filter's parameters are copied when attached, so a new amount re-attaches it to the music and every game voice.
+void AudioDevice::setUnderwater(float amount) {
+    amount = std::clamp(amount, 0.0f, 1.0f);
+    if (!ctx_ || !lowpass_ || (std::abs(amount - underwater_) < 0.01f && (amount > 0.0f) == (underwater_ > 0.0f))) return;
+    underwater_ = amount;
+    alFilterf(lowpass_, AL_LOWPASS_GAIN, 1.0f - 0.3f * amount);     // -3 dB
+    alFilterf(lowpass_, AL_LOWPASS_GAINHF, 1.0f - 0.92f * amount);  // highs to 8%
+    filter(musicSrc_);
+    for (const auto& [k, v] : keyed_) filter(v.src);
+}
+
+void AudioDevice::filter(unsigned src) const {
+    if (lowpass_) alSourcei(src, AL_DIRECT_FILTER, underwater_ > 0.0f ? ALint(lowpass_) : AL_FILTER_NULL);
+}
 
 void AudioDevice::playSfx(const AiffSound& s) {
     if (!ctx_ || s.pcm.empty()) return;
@@ -148,6 +172,7 @@ void AudioDevice::sfx(const SfxCmd& c) {
         alSourcei(v.src, AL_LOOPING, AL_TRUE);
     }
     alSourcei(v.src, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);
+    filter(v.src);
     alSourcei(v.src, AL_BUFFER, ALint(v.buf));
     alSourcef(v.src, AL_GAIN, dsGain(c.volume));
     alSourcePlay(v.src);

@@ -1414,6 +1414,8 @@ struct App {
                 r.setTextureLinks(std::move(links));
             }
             r.drawScene(c, s);
+            if constexpr (requires { r.underwater(); })  // Enhanced water: muffled under the surface (Vulkan)
+                if (bb::AudioDevice* dev = args.mute ? nullptr : bbtime::audioDevice()) dev->setUnderwater(r.underwater());
             if (play) {  // the table the next tick's +0x3c & 1 actor test reads: each zone's first entry
                 std::optional<std::vector<std::pair<int16_t, bool>>> zt;
                 if (!r.zoneTable().empty()) {
@@ -1611,8 +1613,10 @@ struct App {
                 };
                 // Enhanced visual repairs (BBLIT-Remaster ideas); the simulation, shadows and particles keep the logical
                 // position. TITLE logo (template entity 20, z -2160..-2120): drawn at title_logo % of its depth toward the
-                // eye (same screen place), ahead of the time machine's carrot (to -2062), which cut through it.
-                if (lerp && litLevel == 0 && a.entityId == 20 && args.cfg.titleLogo < 100) {
+                // eye (same screen place), ahead of the time machine's carrot (to -2062), which cut through it. Not while
+                // the menu's slot panel (entity 1269, z -2000) is up: it covers the logo there, as in the exe.
+                if (lerp && litLevel == 0 && a.entityId == 20 && args.cfg.titleLogo < 100 &&
+                    std::ranges::none_of(play->world.actors, [](const bb::game::LitActor& o) { return o.entityId == 1269 && !o.dead; })) {
                     const float k = float(args.cfg.titleLogo) / 100.0f;
                     moved([&](bb::Vertex& v) {
                         for (int j = 0; j < 3; ++j) v.pos[j] = eye[j] + (v.pos[j] - eye[j]) * k;

@@ -684,7 +684,7 @@ Scene buildTbScene(const BzeFile& bze, const std::string& level, double brightne
                                   s.stats.worldModels, s.stats.skyDomes, unplaced, s.stats.props, s.stats.skippedActors));
     if (!players.empty()) s.notes.push_back("Players (identity Inferred): " + players);
     if (s.stats.invalidPrims) s.notes.push_back(std::format("{} primitives fail CheckPrimValidity: skipped as in the game", s.stats.invalidPrims));
-    if (s.stats.rejectedPrims) s.notes.push_back(std::format("{} primitives use a vertex beyond model x/y ±32000: skipped as in the game (0x408990)", s.stats.rejectedPrims));
+    if (s.stats.rejectedPrims) s.notes.push_back(std::format("{} primitives use a vertex beyond model x/y +-32000: skipped as in the game (0x408990)", s.stats.rejectedPrims));
     if (b.lodFaces) s.notes.push_back(std::format("{} far-LOD faces (octree tree C, DETAILS < 2 only) decoded, not drawn", b.lodFaces));
     if (!s.textureAnims.empty())
         s.notes.push_back(std::format("{} texture links (animated, TEXTURE_GAP.md) drive {} faces{}", s.textureAnims.size(),

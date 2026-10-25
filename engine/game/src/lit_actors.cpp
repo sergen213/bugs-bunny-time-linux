@@ -232,9 +232,17 @@ uint32_t LitWorld::todTick(const ActorModel& m, AnimState& st, uint16_t anim, ui
         self->handSet = st.attachPart >= 0;
         if (self->handSet) self->handPart = st.attachPart;
     }
-    if (self && self->handPart >= 0)
-        if (const auto o = partOriginQ12(st, size_t(self->handPart), self->pos, {self->rot[0], coordYaw(*self), self->rot[2]}, self->scale))
+    // Attached at a parent's part (+0xc4 super): the walk goes on through that part's chain, so the point turns with
+    // it (Merlin's mallet 196 swung in Bugs' hand); otherwise the yaw-only frame.
+    if (self && self->handPart >= 0) {
+        if (self->parent != -1 && self->parentPart >= 0) {
+            if (const auto l = partOriginQ12(st, size_t(self->handPart), {}, {self->rot[0], self->matYaw, self->rot[2]}, self->scale))
+                if (const auto o = partPoint(self->parent, self->parentPart, {self->local.x + l->x, self->local.y + l->y, self->local.z + l->z}))
+                    self->hand = *o;
+        } else if (const auto o = partOriginQ12(st, size_t(self->handPart), self->pos, {self->rot[0], coordYaw(*self), self->rot[2]}, self->scale)) {
             self->hand = *o;
+        }
+    }
     if (!boundary || r != AnimPlaying || st.frame == 0 || fx.empty()) return r;
     const uint16_t frame = uint16_t(st.frame - 1);
     const auto it = std::ranges::find(fx, st.anim, &AnimFx::anim);
@@ -918,6 +926,10 @@ void LitWorld::type14(size_t i) {
     }
 
     // Attacks on Bugs (flagsA 0x10000 hand, 0x800000 body contact), damage via 0x437d90 then knock-back state +0x1c.
+    // flagsA 0x20000 hits actors: the attach point +0x58 in a flags8-0x80 actor's box (0x433380), with 0x800000 its box
+    // overlap (boxHit); damage = step +0x16, contact ids both ways. Free: the target 0x2000000, self 0x40000000. Held
+    // by Bugs (+0x70) only while his attack runs (flags14 0x40, his +0x68 set): the point hit gives 0x6000000 (Merlin's
+    // mallet 196 swung at the target), the box hit only the contacts and damage.
     if (!(fa & 0x830000) || (a.flags14 & 0x81000)) {
         a.flags14 &= 0xdfffffbf;
     } else {
@@ -925,10 +937,28 @@ void LitWorld::type14(size_t i) {
         // Hand attack: the attach point +0x58 (TOD packet 10 of the last applied frame) inside Bugs' box (0x434840).
         if ((fa & 0x10000) && a.handSet && !(p.flags14 & 0x3000000) && handHitsPlayer(a.hand) && damagePlayer(a, st) && st->w[4])
             forceState(uint16_t(st->w[4]));
+        const bool swung = a.parent == kParentBugs && (p.flags14 & 0x40) && p.handSet;
+        auto hurt = [&](int k, uint32_t bits) {
+            LitActor& o = actors[size_t(k)];
+            o.flags14 |= bits;
+            o.contact = a.entityId;
+            a.contact = o.entityId;
+            o.damage = st->w[1];
+        };
         if (fa & 0x800000) {
             a.flags14 |= 0x20000000;
             if ((!(p.flags14 & 0x3000000) || (a.flags8 & 0x40000000)) && (a.flags14 & 0x8000) && damagePlayer(a, st) && st->w[4])
                 forceState(uint16_t(st->w[4]));
+            if (fa & 0x20000)
+                if (const int k = boxHit(i); k >= 0) {
+                    if (a.parent != kParentBugs) hurt(k, 0x2000000), a.flags14 |= 0x40000000;
+                    else if (swung) hurt(k, 0);
+                }
+        } else if ((fa & 0x20000) && a.handSet) {
+            if (const int k = pointHit(a.hand, 0x80, 0, int32_t(i)); k >= 0) {
+                if (a.parent != kParentBugs) hurt(k, 0x2000000), a.flags14 |= 0x40000000;
+                else if (swung) hurt(k, 0x6000000);
+            }
         }
     }
 
@@ -1910,9 +1940,9 @@ void LitWorld::spriteEffect(size_t i) {
 // Spawned attached (anim event f2 1, e.g. at Bugs' hand: his +0x6c). States as type 14: the first call starts state
 // 2 (else 1); +0x17e names the state (Bugs' rules set it through their +0x0c command); an empty / past-the-end step
 // starts state 1 (flags14 &= 0xf9ffffdf). A step with flagsA 0x20000 hits the first flags8-0x80 collision actor whose
-// position its box holds (0x433190: its full rotation, grown by its inflation, heights overlapping): flags14
-// 0x2000000, contact ids both ways, damage = step +0x16. Clip end -> next step (flagsA 4: freed). The coordinate chain
-// gives its position / heading (actorsTick followParent); let go (+0x70 = 0) it is freed.
+// position its box holds (boxHit): flags14 0x2000000, contact ids both ways, damage = step +0x16. Clip end -> next
+// step (flagsA 4: freed). The coordinate chain gives its position / heading (actorsTick followParent); let go (+0x70 =
+// 0) it is freed.
 void LitWorld::heldItem(size_t i) {
     LitActor& a = actors[i];
     const ActorDef& d = defs[size_t(a.def)];
@@ -1937,32 +1967,14 @@ void LitWorld::heldItem(size_t i) {
     }
     if (a.step < 0) { a.flags14 |= 0x100; return; }
     const ActorStep& st = d.steps[size_t(a.step)];
-    if (st.flagsA & 0x20000) {
-        Mat m;
-        rotMatrixZYX(m, 0x1000 - a.rot[0], 0x1000 - a.yaw, 0x1000 - a.rot[2]);
-        const auto& b = a.box;
-        const int32_t g = a.inflate;
-        for (const size_t k : collide_) {
-            LitActor& o = actors[k];
-            const int32_t ki = int32_t(k);
-            if (!(o.flags8 & 0x80) || o.def < 0 || defs[size_t(o.def)].cls != 2 || k == i || a.parent == ki || a.rider == ki ||
-                o.parent == int32_t(i))
-                continue;
-            const auto& ob = o.box;
-            if (!(ob[0] | ob[1] | ob[2] | ob[3] | ob[4] | ob[5])) continue;
-            const int32_t dx = int16_t(o.pos.x - a.pos.x), dy = int16_t(o.pos.y - a.pos.y), dz = int16_t(o.pos.z - a.pos.z);
-            if (uint32_t(dz * dz + dx * dx) > a.radius2) continue;
-            const V3 l = apply16(m, {dx, dy, dz});
-            if (b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= ob[1] + l.y &&
-                ob[4] + l.y <= b[1]) {
-                o.flags14 |= 0x2000000;
-                o.contact = a.entityId;
-                a.contact = o.entityId;
-                o.damage = st.w[1];
-                break;
-            }
+    if (st.flagsA & 0x20000)
+        if (const int k = boxHit(i); k >= 0) {
+            LitActor& o = actors[size_t(k)];
+            o.flags14 |= 0x2000000;
+            o.contact = a.entityId;
+            a.contact = o.entityId;
+            o.damage = st.w[1];
         }
-    }
     if (a.anim == st.anim) {
         if (animate(a, 0, 0) == AnimFinished) {
             a.anim = 0;
@@ -2350,6 +2362,31 @@ int LitWorld::pointHit(const V3& q, uint32_t mask, uint32_t exclude, int32_t si)
         if ((o.flags8 & mask) && o.def >= 0 && defs[size_t(o.def)].cls == 2 && int32_t(k) != si && !(o.flags8 & exclude) &&
             pointInBox(o, q))
             return int(k);
+    }
+    return -1;
+}
+
+// 0x433190(self, 0x80): the first flags8-0x80 collision actor (not self, its +0x70 parent, its +0x6c rider, nor its
+// child) whose position self's box holds: its full rotation, x/z grown by self's inflation, heights overlapping.
+int LitWorld::boxHit(size_t i) const {
+    const LitActor& a = actors[i];
+    Mat m;
+    rotMatrixZYX(m, 0x1000 - a.rot[0], 0x1000 - a.yaw, 0x1000 - a.rot[2]);
+    const auto& b = a.box;
+    const int32_t g = a.inflate;
+    for (const size_t k : collide_) {
+        const LitActor& o = actors[k];
+        const int32_t ki = int32_t(k);
+        if (!(o.flags8 & 0x80) || o.def < 0 || defs[size_t(o.def)].cls != 2 || k == i || a.parent == ki || a.rider == ki ||
+            o.parent == int32_t(i))
+            continue;
+        const auto& ob = o.box;
+        if (!(ob[0] | ob[1] | ob[2] | ob[3] | ob[4] | ob[5])) continue;
+        const int32_t dx = int16_t(o.pos.x - a.pos.x), dy = int16_t(o.pos.y - a.pos.y), dz = int16_t(o.pos.z - a.pos.z);
+        if (uint32_t(dz * dz + dx * dx) > a.radius2) continue;
+        const V3 l = apply16(m, {dx, dy, dz});
+        if (b[0] - g <= l.x && l.x <= b[3] + g && b[2] - g <= l.z && l.z <= b[5] + g && b[4] <= ob[1] + l.y && ob[4] + l.y <= b[1])
+            return ki;
     }
     return -1;
 }

@@ -82,7 +82,9 @@ struct Builder {
     std::map<uint32_t, int32_t> tex{};    // texture id -> Scene::textures index
     std::map<uint32_t, int32_t> links{};  // texture link id -> Scene::textureAnims index (TEXTURE_GAP.md)
     std::set<uint32_t> missing{};
-    std::map<std::tuple<uint32_t, int32_t, Blend, bool>, size_t> meshOf{};
+    // (group, texture key, blend, two-sided, zone): the zone keeps a chunk's faces before its first cell header (still
+    // the previous chunk's last group) out of that chunk's meshes (MERLIN: the zone-1 drawbridge in a zone-2 mesh).
+    std::map<std::tuple<uint32_t, int32_t, Blend, bool, int16_t>, size_t> meshOf{};
     ActorModel* actor = nullptr;            // set while building an actor model: meshes go to actor->meshes
     std::vector<uint16_t>* slots = nullptr; // the current actor mesh's slot list
     bool world = false;                     // building a chunk-0x20 world model (stats split)
@@ -131,7 +133,7 @@ struct Builder {
             slots = &am.slots;
             return am.mesh;
         }
-        auto [it, fresh] = meshOf.try_emplace({group, key, b, twoSided}, s.meshes.size());
+        auto [it, fresh] = meshOf.try_emplace({group, key, b, twoSided, world ? zone : int16_t(-1)}, s.meshes.size());
         if (fresh) {
             Mesh& m = s.meshes.emplace_back();
             m.name = std::format("{}/{}{}", gname, what(), twoSided ? "/2s" : "");

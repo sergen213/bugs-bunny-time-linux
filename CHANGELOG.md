@@ -3,6 +3,30 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.12.1 — 2026-10-25 (Wave 15: CCINTRO camera, LiT zone-split world meshes, mallet, title logo, TB rivers, underwater)
+
+- LiT: the new-game intro (CCINTRO) plays again. 0.12.0 required a camera node's actor to pass bbtime's zone culling,
+  which CCINTRO's camera actor never did, so Bugs fell from the origin and the camera showed a field from below; the
+  node now holds the view as in the original (`/b56`: camera flags 0x342, Bugs at the origin).
+- LiT: world faces of a chunk that come before its first cell header were merged into the previous chunk's meshes
+  and culled with that chunk's zone. MERLIN's wooden drawbridge and its chains were never drawn (the grey slab was
+  the moat behind the gap) and LB02's snow ground was missing; also affects parts of L01*, L02A1–A6, L02B*, L02C1/C4,
+  L03D1, L04A2, L04E*, L05A* (meshes are now grouped per world chunk zone).
+- LiT: Merlin's mallet hits again. A type-14 actor's flagsA 0x20000 attack (0x440120) is ported: its attach point
+  (or, with 0x800000, its box) hits a collision actor; a held one hits only while Bugs' attack runs (0x6000000), so
+  the swung mallet rings the high striker (S[54] & 4). The attach point of an actor held at a parent's part now
+  goes through that part's chain (it used to stay level with the item's root). Test `game.lit` (`testMalletMerlin`).
+- Enhanced TITLE logo depth (`title_logo`) no longer pulls the logo in front of the menu's slot panel (entity 1269):
+  as in the original, the panel covers it.
+- Enhanced water (Vulkan), TB rivers: a river drawn only as surf strips along its banks over a deep bed (VICASG04 ice
+  cave) now gets the stylised surface across the channel, the strips glowing on it as in the original (its middle
+  used to show the bare bed). Water-zone fills (AZQ01, ARCA04, Granny pond) are laid in 50-unit cells over their
+  bed and its holes instead of as whole rectangles, so none hangs out past a cliff (AZQ01's upper rivers).
+- Enhanced water (Vulkan) underwater look: with the eye under a water surface (a TB dive takes the camera down with
+  Bugs, Granny pond), the scene fogs into the water's colour within ~12 Bugs, textures sway and caustics drift on
+  everything below the surface; sound effects and music go through an OpenAL EFX low-pass (highs −22 dB at 5 kHz,
+  −3 dB overall). Eased in and out over ~0.3 s; `water = enhanced|cartoon` only.
+
 ## 0.12.0 — 2026-10-24 (Waves 12–14: TB sky domes, water/swimming, effects, entity classes, carrying/climbing, exact hand-ported TB mover; LiT render order, input, actors; BBLIT-Remaster-inspired Enhanced features)
 
 - Enhanced (ideas from BBLIT-Remaster, MIT, InLineR495; no code copied): poses interpolate between ticks (part

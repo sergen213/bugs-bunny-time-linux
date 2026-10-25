@@ -1641,12 +1641,16 @@ void LitWorld::cameraReset() {  // 0x431160 (camera reset, also A77)
 // applied to (0, 0, 1000), flags |= 0x100, the yaw 0x4b3e1a / 0x4b3e2c = atan2(eye − look), the distance 0x4b3da8 =
 // that x/z length + 1; flagsC 0x10000000 also seeds the candidate and the unshaken copies. Runtime: the title camera
 // actor (0, 146, 0) holds eye (1, 146, 0), look (1, 146, 1000), flags 0x342 (RUNTIME_REFERENCE.md §14).
+// bbtime does not gate on its `visible` (+4 & 2 stand-in): CCINTRO's camera actor (zone 3, act3c 0x61) is zone-culled
+// in bbtime from the first ticks on (Bugs falls from the origin, the follow camera leaves zone 3's view), so the node
+// never held the view (0.12.0: the intro showed a field from below). Runtime (/b56): flags 0x342, Bugs at (0, 0, 0)
+// and the eye on the node's path throughout; why the exe's first ticks keep the node is not traced (Inferred).
 void LitWorld::cameraNodes() {
     cam.flags &= ~0x300u;
     if (!scene_) return;
     for (const uint32_t k : order_) {
         LitActor& a = actors[k];
-        if (!a.active || a.dead || !a.visible || a.type == 7 || a.def < 0 || defs[size_t(a.def)].model < 0) continue;
+        if (!a.active || a.dead || a.type == 7 || a.def < 0 || defs[size_t(a.def)].model < 0) continue;
         if (std::ranges::all_of(a.box, [](int16_t v) { return v == 0; })) continue;
         const ActorModel& m = scene_->actorModels[size_t(defs[size_t(a.def)].model)];
         const std::vector<TodPart>& parts = a.animState.parts;

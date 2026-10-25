@@ -81,6 +81,9 @@ public:
     // Enhanced water (Settings::water): bodies wading / falling in this frame (positions, see render::WaterBody) and the
     // seconds since the previous call. Drives the wave field drawScene steps; the game simulation never reads it back.
     void setWaterBodies(std::span<const render::WaterBody> bodies, float dt);
+    // Enhanced water: how far the last drawScene's eye was under a water surface, 0 (above) .. 1 (submerged), eased
+    // over ~0.3 s (the underwater look; apps/bbtime muffles the audio by it).
+    float underwater() const { return under_; }
 
     // 2D images: returns a bindless slot handle, 0 on invalid input.
     uint32_t createImage(const Texture& tex);
@@ -332,6 +335,7 @@ private:
     std::vector<WaterTrack> waterTracks_;
     std::vector<uint16_t> waveHalf_;
     float waterDt_ = 0.0f, waterTime_ = 0.0f;
+    float under_ = 0.0f, underTime_ = 0.0f;  // underwater(); waterTime_ at its last update
     bool waterCartoon_ = false;  // the Enhanced water toon-shaded (Water::Cartoon; diagnostics line)
     bool waterOn_ = false;  // this drawScene draws the Enhanced water
     uint32_t waterColorSlot_ = kNoWater, waterDepthSlot_ = kNoWater, waveSlot_ = kNoWater, waterNormalSlot_ = kNoWater;

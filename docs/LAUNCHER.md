@@ -40,7 +40,7 @@ out-of-range values are skipped with a `line N:` warning and the default stays. 
 | `msaa` | 0, 2, 4, 8 (4) | `WindowConfig::msaaSamples` |
 | `shadows` | `off` \| `map` \| `rt` \| `rt_ao` (`rt_ao`) | Vulkan + Enhanced dynamic shadows (`rt`/`rt_ao` fall back to `map` without ray queries) |
 | `reflections` | boolean (`true`) | Vulkan + Enhanced ray-traced reflections on water / ice / polished floors (off without ray queries) |
-| `water` | `enhanced` \| `cartoon` \| `original` (`enhanced`) | Vulkan + Enhanced stylised interactive water (refraction, shore foam, reflections, waves); `cartoon` = the same toon-shaded; `original` = the games' own water layers |
+| `water` | `enhanced` \| `cartoon` \| `original` (`enhanced`) | Vulkan + Enhanced stylised interactive water (refraction, shore foam, reflections, waves; underwater fog, caustics and muffled sound with the eye under water); `cartoon` = the same toon-shaded; `original` = the games' own water layers |
 | `upscaling` | `off` \| `fsr_quality` \| `fsr_balanced` \| `fsr_performance` \| `native_aa` (`off`) | Vulkan + Enhanced AMD FSR 3.1.4 (render scale 1/1.5, 1/1.7, 1/2, 1); replaces MSAA while on |
 | `frame_generation` | boolean (`false`) | Vulkan + Enhanced FSR frame generation (one interpolated frame per rendered frame; with `upscaling = off` it runs FSR native AA) |
 | `music_volume`, `sfx_volume` | 0–100 (100) | audio; LiT: config.pc +0x34 / +0x30 (music at (v − 100) dB, below 50 no new music) |

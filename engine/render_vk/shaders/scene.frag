@@ -67,6 +67,7 @@ layout(set = 1, binding = 0) uniform Light {
     vec4 waves;       // wave field: xy origin (world xz), z 1/(cell·N), w cell (0 = none)
     vec4 water;       // x animation seconds, yz 1 / render-target size
     uvec4 waterSlots; // bindless uTex: opaque colour copy, its depth, wave heights, normal map
+    vec4 under;       // Enhanced underwater (eye under the water): x amount 0..1, y the surface's height, z seconds
 } L;
 layout(set = 1, binding = 1) uniform sampler2DArrayShadow uShadow;
 
@@ -418,6 +419,10 @@ vec3 backdrop(vec2 uv) { return textureLod(sampler2D(uTex[uint(pc.fogColorScale.
 
 void main() {
     vec2 uv = vUv;
+#ifdef LIT
+    // Underwater: the textures sway gently, a slow refraction wobble across the world.
+    if (L.under.x > 0.0) uv += L.under.x * 0.006 * vec2(sin(vWorld.z * 0.004 + L.under.z * 1.7), cos(vWorld.x * 0.004 + L.under.z * 1.3));
+#endif
     if ((pc.flags & 4096u) != 0u) {
         vec2 h = 0.5 / vec2(textureSize(sampler2D(uTex[pc.tex], uSamp[pc.samp]), 0));
         uv = clamp(uv, h, 1.0 - h);
@@ -458,6 +463,14 @@ void main() {
 #ifdef RT
         if (L.reflect != 0u && pc.material != 0u) c = reflection(c, n, ng);
 #endif
+    }
+    // Underwater: caustics, the light the waves above focus into drifting lace on everything below the surface,
+    // fading with depth (the scene colour stays as lit; renderer.cpp fogs it into the water's colour by distance).
+    if (L.under.x > 0.0 && vWorld.y < L.under.y && (pc.flags & 129u) == 0u) {
+        vec2 q = (vWorld.xz + vWorld.y * vec2(0.7, -0.4)) / (45.0 * kWU);  // y too: lace on the walls, not streaks
+        float n1 = valueNoise(q + L.under.z * vec2(0.31, 0.17)), n2 = valueNoise(1.37 * q - L.under.z * vec2(0.23, 0.29));
+        float caustic = pow(1.0 - abs(n1 - n2), 10.0) * exp(-(L.under.y - vWorld.y) / (160.0 * kWU));
+        c.rgb += L.under.x * 0.35 * caustic * vec3(0.8, 1.0, 1.0);
     }
 #endif
     if ((pc.flags & 16384u) != 0u) {

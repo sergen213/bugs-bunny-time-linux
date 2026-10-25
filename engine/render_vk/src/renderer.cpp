@@ -129,8 +129,9 @@ struct LightUbo {
     glm::mat4 invViewProj;
     glm::vec4 waves, water;
     glm::uvec4 waterSlots;
+    glm::vec4 under;  // Enhanced underwater: x underwater() 0..1, y the surface height over the eye, z seconds
 };
-static_assert(sizeof(LightUbo) == 592);
+static_assert(sizeof(LightUbo) == 608);
 
 // Smooth normals: faces meeting at a welded position are averaged (weighted by their corner angle) when they are
 // within this angle of each other, so rounded models shade smoothly while box edges and creases stay hard.
@@ -1731,6 +1732,7 @@ void Renderer::uploadScene(const Scene& scene) {
                 }
         bool holeFill = false;  // the fill closes holes around plane-less water layers (below)
         bool openSea = false;   // ... and they are a sea open to the horizon
+        bool rimFill = false;   // ... or rim strips along the banks of a channel whose middle shows its deep bed
         if (pLo.x > pHi.x && seaTotal > 0.0f) {
             // No planes / beds: TB draws its water as additive surf / ripple layers around holes the backdrop shows
             // through (TRCA01 moat, VIQ02 / VICA01 sea; LiT L03A2's sea), so the layers alone would be bands around a
@@ -1793,10 +1795,19 @@ void Renderer::uploadScene(const Scene& scene) {
                 pLo = wLo, pHi = wHi, holeFill = true;
                 for (GpuMesh& m : meshes_)  // the game's surf / ripple lines on the filled sea keep their glow (VIQ01 cliffs)
                     m.surf = m.water && m.blend == Blend::Additive && std::abs(m.center.y - y) < 20.0f;
+            } else if (!surface && n > 0 && scene.game == GameId::TimeBusters &&
+                       std::ranges::none_of(scene.waterZones, [&](const auto& z) { return std::abs(z[0][1] - y) < 100.0f; })) {
+                // Neither (TB): the layers are the surf strips along the banks of a river / channel over its deep bed
+                // (VICASG04 ice cave: the bed under every strip, so no holes, the middle bare). The fill joins the
+                // strips across the bed (fillCells: channel); the strips keep their glow over it. Not LiT, whose
+                // plane-less strips over ground are mist banks over roads (L02B1 / L02B2), nor where a water zone's
+                // top lies at the layers (its fill below is the surface Bugs swims in: Granny pond, AZQ01, ARCA04).
+                pLo = wLo, pHi = wHi, rimFill = true;
+                for (GpuMesh& m : meshes_) m.surf = m.water && m.blend == Blend::Additive && std::abs(m.center.y - y) < 20.0f;
             }
             if (std::getenv("BBTIME_VK_MATERIALS"))
                 std::println(stderr, "plane-less water at y {:.0f}: hole share {:.2f}{}", y, float(holes) / float(std::max(n, 1)),
-                             surface ? ", static surface layer (no hole fill)" : openSea ? ", open sea" : "");
+                             surface ? ", static surface layer (no hole fill)" : openSea ? ", open sea" : rimFill ? ", channel" : "");
         }
         water.insert(water.end(), slopeTris.begin(), slopeTris.end());
         const size_t layerTris = water.size();  // the level's own water (the fills append after it)
@@ -1848,6 +1859,20 @@ void Renderer::uploadScene(const Scene& scene) {
                 for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) fill.indices.push_back(n + k);  // facing up
                 for (const glm::vec2& q : {a, glm::vec2(b.x, a.y), b, a, b, glm::vec2(a.x, b.y)}) water.push_back({q.x, y, q.y});
             };
+            // rimFill: a cell over the bed (ground below the fill) with the level's own water strips on both sides
+            // along x or along z within 8 cells, no bank (ground over the water) or void between: the channel between
+            // the strips along its banks.
+            auto channel = [&](glm::vec2 p) {
+                auto reach = [&](glm::vec2 d) {
+                    for (int k = 1; k <= 8; ++k) {
+                        const glm::vec2 q = p + d * (float(k) * kFillCell);
+                        if (const auto o = own.height(q); o && std::abs(*o - y) < 20.0f) return true;
+                        if (const auto g = top.height(q); !g || *g > y + 5.0f) return false;
+                    }
+                    return false;
+                };
+                return (reach({1, 0}) && reach({-1, 0})) || (reach({0, 1}) && reach({0, -1}));
+            };
             // Row runs of open cells in [r0, r1) -> one quad each; cells inside [s0, s1) are skipped (already done).
             auto fillCells = [&](glm::vec2 r0, glm::vec2 r1, glm::vec2 s0, glm::vec2 s1) {
                 for (float z = r0.y; z < r1.y; z += kFillCell) {
@@ -1856,7 +1881,7 @@ void Renderer::uploadScene(const Scene& scene) {
                         const glm::vec2 p(x + 0.5f * kFillCell, z + 0.5f * kFillCell);
                         const auto g = top.height(p), o = own.height(p);
                         const bool done = p.x >= s0.x && p.x < s1.x && p.y >= s0.y && p.y < s1.y;
-                        const bool open = x < r1.x && !done && (wetAt(p, g) || (!o && (!g || *g > y)));
+                        const bool open = x < r1.x && !done && (wetAt(p, g) || (!o && (!g || *g > y)) || (rimFill && g && *g < y && channel(p)));
                         if (open && std::isnan(run)) run = x;
                         if (!open && !std::isnan(run)) quad({run, z}, {x, z + kFillCell}), run = std::numeric_limits<float>::quiet_NaN();
                         if (x >= r1.x) break;
@@ -1908,8 +1933,12 @@ void Renderer::uploadScene(const Scene& scene) {
         }
         // TB water zones (Scene::waterZones, the exe's 0x1000 trigger zones): the game measures depth from their top, so
         // a zone holding the level's own water layers (within 100 units of its top) is open water there even where
-        // the game draws only scattered additive patches over the bed (Granny pond): its top rectangle joins the fill,
-        // at the surface Bugs swims in. Zones over pits or without layers (kill / trigger volumes) are left alone.
+        // the game draws only scattered additive patches over the bed (Granny pond): its top joins the fill, at the
+        // surface Bugs swims in, in 50-unit cells over its bed and holes (cell, below): never a hard-edged rectangle
+        // hanging out past a cliff (AZQ01's upper rivers). Zones over pits or without layers (kill / trigger volumes)
+        // are left alone.
+        render::WaterSurfaces zoneGround;
+        if (!scene.waterZones.empty()) zoneGround.build(ground, {});
         for (const auto& z : scene.waterZones) {
             const float zy = z[0][1];
             auto inside = [&](glm::vec2 p) {  // convex quad, either winding
@@ -1934,16 +1963,43 @@ void Renderer::uploadScene(const Scene& scene) {
                     if (std::abs(10.0f * float(bin) - zy) < 100.0f) t += seaTint[bin], a += area;
                 fillTint = a > 0.0f ? t / a : glm::vec4(0.0f);
             }
-            const uint32_t n = uint32_t(fill.vertices.size());
             const glm::u8vec3 c(glm::round(seaColor / std::max(seaTotal, 1e-6f)));
-            for (const auto& q : z) fill.vertices.push_back({.pos = {q[0], zy, q[2]}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
-            const glm::vec3 e1(z[1][0] - z[0][0], 0.0f, z[1][2] - z[0][2]), e2(z[3][0] - z[0][0], 0.0f, z[3][2] - z[0][2]);
-            const bool up = glm::cross(e1, e2).y > 0.0f;  // facing up
-            for (uint32_t k : up ? std::initializer_list<uint32_t>{0, 1, 2, 0, 2, 3} : std::initializer_list<uint32_t>{0, 2, 1, 0, 3, 2})
-                fill.indices.push_back(n + k);
-            for (uint32_t k : {0u, 1u, 2u, 0u, 2u, 3u}) water.push_back({z[k][0], zy, z[k][2]});
+            constexpr float kZoneCell = 50.0f;
+            glm::vec2 zLo(std::numeric_limits<float>::max()), zHi(-std::numeric_limits<float>::max());
+            for (const auto& q : z) zLo = glm::min(zLo, glm::vec2(q[0], q[2])), zHi = glm::max(zHi, glm::vec2(q[0], q[2]));
+            // Over its bed (ground at most 3000 under the top: AZQ01's pond 2600 deep; ground over it hides the fill) or
+            // over a hole in it (TB draws pond / moat holes the backdrop shows through: AZQ01's lower pond): a void
+            // enclosed by such ground in all four directions within the zone, not the open air past a cliff's edge.
+            auto bedAt = [&](glm::vec2 p) { const auto g = zoneGround.height(p); return g && zy - *g < 3000.0f; };
+            auto cell = [&](glm::vec2 p) {
+                if (!inside(p)) return false;
+                if (zoneGround.height(p)) return bedAt(p);
+                for (const glm::vec2 d : {glm::vec2(1, 0), glm::vec2(-1, 0), glm::vec2(0, 1), glm::vec2(0, -1)}) {
+                    glm::vec2 q = p + d * 100.0f;
+                    while (inside(q) && !zoneGround.height(q)) q += d * 100.0f;
+                    if (!inside(q) || !bedAt(q)) return false;
+                }
+                return true;
+            };
+            size_t cells = 0;
+            for (float zz = zLo.y; zz < zHi.y; zz += kZoneCell) {
+                float run = std::numeric_limits<float>::quiet_NaN();
+                for (float x = zLo.x;; x += kZoneCell) {
+                    const bool open = x < zHi.x && cell({x + 0.5f * kZoneCell, zz + 0.5f * kZoneCell});
+                    if (open && std::isnan(run)) run = x;
+                    if (!open && !std::isnan(run)) {
+                        const uint32_t n = uint32_t(fill.vertices.size());
+                        for (const glm::vec2& q : {glm::vec2(run, zz), glm::vec2(x, zz), glm::vec2(x, zz + kZoneCell), glm::vec2(run, zz + kZoneCell)})
+                            fill.vertices.push_back({.pos = {q.x, zy, q.y}, .uv = {0, 0}, .rgba = {c.r, c.g, c.b, 255}});
+                        for (uint32_t k : {0u, 2u, 1u, 0u, 3u, 2u}) fill.indices.push_back(n + k);  // facing up
+                        for (uint32_t k : {0u, 1u, 2u, 0u, 2u, 3u}) water.push_back({fill.vertices[n + k].pos[0], zy, fill.vertices[n + k].pos[2]});
+                        run = std::numeric_limits<float>::quiet_NaN(), ++cells;
+                    }
+                    if (x >= zHi.x) break;
+                }
+            }
             if (std::getenv("BBTIME_VK_MATERIALS"))
-                std::println(stderr, "water zone fill y {:.0f} ({:.0f} {:.0f} .. {:.0f} {:.0f})", zy, z[0][0], z[0][2], z[2][0], z[2][2]);
+                std::println(stderr, "water zone fill y {:.0f} ({:.0f} {:.0f} .. {:.0f} {:.0f}) {} runs", zy, z[0][0], z[0][2], z[2][0], z[2][2], cells);
         }
         if (!fill.indices.empty()) {
             addMeshes({&fill, 1}, false, SIZE_MAX, verts, idx);
@@ -1956,6 +2012,7 @@ void Renderer::uploadScene(const Scene& scene) {
         waves_.reset();
         if (!waterSurf_.empty()) waves_ = std::make_unique<render::WaveField>([this](glm::vec2 p) { return waterSurf_.wet(p); });
         waterTracks_.clear();
+        under_ = 0.0f;
     }
     std::vector<TriRange> ranges;
     for (const GpuMesh& m : meshes_)
@@ -2487,6 +2544,30 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     const bool backdrop = enhanced && s.fog && s.fogEnd > s.fogStart && anyBack && (fsr || swapReadable_);
     if (water || backdrop) waterTargets(fsr ? fsrRender_ : extent_);
     const bool lightSet = lit || fsr || water; // set 1 (LightUbo) bound, smooth normals streamed
+    // Underwater (Enhanced water): the eye under the water surface over it (5 units of margin: the camera skims it; TB
+    // cameras follow Bugs down in a dive, Granny pond), eased in / out over ~0.3 s of water time. The look: fog into
+    // the water's colour by distance (every pipeline), texture wobble and caustics below the surface (lit ones,
+    // LightUbo::under); apps/bbtime muffles the audio by underwater().
+    const std::optional<float> surfaceY = waterOn_ ? waterSurf_.height({cam.pos.x, cam.pos.z}) : std::nullopt;
+    {
+        const float target = surfaceY && cam.pos.y < *surfaceY - 5.0f ? 1.0f : 0.0f;
+        under_ += (target - under_) * (1.0f - std::exp(-10.0f * std::clamp(waterTime_ - underTime_, 0.0f, 0.25f)));
+        if (std::abs(target - under_) < 1e-3f) under_ = target;
+        underTime_ = waterTime_;
+    }
+    const bool under = under_ > 0.0f;
+    // Fog under water: from the eye out to 3500 (~12 Bugs) at full depth, from the scene's range (or none) above. Its
+    // colour: the water's (the fill's GpuMesh::tint, hue kept at a deep-water brightness), else stylised teal.
+    glm::vec2 underFog(0.0f);
+    glm::vec3 underColor(0.05f, 0.22f, 0.26f);
+    if (under) {
+        const glm::vec2 above = s.fog && s.fogEnd > s.fogStart ? glm::vec2(s.fogStart, s.fogEnd) : glm::vec2(s.zFar, s.zFar * 1.01f);
+        underFog = glm::mix(above, glm::vec2(0.0f, 3500.0f), under_);
+        if (seaFill_ < meshes_.size()) {
+            const glm::vec3 t = glm::unpackUnorm4x8(meshes_[seaFill_].tint);
+            if (const float m = std::max({t.r, t.g, t.b}); m > 1e-3f) underColor = glm::mix(underColor, t / m * 0.3f, 0.5f);
+        }
+    }
     float jitter[2] = {0.0f, 0.0f};
     glm::mat4 jit(1.0f);
     if (fsr) { // sub-pixel jitter of FSR's sequence, as a clip-space translation (NDC y up = pixel y down)
@@ -2510,6 +2591,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
     if (backdrop) pc.fogColorScale = glm::vec4(float(backdropSlot_), s.hazeTop, horizonV, pc.fogColorScale.a);
     pc.texGamma = s.texGamma(texGamma_);
     pc.fog = s.fog ? glm::vec2(s.fogStart, s.fogEnd) : glm::vec2(0.0f);
+    if (under) pc.fogColorScale = glm::vec4(glm::mix(glm::vec3(s.fogColor[0], s.fogColor[1], s.fogColor[2]), underColor, under_), pc.fogColorScale.a);
     pc.samp = original ? (linearOriginal_ ? kSampLinear : kSampNearest) : kSampTrilinear;
     // Scene geometry lives in device-local buffers; actor geometry is streamed into this frame's ring.
     VkBuffer geomV[2] = {sceneVbo_.buf, VK_NULL_HANDLE}, geomI[2] = {sceneIbo_.buf, VK_NULL_HANDLE};
@@ -2580,6 +2662,7 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
             L.water = glm::vec4(waterTime_, 1.0f / float(waterExtent_.width), 1.0f / float(waterExtent_.height), (cartoon ? 1.0f : 0.0f) + (bgLayer ? 2.0f : 0.0f));
             L.waterSlots = glm::uvec4(waterColorSlot_, waterDepthSlot_, waveSlot_, waterNormalSlot_);
         }
+        if (under) L.under = glm::vec4(under_, surfaceY.value_or(cam.pos.y), waterTime_, 0.0f);  // easing out: no surface over the eye
 
         if (mode == Shadows::Map) {
             // Cascades: bounding sphere of each view-frustum slice (rotation-invariant radius), light-space centre snapped
@@ -2833,11 +2916,12 @@ void Renderer::drawScene(const Camera& cam, const Settings& s) {
         if (original && m.background) pc.flags |= 512u;     // scene.vert: bblit2.exe's CPU projection (sky domes)
         pc.tex = tex;
         if (!w && !original && m.blend != Blend::Opaque && m.blend != Blend::AlphaTest && m.unitUv) pc.flags |= 4096u;
-        if (backdrop && !m.background) pc.flags |= 8192u;
-        if (haze) pc.flags |= 16384u | (m.background ? 32768u : 0u) | uint32_t(std::lround(s.haze * 100.0f)) << 16;
+        if (backdrop && !m.background && !under) pc.flags |= 8192u;
+        if (haze && !under) pc.flags |= 16384u | (m.background ? 32768u : 0u) | uint32_t(std::lround(s.haze * 100.0f)) << 16;
         // Fog: none on the background layer (TB has no fog; the dome sits beyond any fog range), Mesh::fogEnd in
         // Original Fidelity (LiT per-object D), else the scene's.
-        pc.fog = haze && m.background                   ? glm::vec2(horizonV, hazeBand)
+        pc.fog = under                                   ? underFog
+                 : haze && m.background                   ? glm::vec2(horizonV, hazeBand)
                  : !s.fog || m.background                 ? glm::vec2(0.0f)
                  : original && m.fogEnd > 0.0f ? glm::vec2(0.75f * m.fogEnd, m.fogEnd)
                                                : glm::vec2(s.fogStart, s.fogEnd);

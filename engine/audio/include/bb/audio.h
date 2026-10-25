@@ -134,6 +134,9 @@ public:
     void sfx(const SfxCmd& c);         // game mixer command (bb::game::Sfx::cmds)
     void stopSfx();                    // stop every mixer voice (level change)
     void update();                     // refill music buffers, reap finished sound effects
+    // Enhanced underwater (0 dry .. 1 submerged): the game's voices and the music through an EFX low-pass (high
+    // frequencies down to 8% at 1, OpenAL Soft's 5 kHz reference) and 3 dB quieter. No-op without ALC_EXT_EFX.
+    void setUnderwater(float amount);
 
 private:
     static constexpr int kBuffers = 4;
@@ -150,6 +153,9 @@ private:
     struct Voice { unsigned src, buf; };
     std::vector<Voice> sfx_;
     std::map<uint32_t, Voice> keyed_;  // mixer voices by SfxCmd::key
+    unsigned lowpass_ = 0;             // EFX filter (0 = no EFX); underwater_ = its last setUnderwater amount
+    float underwater_ = 0.0f;
+    void filter(unsigned src) const;   // the low-pass on src while underwater_ > 0, else none
 };
 
 } // namespace bb

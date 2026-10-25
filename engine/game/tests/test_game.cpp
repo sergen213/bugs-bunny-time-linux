@@ -1466,6 +1466,30 @@ void testLinksLs01(const std::filesystem::path& dir) {
     std::printf("LS01 rand stream and texture links (time-machine lights, vortex) match the original every counter to 3001\n");
 }
 
+// Merlin's mallet (template 196, type 14 held by Bugs: flags8 2, carried step 188 flagsA 0x420001, +0x16 = 1): with
+// S[67] & 4 director 58 hands it out; R1 picks it up (state 71), □ swings it (state 69, move 75 flagsA 0x14001). The
+// swing hits the target 29 in front (flagsB 8, objects only) through the mallet's +0x58 (its packet-10 part through
+// Bugs' hand chain) while his attack runs (0x440120: flags14 0x6000000) -> state 3 -> S[54] |= 4 (contact = 196).
+void testMalletMerlin(const std::filesystem::path& file) {
+    const BzeFile bze = loadBze(file);
+    const Scene scene = buildLitScene(bze, "MERLIN");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false;
+    w.loadUpdate();
+    w.start({14780, -1120, 10560}, 2048, -1);
+    w.S[67] |= 4;
+    int hitAt = -1;
+    for (int t = 0; t < 90; ++t) {
+        const uint16_t raw = t >= 20 && t < 24 ? 0x08 : t >= 60 && t < 64 ? 0x80 : 0;  // R1 pick up, □ swing
+        if (t == 40) w.p.pos = {14783, -1080, 10500};  // 300 from the target, on the ground
+        w.tick({.buttons = raw});
+        if (t == 30) assert(w.p.rider >= 0 && w.actors[size_t(w.p.rider)].entityId == 196);
+        if (hitAt < 0 && (w.S[54] & 4)) hitAt = t;
+    }
+    assert(w.p.state == 69 && hitAt == 76);
+    std::printf("Merlin: the swung mallet hits the target (S[54] & 4 at tick %d)\n", hitAt);
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     testPad();
@@ -1535,6 +1559,7 @@ int main() {
     testFocusL03acom(file.parent_path() / "L03ACOM.bze");
     testCarriedLs01(file.parent_path());
     testGateLs01(file.parent_path());
+    testMalletMerlin(file.parent_path() / "Merlin.bze");
     {  // LB02 (/b53) move list in memory (Wine, local/w13/lit/lb02_moves.txt): 26 nodes 28 apart, head = move 2; the
        // trigger-0x2000 "move" at head + 2 (state 1's first move id) reads u16 +6 = 2, byte +8 = 2 (no 0x40).
         const BzeFile b = loadBze(file.parent_path() / "LB02.bze");

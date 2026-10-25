@@ -544,6 +544,7 @@ private:
     int overlapActor(const Mover& s, int32_t si, int32_t sp, int32_t sr, const std::array<int16_t, 6>& box, uint32_t mask) const;
     // 0x433380: the first collision actor of `mask` without `exclude` (not si) whose box holds point q.
     int pointHit(const V3& q, uint32_t mask, uint32_t exclude, int32_t si) const;
+    int boxHit(size_t i) const;  // 0x433190 (lit_actors.cpp)
     void moveActor(Mover& m, V3& delta, Ground& r, int16_t boxTop);
     void arcTick(Mover& m);
     void cameraReset();
