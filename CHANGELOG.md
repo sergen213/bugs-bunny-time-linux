@@ -3,6 +3,13 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.12.2 — 2026-10-25 (LiT era travel from the time machine)
+
+- LiT: travelling to an era from the Nowhere time machine works again. After the vortex fly-out the hub script moves
+  Bugs to the era's hub (0x4379b0), which in the original also takes him off his carrier; bbtime kept him attached
+  to the time machine, so he snapped back into the vortex and floated in space (every era but Nowhere/CCMERLIN). The
+  same applies to zone-trigger and actor-item teleports. Test `game.lit` (`testEraLs01`).
+
 ## 0.12.1 — 2026-10-25 (Wave 15: CCINTRO camera, LiT zone-split world meshes, mallet, title logo, TB rivers, underwater)
 
 - LiT: the new-game intro (CCINTRO) plays again. 0.12.0 required a camera node's actor to pass bbtime's zone culling,

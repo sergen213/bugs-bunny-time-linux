@@ -591,6 +591,7 @@ private:
     void attach(LitActor& c, int32_t parent, bool hand);
     void followParent(LitActor& a, const V3& move);
     void detach(LitActor& a);
+    void unsupport();  // 0x4379b0 head: Bugs off his platform / rope / carrier
     uint32_t animate(LitActor& a, uint16_t anim, uint32_t mode);
 
     // lit_overlay.cpp

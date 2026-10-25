@@ -1431,6 +1431,21 @@ void testGateLs01(const std::filesystem::path& dir) {
     std::printf("LS01 clock-gate children collapse under anim 270 and show 1x clock for era 1 as the original\n");
 }
 
+// LS01 era 1 with one clock: ✕ flies the time machine into the vortex, then the director moves Bugs to the Stone Age
+// hub (0x4379b0) — which also drops him off the carrier. With the carrier kept he snapped back into the vortex.
+void testEraLs01(const std::filesystem::path& dir) {
+    const BzeFile bze = loadBze(dir / "LS01.bze");
+    const Scene scene = buildLitScene(bze, "LS01");
+    LitWorld w = LitWorld::load(bze, &scene);
+    w.sfx.device = false, w.level = 3;
+    w.loadUpdate();
+    w.G[5] = 1;
+    for (int t = 0; t < 760; ++t)
+        w.tick({.buttons = uint16_t(t >= 480 && t < 482 ? PadRight : t >= 560 && t < 562 ? PadCross : 0)});
+    assert(w.p.carrier < 0 && w.p.zone == 1 && w.p.pos.x == 2128 && std::abs(w.p.pos.y) <= 2 && w.nextLevel < 0);
+    std::printf("LS01 era 1: Bugs leaves the time machine for the Stone Age hub\n");
+}
+
 // LS01 texture links and rand (wave 13; Proton-GE /b03, local/w13/lit/rand/{ls01_a.pkl.gz,ls01_alias.pkl.gz}): the
 // only rand() caller in LS01 is 0x4455e0's probability gate of type-2 actor 333 (2 draws a tick until one passes);
 // the flashing time-machine lights and the vortex are texture links 231 … 442 that the type-2 / type-20 actors write
@@ -1559,6 +1574,7 @@ int main() {
     testFocusL03acom(file.parent_path() / "L03ACOM.bze");
     testCarriedLs01(file.parent_path());
     testGateLs01(file.parent_path());
+    testEraLs01(file.parent_path());
     testMalletMerlin(file.parent_path() / "Merlin.bze");
     {  // LB02 (/b53) move list in memory (Wine, local/w13/lit/lb02_moves.txt): 26 nodes 28 apart, head = move 2; the
        // trigger-0x2000 "move" at head + 2 (state 1's first move id) reads u16 +6 = 2, byte +8 = 2 (no 0x40).

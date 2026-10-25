@@ -547,6 +547,17 @@ void LitWorld::detach(LitActor& a) {
     a.parent = -1;
 }
 
+// 0x4379b0 head: Bugs off his +0x70 support — platform, rope or carrier (whose +0x6c is cleared) — back to his own
+// root coordinate (+0xc0 = +0xcc), flags14 & ~0x14. A carrier left set re-attached him the next tick (LS01 era 1–5:
+// the director moves him from the time machine to the era's hub, he snapped back into the vortex).
+void LitWorld::unsupport() {
+    if (p.carrier >= 0 && actors[size_t(p.carrier)].rider == -2) actors[size_t(p.carrier)].rider = -1;
+    p.carrier = -1;
+    p.carrierPart = -1;
+    p.platform = p.rope = -1;
+    p.flags14 &= ~0x14u;
+}
+
 // ---- 0x447d40: activation and update order ----
 
 void LitWorld::actorsTick() {
@@ -1469,8 +1480,7 @@ void LitWorld::type14(size_t i) {
                 if (f & 0x800) {  // 0x4379b0: Bugs to the hand (+0x58) if any, else to self
                     p.pos = a.handSet ? a.hand : a.pos;
                     p.yaw = a.yaw;
-                    p.platform = p.rope = -1;
-                    p.flags14 &= ~0x14u;
+                    unsupport();
                     cameraSnap(p.pos);
                 }
                 if ((f & 0x4000) && a.rider == -2) {  // release Bugs at his attached world position = the carrier's
@@ -1651,7 +1661,7 @@ void LitWorld::director(size_t i) {
         LitActor& b = actors[i];
         if (f & 0x4000000)
             if (const int t = findActor(uint16_t(it.p2)); t >= 0) actors[size_t(t)].flags14 |= 0x100;
-        if (f & 0x800) { p.yaw = b.yaw; p.pos = b.pos; p.platform = p.rope = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x80000000; cameraSnap(p.pos); }
+        if (f & 0x800) { p.yaw = b.yaw; p.pos = b.pos; unsupport(); p.flags14 |= 0x80000000; cameraSnap(p.pos); }
         if (f & 0x80000000) forceState(uint16_t(it.p2));
         if (f & 0x80000) nextLevel = it.p1;
         if (f & 0x10000) { b.flags14 |= 0x100; return; }

@@ -822,7 +822,7 @@ void LitWorld::zoneTriggers(Mover& m, LitActor* self) {
             if (e.item.act) act(e.item, self);
             const V3 arg{e.arg[0], e.arg[1], e.arg[2]};
             if (e.flags & 0x80000000) forceState(uint16_t(e.arg[0]));
-            if (e.flags & 0x800) { p.pos = arg; p.platform = p.rope = -1; p.flags14 &= ~0x14u; cameraSnap(arg); }  // 0x4379b0
+            if (e.flags & 0x800) { p.pos = arg; unsupport(); cameraSnap(arg); }  // 0x4379b0
             if (e.flags & 0x40000000) {  // teleport self
                 m.pos = arg;
                 if (!self && (p.platform >= 0 || p.rope >= 0)) { p.platform = p.rope = -1; p.flags14 = (p.flags14 & ~0x14u) | 0x202; }
