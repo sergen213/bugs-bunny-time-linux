@@ -1,7 +1,7 @@
 # Modding (textures, models, animations, sounds, music)
 
 Status: **Implemented**, **Tested** (`core.mods` ctest; export → edit → mod round trip on LiT L01A and TB ARCA01 in
-both renderers, screenshots in `local/shots/w9mod/`). Mods change only what you see and hear; with no mod enabled
+both renderers). Mods change only what you see and hear; with no mod enabled
 the game is byte-for-byte the unmodded one (verified pixel-identical, Vulkan and OpenGL).
 
 A mod is a folder of replacement files. You get the originals to edit from the **exporter**, which writes them with

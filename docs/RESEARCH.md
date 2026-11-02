@@ -2,7 +2,7 @@
 
 Status legend (per project rules): **Research Required** / **Designed** / **Implemented** / **Tested** / **Verified Against Original Behavior**.
 Confidence: **High** = read directly in source/binary/data; **Med** = single secondary source or partial evidence; **Low** = inference.
-`[LOCAL]` = verified by us against the files under `/mnt/1st4TB/BugsBunny/original` (read-only). `[INFERENCE]` = our reading, not stated by a source.
+`[LOCAL]` = verified by us against our own copies of the original game files (read-only). `[INFERENCE]` = our reading, not stated by a source.
 
 No third-party code is copied into this repository. Everything below is facts (addresses, sizes, field layouts, behaviour), restated in our words.
 
@@ -382,9 +382,9 @@ See [research/web.md](research/web.md) for full detail and URLs. Key points:
 
 ## 5. TB widescreen fix archive `[LOCAL]` (High)
 
-- `/mnt/1st4TB/BugsBunny/Time Busters Widescreen V1.7z` is an encrypted RAR (unrar: "RAR 1.5" block format, method m5:17, CRC 9CC729C0).
+- `Time Busters Widescreen V1.7z` is an encrypted RAR (unrar: "RAR 1.5" block format, method m5:17, CRC 9CC729C0).
 - The archive comment, read with `unrar l -v`, says: "File origin : http://www.wsgf.org / Hosted by : https://pcgamingwiki.com / 7z Archive Password : **pcgw**". The same password is published on PCGW file 1705. No brute forcing was done.
-- Extracted to `/mnt/1st4TB/BugsBunny/original/ws/Time Busters Widescreen V1.CT`: 714 B, dated 2019-02-11, Cheat Engine table version 18. It has two entries, both `Byte` at static addresses, with no stored values:
+- Extracted to `Time Busters Widescreen V1.CT`: 714 B, dated 2019-02-11, Cheat Engine table version 18. It has two entries, both `Byte` at static addresses, with no stored values:
   - "Horizontal" @ **0x00639A8D**
   - "Vertical" @ **0x00639A8F**
 - Both addresses are in `bblit2.exe` `.data` BSS (VA 0x484000 + VirtualSize 0x1B949C > raw 0x4D000).

@@ -75,7 +75,7 @@ title slot-menu panel (navy, two gold rules) — the same palette as the collect
 (`ScrnBgEn.bmp`, `english.bmp`) are the game cards on the Games page; clicking one selects what Play starts (again:
 collection menu). Without an import it paints the spiral as rings, uses the system font and text-only buttons;
 the wizard re-dresses it on Finish. Not used: the LiT overlay glyph font (it lives in `TITLE.bze` and needs the
-game's level loader). Screenshots: `local/shots/w9launcher/`.
+game's level loader).
 
 ## Pages
 
@@ -98,12 +98,12 @@ game's level loader). Screenshots: `local/shots/w9launcher/`.
   after a confirmation), "Export assets…" (game / level / kind → `bbtime-modkit export`, next to the launcher or in
   the build tree), "Refresh". Below: the selected mod's details and validation (`bb::mods::validate`, run in the
   background; it decodes the named levels to check texture ids) and the conflicts of the enabled set (keys that
-  several enabled mods provide, and which one wins). Screenshot: `local/shots/w9mod/launcher_mods_page.png`.
+  several enabled mods provide, and which one wins).
   The **3-D model viewer** tab lists the selected mod's `models/` and `animations/` glTF files and, after "Show
   originals" (game + level), that level's original models (exported once into the cache above; originals the mod
   replaces are marked). Selecting one shows it textured (base colour texture × vertex colour, nearest sampling, as
   the game): drag = orbit, wheel = zoom, double-click = reset. Static rest / bind pose only (no animation, no
-  skinning). `QOpenGLWidget`, `bb::mods::loadPreview`. Screenshot: `local/shots/w10/viewer/`.
+  skinning). `QOpenGLWidget`, `bb::mods::loadPreview`.
   **Replace model…** (button or right-click) copies a picked `.gltf` / `.glb` into the selected mod at the
   selected model's path (`models/<game>/<model id>`, `models/<game>/<level>/<asset id>` or `…/world`, the
   extension of the picked file; a file of the other format for the same model is removed) together with the
