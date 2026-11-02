@@ -3,6 +3,12 @@
 All notable changes to bbtime. Versions follow `MAJOR.MINOR.PATCH` (the updater refuses anything that is not
 strictly newer). Entries before 0.1.0 are reconstructed from `git log`.
 
+## 0.12.4 — 2026-11-02 (release signing key rotation)
+
+- Security: release signing key rotated. This update is signed with the previous key and installs the new key;
+  later updates are signed with the new key only. Please update to this version to keep receiving automatic updates.
+- License: the project is now source-available, all rights reserved (see `LICENSE`).
+
 ## 0.12.3 — 2026-10-25 (LiT hub return after Quit, Enhanced zone draw distance)
 
 - LiT: quitting a level back to the hub no longer leaves Merlin stuck in front of another era. The ticks of a level

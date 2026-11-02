@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(bbtime VERSION 0.12.3 LANGUAGES C CXX)
+project(bbtime VERSION 0.12.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

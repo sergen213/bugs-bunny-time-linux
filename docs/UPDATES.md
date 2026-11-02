@@ -9,9 +9,16 @@ URL field. `settings.ini` `update_url` overrides it for tests/development only; 
 ## Trust model
 
 * One Ed25519 release key. Public key: `tools/release/bbtime-update.pub` (base64 of the raw 32 bytes), baked into
-  `bb_updater` at configure time (`-DBBTIME_UPDATE_PUBKEY_FILE=` to override). The private key was generated with
-  `keygen.py` on the development machine at `~/.local/share/bbtime-release/update-ed25519.key` (PKCS#8 PEM,
-  mode 0600) and must never enter the repository. Losing it means shipping a launcher with a new public key.
+  `bb_updater` at configure time (`-DBBTIME_UPDATE_PUBKEY_FILE=` to override). The private key (PKCS#8 PEM from
+  `keygen.py`) is kept outside the repository (mode 0600) and must never enter it; `build_appimage.sh` reads it from
+  `BBTIME_RELEASE_KEY`. Losing it means shipping a launcher with a new public key.
+* Key rotation (done once, in 0.12.4): an installed launcher only trusts the key it was built with, so the new key
+  ships in a transition release whose launcher (AppImage artifact `bbtime-launcher`) embeds the **new** public key
+  while its `manifest.json` is signed with the **old** key. Older launchers verify and install it, then hand off to
+  it; from then on only the new key is trusted and every later release is signed with it. The retired key is kept
+  offline, not deleted. Launchers without the `bbtime-launcher` artifact (0.8.0 and older) never hand off, so their
+  users must download the new AppImage by hand; a rollback past the transition release brings the old key back
+  only if the user's AppImage could not be replaced in place (see "Launcher restart and hand-off").
 * `manifest.json` is signed byte-for-byte; `manifest.json.sig` = base64 of the raw 64-byte signature. Verification
   is libsodium `crypto_sign_verify_detached` (RFC 8032 Ed25519; Python `cryptography` signs, same algorithm). The
   signature is checked **before** the JSON is parsed.
