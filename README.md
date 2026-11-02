@@ -81,7 +81,6 @@ Release packaging: [docs/UPDATES.md](docs/UPDATES.md).
 - [docs/RESEARCH.md](docs/RESEARCH.md) — prior art, executables and original data.
 - [docs/formats/](docs/formats/) — file formats: [BZE](docs/formats/BZE.md), [models](docs/formats/MODELS.md), [textures](docs/formats/TEXTURES.md), [audio](docs/formats/AUDIO_XA.md), [TB levels](docs/formats/TB_LEVELS.md), [LiT saves](docs/formats/SAVE_LIT.md), [TB saves](docs/formats/SAVE_TB.md).
 - [docs/re/](docs/re/) — reverse-engineering notes: [Lost in Time](docs/re/LOST_IN_TIME.md), [Time Busters](docs/re/TIME_BUSTERS.md), [engine comparison](docs/re/ENGINE_COMPARISON.md), [runtime reference](docs/re/RUNTIME_REFERENCE.md).
-- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — development environment.
 
 ## Contributing
 

@@ -8,14 +8,14 @@ Status vocabulary: Research Required → Designed → Implemented → Tested →
 
 ## Milestones
 
-1. **Environment and audit** — done (`ENVIRONMENT.md`, `EXISTING_PROJECT_AUDIT.md`).
+1. **Environment and audit** — done.
 2. **Existing-work investigation** — done (`RESEARCH.md`: BBLIT-Remaster, BugsDecomp, community fixes).
 3. **Asset pipeline** — BZE container/LZSS/importer done for both games; LiT textures + world geometry decoded; TB geometry in progress.
 4. **First native renderer** — SDL3 + GL 4.6 collection app done; real LiT level rendering in progress.
 5. **Core gameplay** — next: 30 Hz fixed tick (verified constant), player controller, collision, camera, entities from `docs/re/GAMEPLAY.md`.
 6. **Playable progression** — one LiT era end-to-end (L01 Wild West), then TB with Bugs/Taz switching and two-player keyboard co-op (TB README documents it; split-screen code exists but is unreachable in the shipped build).
 7. **Vulkan + enhancements** — second backend sharing `bb::Scene`; optional RT shadows/reflections (RADV exposes `VK_KHR_ray_tracing_pipeline`/`ray_query`); frame interpolation over the 30 Hz tick.
-8. **Launcher + release** — Qt 6 launcher (import wizard, validation, backend/graphics/input, save backup), Ed25519-signed update manifests (pattern from CitroenC4Robot/Kabus 22 per audit), AppImage.
+8. **Launcher + release** — Qt 6 launcher (import wizard, validation, backend/graphics/input, save backup), Ed25519-signed update manifests (pattern from the author's Kabus 22 port), AppImage.
 
 ## Wave 9
 
@@ -147,7 +147,7 @@ Vulkan backend; Original Fidelity, the GL backend and the 4:3 3-D menus (`frame4
 ## FSR 3.1.4 upscaling and frame generation (Vulkan)
 
 AMD FidelityFX SDK v1.1.4 subset vendored in `third_party/fidelityfx-sdk` exactly as in the ETI Yami port
-(`/mnt/1st4TB/etiyami`: same files, licence, local patches and `yami/` glue; `third_party/CMakeLists.txt` compiles
+(same files, licence, local patches and `yami/` glue; `third_party/CMakeLists.txt` compiles
 only the FP32 / wave32 / render-resolution-unjittered-motion-vector permutations with glslangValidator (else glslc
 `-O -g`, which keeps the resource names the SDK binds by), and `tools/embed_fsr_shaders.py` generates the blob accessor). `engine/render_vk/src/fsr.{h,cpp}` holds the
 contexts; the renderer owns every image.
